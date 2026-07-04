@@ -195,6 +195,18 @@ const navItems = [
   { id: "settings", label: "设置", icon: "settings" }
 ] as const;
 
+const providerOptions = [
+  { value: "openai", label: "OpenAI" },
+  { value: "anthropic", label: "Anthropic / Claude" },
+  { value: "google", label: "Google Gemini" },
+  { value: "deepseek", label: "DeepSeek" },
+  { value: "openrouter", label: "OpenRouter" },
+  { value: "groq", label: "Groq" },
+  { value: "siliconflow", label: "SiliconFlow" },
+  { value: "moonshot", label: "Moonshot" },
+  { value: "compatible", label: "OpenAI Compatible" }
+];
+
 function formatDate(value: string) {
   if (!value) return "未使用";
   const date = new Date(value);
@@ -236,6 +248,27 @@ async function copyText(value: string) {
   textarea.select();
   document.execCommand("copy");
   document.body.removeChild(textarea);
+}
+
+function currentOrigin() {
+  return window.location.origin;
+}
+
+function defaultDiscordRedirectUri() {
+  return `${currentOrigin()}/api/auth/discord/callback`;
+}
+
+function defaultAuthSuccessUrl() {
+  return `${currentOrigin()}/`;
+}
+
+function withBrowserDiscordDefaults(settings: DiscordSettings): DiscordSettings {
+  return {
+    ...settings,
+    redirectUri: settings.redirectUri && !settings.redirectUri.includes("localhost") ? settings.redirectUri : defaultDiscordRedirectUri(),
+    authSuccessUrl: settings.authSuccessUrl && !settings.authSuccessUrl.includes("localhost") ? settings.authSuccessUrl : defaultAuthSuccessUrl(),
+    sessionTtlHours: settings.sessionTtlHours || 168
+  };
 }
 
 function App() {
@@ -519,7 +552,7 @@ function App() {
         {active === "models" && <ModelsView models={models} onCopy={copyAndToast} />}
         {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} />}
         {active === "logs" && <LogsView logs={logs} />}
-        {active === "settings" && <SettingsView />}
+        {active === "settings" && <SettingsView models={models} channels={channels} />}
       </main>
 
       {toast && <div className="toast">{toast}</div>}
@@ -1250,18 +1283,21 @@ function ChannelsView({
 }
 
 function ChannelEditor({ channel, onUpdate }: { channel: Channel; onUpdate: (id: string, patch: ChannelPatch) => void }) {
+  const [provider, setProvider] = useState(channel.provider);
   const [baseUrl, setBaseUrl] = useState(channel.baseUrl);
   const [models, setModels] = useState(channel.models.join(", "));
   const [upstreamApiKey, setUpstreamApiKey] = useState("");
 
   useEffect(() => {
+    setProvider(channel.provider);
     setBaseUrl(channel.baseUrl);
     setModels(channel.models.join(", "));
     setUpstreamApiKey("");
-  }, [channel.id, channel.baseUrl, channel.models]);
+  }, [channel.id, channel.provider, channel.baseUrl, channel.models]);
 
   function save() {
     const patch: ChannelPatch = {
+      provider,
       baseUrl,
       models: models
         .split(",")
@@ -1280,7 +1316,15 @@ function ChannelEditor({ channel, onUpdate }: { channel: Channel; onUpdate: (id:
         <strong>{channel.name}</strong>
         <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://provider.example/v1" />
       </span>
-      <span>{channel.provider}</span>
+      <span>
+        <select value={provider} onChange={(event) => setProvider(event.target.value)}>
+          {providerOptions.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </span>
       <span>{channel.priority}</span>
       <span>
         <input value={models} onChange={(event) => setModels(event.target.value)} placeholder="gpt-5.6, ds" />
@@ -1336,7 +1380,7 @@ function LogsView({ logs }: { logs: RequestLog[] }) {
   );
 }
 
-function SettingsView() {
+function SettingsView({ models, channels }: { models: ModelItem[]; channels: Channel[] }) {
   const [discord, setDiscord] = useState<DiscordSettings | null>(null);
   const [registrationEnabled, setRegistrationEnabled] = useState<boolean | null>(null);
   const [account, setAccount] = useState<AccountProfile | null>(null);
@@ -1349,6 +1393,8 @@ function SettingsView() {
   const [clientSecret, setClientSecret] = useState("");
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
+  const defaultModel = models.find((model) => model.recommended && model.status === "available")?.id || models.find((model) => model.status === "available")?.id || "未配置";
+  const activeChannels = channels.filter((channel) => channel.status !== "disabled").length;
 
   useEffect(() => {
     Promise.all([
@@ -1357,7 +1403,7 @@ function SettingsView() {
       fetchJson<{ account: AccountProfile; user: User }>("/api/account/me")
     ])
       .then(([discordData, authData, accountData]) => {
-        setDiscord(discordData.discord);
+        setDiscord(withBrowserDiscordDefaults(discordData.discord));
         setRegistrationEnabled(authData.auth.registrationEnabled);
         setAccount(accountData.account);
         setAccountUsername(accountData.account?.username || "");
@@ -1388,11 +1434,12 @@ function SettingsView() {
     setSaving(true);
     setMessage("");
     try {
+      const nextDiscord = withBrowserDiscordDefaults(discord);
       const data = await fetchJson<{ discord: DiscordSettings }>("/api/settings/discord", {
         method: "PATCH",
-        body: JSON.stringify({ ...discord, clientSecret })
+        body: JSON.stringify({ ...nextDiscord, clientSecret })
       });
-      setDiscord(data.discord);
+      setDiscord(withBrowserDiscordDefaults(data.discord));
       setClientSecret("");
       setMessage("Discord 配置已保存");
     } catch (error) {
@@ -1431,10 +1478,10 @@ function SettingsView() {
     <div className="settings-layout">
       <Panel title="系统设置">
         <div className="settings-group">
-          <Setting label="网关模式" value="OpenAI Compatible" />
-          <Setting label="默认模型" value="gpt-5.6" />
-          <Setting label="请求限流" value="内置启用" />
-          <Setting label="审计日志" value="内置启用" />
+          <Setting label="接口兼容" value="OpenAI API" />
+          <Setting label="当前默认模型" value={defaultModel} />
+          <Setting label="已配置渠道" value={`${channels.length} 个，${activeChannels} 个启用`} />
+          <Setting label="可选供应商" value={`${providerOptions.length} 种`} />
         </div>
       </Panel>
 

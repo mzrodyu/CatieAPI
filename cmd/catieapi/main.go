@@ -328,12 +328,12 @@ func NewServer() *Server {
 		httpClient:            &http.Client{Timeout: time.Duration(envInt("UPSTREAM_TIMEOUT_SECONDS", 60)) * time.Second},
 		discordClientID:       env("DISCORD_CLIENT_ID", ""),
 		discordClientSecret:   env("DISCORD_CLIENT_SECRET", ""),
-		discordRedirectURI:    env("DISCORD_REDIRECT_URI", "http://localhost:8787/api/auth/discord/callback"),
+		discordRedirectURI:    env("DISCORD_REDIRECT_URI", ""),
 		discordAllowedGuildID: env("DISCORD_ALLOWED_GUILD_ID", ""),
 		discordAllowedRoleID:  env("DISCORD_ALLOWED_ROLE_ID", ""),
 		discordOAuthBase:      env("DISCORD_OAUTH_BASE", "https://discord.com/api/oauth2"),
 		discordAPIBase:        env("DISCORD_API_BASE", "https://discord.com/api/v10"),
-		authSuccessURL:        env("AUTH_SUCCESS_URL", "http://localhost:5173/"),
+		authSuccessURL:        env("AUTH_SUCCESS_URL", ""),
 		sessionTTL:            time.Duration(envInt("SESSION_TTL_HOURS", 168)) * time.Hour,
 		rateLimitBuckets:      map[string]int{},
 		idempotencyCache:      map[string]CachedResponse{},
@@ -756,7 +756,7 @@ func (s *Server) updateAuthSettings(c *gin.Context) {
 func (s *Server) getDiscordSettings(c *gin.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c.JSON(http.StatusOK, gin.H{"discord": s.publicDiscordSettingsLocked()})
+	c.JSON(http.StatusOK, gin.H{"discord": s.publicDiscordSettingsLocked(requestOrigin(c))})
 }
 
 func (s *Server) updateDiscordSettings(c *gin.Context) {
@@ -782,6 +782,12 @@ func (s *Server) updateDiscordSettings(c *gin.Context) {
 	body.AllowedGuildID = strings.TrimSpace(body.AllowedGuildID)
 	body.AllowedRoleID = strings.TrimSpace(body.AllowedRoleID)
 	body.AuthSuccessURL = strings.TrimSpace(body.AuthSuccessURL)
+	if body.RedirectURI == "" {
+		body.RedirectURI = defaultDiscordRedirectURI(c)
+	}
+	if body.AuthSuccessURL == "" {
+		body.AuthSuccessURL = requestOrigin(c) + "/"
+	}
 	if body.SessionTTLHours == 0 {
 		body.SessionTTLHours = 168
 	}
@@ -875,38 +881,54 @@ func (s *Server) updateDiscordSettings(c *gin.Context) {
 	}
 	s.saveStateLocked()
 
-	c.JSON(http.StatusOK, gin.H{"discord": s.publicDiscordSettingsLocked()})
+	c.JSON(http.StatusOK, gin.H{"discord": s.publicDiscordSettingsLocked(requestOrigin(c))})
 }
 
-func (s *Server) publicDiscordSettingsLocked() PublicDiscordSettings {
+func (s *Server) publicDiscordSettingsLocked(origin string) PublicDiscordSettings {
 	settings := s.state.Settings.Discord
 	enabled := s.discordLoginEnabledLocked()
+	redirectURI := s.discordRedirectURI
+	authSuccessURL := s.authSuccessURL
+	if redirectURI == "" {
+		redirectURI = origin + "/api/auth/discord/callback"
+	}
+	if authSuccessURL == "" {
+		authSuccessURL = origin + "/"
+	}
 	if !settings.Managed {
 		return PublicDiscordSettings{
 			Enabled:         enabled,
 			ClientID:        s.discordClientID,
 			ClientSecretSet: s.discordClientSecret != "",
-			RedirectURI:     s.discordRedirectURI,
+			RedirectURI:     redirectURI,
 			AllowedGuildID:  s.discordAllowedGuildID,
 			AllowedRoleID:   s.discordAllowedRoleID,
-			AuthSuccessURL:  s.authSuccessURL,
+			AuthSuccessURL:  authSuccessURL,
 			SessionTTLHours: int(s.sessionTTL.Hours()),
 		}
+	}
+	redirectURI = settings.RedirectURI
+	authSuccessURL = settings.AuthSuccessURL
+	if redirectURI == "" {
+		redirectURI = origin + "/api/auth/discord/callback"
+	}
+	if authSuccessURL == "" {
+		authSuccessURL = origin + "/"
 	}
 	return PublicDiscordSettings{
 		Enabled:         settings.Enabled && enabled,
 		ClientID:        settings.ClientID,
 		ClientSecretSet: settings.ClientSecret != "",
-		RedirectURI:     settings.RedirectURI,
+		RedirectURI:     redirectURI,
 		AllowedGuildID:  settings.AllowedGuildID,
 		AllowedRoleID:   settings.AllowedRoleID,
-		AuthSuccessURL:  settings.AuthSuccessURL,
+		AuthSuccessURL:  authSuccessURL,
 		SessionTTLHours: settings.SessionTTLHours,
 	}
 }
 
 func (s *Server) discordStart(c *gin.Context) {
-	config := s.discordRuntimeConfig()
+	config := s.discordRuntimeConfig(c)
 	if !config.enabled() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{"message": "Discord login is not configured"}})
 		return
@@ -931,7 +953,7 @@ func (s *Server) discordStart(c *gin.Context) {
 }
 
 func (s *Server) discordCallback(c *gin.Context) {
-	config := s.discordRuntimeConfig()
+	config := s.discordRuntimeConfig(c)
 	if !config.enabled() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{"message": "Discord login is not configured"}})
 		return
@@ -2011,24 +2033,32 @@ func (s *Server) discordLoginEnabled() bool {
 }
 
 func (s *Server) discordLoginEnabledLocked() bool {
-	return s.discordClientID != "" && s.discordClientSecret != "" && s.discordRedirectURI != ""
+	return s.discordClientID != "" && s.discordClientSecret != ""
 }
 
 func (config DiscordRuntimeConfig) enabled() bool {
 	return config.ClientID != "" && config.ClientSecret != "" && config.RedirectURI != ""
 }
 
-func (s *Server) discordRuntimeConfig() DiscordRuntimeConfig {
+func (s *Server) discordRuntimeConfig(c *gin.Context) DiscordRuntimeConfig {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	redirectURI := s.discordRedirectURI
+	authSuccessURL := s.authSuccessURL
+	if redirectURI == "" {
+		redirectURI = defaultDiscordRedirectURI(c)
+	}
+	if authSuccessURL == "" {
+		authSuccessURL = requestOrigin(c) + "/"
+	}
 	return DiscordRuntimeConfig{
 		ClientID:       s.discordClientID,
 		ClientSecret:   s.discordClientSecret,
-		RedirectURI:    s.discordRedirectURI,
+		RedirectURI:    redirectURI,
 		AllowedGuildID: s.discordAllowedGuildID,
 		AllowedRoleID:  s.discordAllowedRoleID,
 		OAuthBase:      s.discordOAuthBase,
-		AuthSuccessURL: s.authSuccessURL,
+		AuthSuccessURL: authSuccessURL,
 		SessionTTL:     s.sessionTTL,
 	}
 }
@@ -2304,6 +2334,38 @@ func validHTTPURL(value string) bool {
 	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
+func requestOrigin(c *gin.Context) string {
+	proto := strings.TrimSpace(c.GetHeader("X-Forwarded-Proto"))
+	if proto == "" {
+		proto = strings.TrimSpace(c.GetHeader("X-Forwarded-Scheme"))
+	}
+	host := strings.TrimSpace(c.GetHeader("X-Forwarded-Host"))
+	if host == "" {
+		host = strings.TrimSpace(c.GetHeader("Host"))
+	}
+	if host == "" {
+		host = c.Request.Host
+	}
+	if proto == "" {
+		if c.Request.TLS != nil {
+			proto = "https"
+		} else {
+			proto = "http"
+		}
+	}
+	if strings.Contains(proto, ",") {
+		proto = strings.TrimSpace(strings.Split(proto, ",")[0])
+	}
+	if strings.Contains(host, ",") {
+		host = strings.TrimSpace(strings.Split(host, ",")[0])
+	}
+	return proto + "://" + host
+}
+
+func defaultDiscordRedirectURI(c *gin.Context) string {
+	return requestOrigin(c) + "/api/auth/discord/callback"
+}
+
 func writeOpenAIError(c *gin.Context, status int, code string, message string, errorType string, param *string) {
 	c.JSON(status, gin.H{
 		"error": gin.H{
@@ -2552,6 +2614,9 @@ func (s *Server) migrateDemoSeedData() bool {
 			changed = true
 			continue
 		}
+		if clearDemoSeedMetrics(&user) {
+			changed = true
+		}
 		users = append(users, user)
 	}
 	s.state.Users = users
@@ -2614,6 +2679,19 @@ func isDemoSeedUser(user User) bool {
 	default:
 		return false
 	}
+}
+
+func clearDemoSeedMetrics(user *User) bool {
+	if user.ID != "usr_1001" || user.Balance != 128.5 || user.RequestsToday != 42 || user.TotalRequests != 1380 {
+		return false
+	}
+	user.Balance = 0
+	user.RequestsToday = 0
+	user.TotalRequests = 0
+	if user.Note == "内部测试管理员" {
+		user.Note = ""
+	}
+	return true
 }
 
 func isDemoSeedAPIKey(key APIKey) bool {

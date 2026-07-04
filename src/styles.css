@@ -903,7 +903,8 @@ button.table-row:hover {
   padding-block: 12px;
 }
 
-.channel-editor input {
+.channel-editor input,
+.channel-editor select {
   width: 100%;
   min-width: 0;
   height: 36px;
