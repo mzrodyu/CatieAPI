@@ -932,8 +932,12 @@ h3 {
   font-weight: 800;
 }
 
+.provider-icon svg path {
+  fill: currentColor;
+}
+
 .provider-icon-google svg text { fill: #4285f4; }
-.provider-icon-deepseek svg text { fill: #4d6bfe; }
+.provider-icon-deepseek { color: #4d6bfe; }
 .provider-icon-openrouter svg text { fill: #ef4444; }
 .provider-icon-groq svg text { fill: #f55036; }
 .provider-icon-moonshot svg text { fill: #16a34a; }
