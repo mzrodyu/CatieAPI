@@ -849,6 +849,10 @@ h3 {
   border-radius: 18px;
 }
 
+.table:has(.channel-editor) {
+  overflow: visible;
+}
+
 .table-head,
 .table-row {
   display: grid;
@@ -904,7 +908,7 @@ button.table-row:hover {
 }
 
 .channel-editor input,
-.channel-editor select {
+.provider-picker-trigger {
   width: 100%;
   min-width: 0;
   height: 36px;
@@ -914,6 +918,70 @@ button.table-row:hover {
   border: 1px solid var(--hairline);
   border-radius: 12px;
   outline: none;
+}
+
+.provider-picker {
+  position: relative;
+  z-index: 2;
+}
+
+.provider-picker-trigger {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 12px;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.provider-picker-trigger span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-picker-trigger i {
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: translateY(-2px) rotate(45deg);
+}
+
+.provider-picker-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  display: grid;
+  width: min(240px, 70vw);
+  max-height: 280px;
+  padding: 6px;
+  overflow: auto;
+  background: color-mix(in srgb, var(--surface-solid) 94%, transparent);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+
+.provider-picker-menu button {
+  min-height: 34px;
+  padding: 0 10px;
+  color: var(--text);
+  background: transparent;
+  border-radius: 9px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.provider-picker-menu button:hover,
+.provider-picker-menu button.selected {
+  background: var(--group);
+}
+
+.provider-picker-menu button.selected {
+  color: var(--blue);
+  font-weight: 800;
 }
 
 .channel-editor strong {

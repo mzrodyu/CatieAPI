@@ -1327,12 +1327,15 @@ function ChannelEditor({ channel, onUpdate }: { channel: Channel; onUpdate: (id:
   const [baseUrl, setBaseUrl] = useState(channel.baseUrl);
   const [models, setModels] = useState(channel.models.join(", "));
   const [upstreamApiKey, setUpstreamApiKey] = useState("");
+  const [providerOpen, setProviderOpen] = useState(false);
+  const selectedProvider = providerOptions.find((option) => option.value === provider) || providerOptions[0];
 
   useEffect(() => {
     setProvider(channel.provider);
     setBaseUrl(channel.baseUrl);
     setModels(channel.models.join(", "));
     setUpstreamApiKey("");
+    setProviderOpen(false);
   }, [channel.id, channel.provider, channel.baseUrl, channel.models]);
 
   function save() {
@@ -1357,13 +1360,31 @@ function ChannelEditor({ channel, onUpdate }: { channel: Channel; onUpdate: (id:
         <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://provider.example/v1" />
       </span>
       <span>
-        <select value={provider} onChange={(event) => setProvider(event.target.value)}>
-          {providerOptions.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+        <div className="provider-picker">
+          <button type="button" className="provider-picker-trigger" aria-haspopup="listbox" aria-expanded={providerOpen} onClick={() => setProviderOpen((open) => !open)}>
+            <span>{selectedProvider.label}</span>
+            <i aria-hidden="true" />
+          </button>
+          {providerOpen && (
+            <div className="provider-picker-menu" role="listbox" aria-label="选择供应商">
+              {providerOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={provider === option.value ? "selected" : ""}
+                  role="option"
+                  aria-selected={provider === option.value}
+                  onClick={() => {
+                    setProvider(option.value);
+                    setProviderOpen(false);
+                  }}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </span>
       <span>{channel.priority}</span>
       <span>
