@@ -403,9 +403,11 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.POST("/users/bulk", s.bulkUpdateUsers)
 	admin.POST("/users/:id/api-keys", s.createAPIKey)
 	admin.PATCH("/api-keys/:id", s.updateAPIKey)
+	admin.DELETE("/api-keys/:id", s.deleteAPIKey)
 	admin.GET("/channels", s.listChannels)
 	admin.POST("/channels", s.createChannel)
 	admin.PATCH("/channels/:id", s.updateChannel)
+	admin.DELETE("/channels/:id", s.deleteChannel)
 	admin.POST("/channels/:id/check", s.checkChannel)
 	admin.POST("/channels/:id/sync-models", s.syncChannelModels)
 	admin.GET("/models", s.listModels)
@@ -1725,6 +1727,22 @@ func (s *Server) updateAPIKey(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"apiKey": publicAPIKey(*key)})
 }
 
+func (s *Server) deleteAPIKey(c *gin.Context) {
+	id := c.Param("id")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, key := range s.state.APIKeys {
+		if key.ID != id {
+			continue
+		}
+		s.state.APIKeys = append(s.state.APIKeys[:i], s.state.APIKeys[i+1:]...)
+		s.saveStateLocked()
+		c.JSON(http.StatusOK, gin.H{"deleted": true})
+		return
+	}
+	c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "API key not found"}})
+}
+
 func (s *Server) listChannels(c *gin.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1863,6 +1881,22 @@ func (s *Server) updateChannel(c *gin.Context) {
 	s.saveStateLocked()
 
 	c.JSON(http.StatusOK, gin.H{"channel": publicChannel(*channel)})
+}
+
+func (s *Server) deleteChannel(c *gin.Context) {
+	id := c.Param("id")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, channel := range s.state.Channels {
+		if channel.ID != id {
+			continue
+		}
+		s.state.Channels = append(s.state.Channels[:i], s.state.Channels[i+1:]...)
+		s.saveStateLocked()
+		c.JSON(http.StatusOK, gin.H{"deleted": true})
+		return
+	}
+	c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
 }
 
 func (s *Server) syncChannelModels(c *gin.Context) {

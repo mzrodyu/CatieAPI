@@ -467,6 +467,14 @@ function App() {
     window.setTimeout(() => setToast(""), 2400);
   }
 
+  async function deleteAPIKey(id: string) {
+    if (!window.confirm("删除这个 Key？删除后使用它的请求会立即失效。")) return;
+    await fetchJson<{ deleted: boolean }>(`/api/api-keys/${id}`, { method: "DELETE" });
+    setSelectedUser((current) => (current ? { ...current, apiKeys: current.apiKeys.filter((key) => key.id !== id) } : current));
+    setToast("Key 已删除");
+    window.setTimeout(() => setToast(""), 1800);
+  }
+
   async function updateChannel(id: string, patch: ChannelPatch) {
     const data = await fetchJson<{ channel: Channel }>(`/api/channels/${id}`, {
       method: "PATCH",
@@ -474,6 +482,15 @@ function App() {
     });
     setChannels((current) => current.map((channel) => (channel.id === id ? normalizeChannel(data.channel) : channel)));
     setToast("渠道已更新");
+    window.setTimeout(() => setToast(""), 1800);
+  }
+
+  async function deleteChannel(id: string) {
+    const channel = channels.find((item) => item.id === id);
+    if (!window.confirm(`删除渠道「${channel?.name || id}」？`)) return;
+    await fetchJson<{ deleted: boolean }>(`/api/channels/${id}`, { method: "DELETE" });
+    setChannels((current) => current.filter((item) => item.id !== id));
+    setToast("渠道已删除");
     window.setTimeout(() => setToast(""), 1800);
   }
 
@@ -712,9 +729,9 @@ function App() {
             }}
           />
         )}
-        {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} />}
+        {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} onDeleteKey={deleteAPIKey} />}
         {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} />}
-        {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onSyncModels={syncChannelModels} onCheck={checkChannel} />}
+        {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onDelete={deleteChannel} onSyncModels={syncChannelModels} onCheck={checkChannel} />}
         {active === "logs" && <LogsView logs={logs} />}
         {active === "settings" && <SettingsView models={models} channels={channels} />}
       </main>
@@ -1503,10 +1520,12 @@ function UsersView({
 
 function KeysView({
   selectedUser,
-  onCreateKey
+  onCreateKey,
+  onDeleteKey
 }: {
   selectedUser: UserDetail | null;
   onCreateKey: (id: string) => void;
+  onDeleteKey: (id: string) => void;
 }) {
   return (
     <Panel title="密钥管理">
@@ -1525,7 +1544,10 @@ function KeysView({
                   <strong>{key.name}</strong>
                   <span>{key.prefix}*** · 最后使用 {formatDate(key.lastUsedAt)}</span>
                 </div>
-                <Badge tone={key.status}>{statusLabel(key.status)}</Badge>
+                <div className="row-actions">
+                  <Badge tone={key.status}>{statusLabel(key.status)}</Badge>
+                  <button className="danger-button compact-button" onClick={() => onDeleteKey(key.id)}>删除</button>
+                </div>
               </div>
             ))
           ) : (
@@ -1541,12 +1563,32 @@ function KeysView({
 
 function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy: (value: string, label?: string) => void; onCreate: (model: ModelCreate) => Promise<void> }) {
   const recommended = models.filter((model) => model.recommended);
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
   const [id, setId] = useState("");
   const [name, setName] = useState("");
   const [vendor, setVendor] = useState("");
   const [aliases, setAliases] = useState("");
   const [description, setDescription] = useState("");
   const [message, setMessage] = useState("");
+  const pageSize = 50;
+  const filteredModels = useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    if (!keyword) return models;
+    return models.filter((model) =>
+      [model.id, model.name, model.vendor, model.category, model.description, ...arrayOf(model.aliases)]
+        .join(" ")
+        .toLowerCase()
+        .includes(keyword)
+    );
+  }, [models, query]);
+  const totalPages = Math.max(1, Math.ceil(filteredModels.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const visibleModels = filteredModels.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+  useEffect(() => {
+    setPage(1);
+  }, [query, models.length]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1606,17 +1648,59 @@ function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy:
       )}
 
       <Panel title="全部模型">
-        {models.length > 0 ? (
-          <div className="model-list">
-            {models.map((model) => (
-              <ModelCard key={model.id} model={model} onCopy={onCopy} />
-            ))}
-          </div>
+        <div className="panel-toolbar model-list-toolbar">
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索模型 ID、名称、供应商或代称" />
+          <span className="muted-inline">共 {filteredModels.length} 个模型</span>
+        </div>
+        {filteredModels.length > 0 ? (
+          <>
+            <div className="model-table">
+              <div className="model-table-head">
+                <span>模型</span>
+                <span>来源</span>
+                <span>信息</span>
+                <span>状态</span>
+                <span></span>
+              </div>
+              {visibleModels.map((model) => (
+                <ModelCompactRow key={model.id} model={model} onCopy={onCopy} />
+              ))}
+            </div>
+            {totalPages > 1 && (
+              <div className="pager">
+                <button className="secondary-button compact-button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={safePage <= 1}>上一页</button>
+                <span>{safePage} / {totalPages}</span>
+                <button className="secondary-button compact-button" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={safePage >= totalPages}>下一页</button>
+              </div>
+            )}
+          </>
         ) : (
-          <Empty text="暂无模型，请先添加你要开放给用户调用的模型 ID" />
+          <Empty text={models.length ? "没有匹配的模型" : "暂无模型，请先添加你要开放给用户调用的模型 ID"} />
         )}
       </Panel>
     </section>
+  );
+}
+
+function ModelCompactRow({ model, onCopy }: { model: ModelItem; onCopy: (value: string, label?: string) => void }) {
+  return (
+    <div className="model-table-row">
+      <span>
+        <strong>{model.name}</strong>
+        <small>{model.id}</small>
+      </span>
+      <span>{model.vendor}</span>
+      <span>
+        <small>{model.price} · {model.context}</small>
+        {arrayOf(model.aliases).length > 0 && (
+          <small>{arrayOf(model.aliases).slice(0, 4).join(", ")}</small>
+        )}
+      </span>
+      <Badge tone={model.status}>{statusLabel(model.status)}</Badge>
+      <button className="icon-button" title="复制模型 ID" onClick={() => onCopy(model.id, "模型 ID 已复制")}>
+        <Icon name="copy" />
+      </button>
+    </div>
   );
 }
 
@@ -1654,12 +1738,14 @@ function ChannelsView({
   channels,
   onUpdate,
   onCreate,
+  onDelete,
   onSyncModels,
   onCheck
 }: {
   channels: Channel[];
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
   onCreate: () => void;
+  onDelete: (id: string) => void;
   onSyncModels: (id: string) => Promise<void>;
   onCheck: (id: string) => Promise<void>;
 }) {
@@ -1673,7 +1759,7 @@ function ChannelsView({
       </div>
       <div className="channels-stack">
         {channels.map((channel) => (
-          <ChannelEditor key={channel.id} channel={channel} onUpdate={onUpdate} onSyncModels={onSyncModels} onCheck={onCheck} />
+          <ChannelEditor key={channel.id} channel={channel} onUpdate={onUpdate} onDelete={onDelete} onSyncModels={onSyncModels} onCheck={onCheck} />
         ))}
         {channels.length === 0 && <Empty text="暂无渠道，先在后端添加渠道接口或导入配置" />}
       </div>
@@ -1684,11 +1770,13 @@ function ChannelsView({
 function ChannelEditor({
   channel,
   onUpdate,
+  onDelete,
   onSyncModels,
   onCheck
 }: {
   channel: Channel;
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
+  onDelete: (id: string) => void;
   onSyncModels: (id: string) => Promise<void>;
   onCheck: (id: string) => Promise<void>;
 }) {
@@ -1810,6 +1898,7 @@ function ChannelEditor({
         <button className="status-button" onClick={() => onUpdate(channel.id, { status: channel.status === "disabled" ? "healthy" : "disabled" })}>
           <Badge tone={channel.status}>{channel.status === "disabled" ? "启用" : "禁用"}</Badge>
         </button>
+        <button className="danger-button" onClick={() => onDelete(channel.id)} disabled={busy !== ""}>删除</button>
       </div>
     </div>
   );
