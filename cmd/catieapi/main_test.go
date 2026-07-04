@@ -349,6 +349,40 @@ func TestInvalidManagementStatusIsRejected(t *testing.T) {
 	}
 }
 
+func TestCreateChannelDefaultsToDisabled(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	_, router := testServerRouter(t)
+
+	created := perform(router, http.MethodPost, "/api/channels", `{"name":"Edge Provider"}`, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create channel status = %d body = %s", created.Code, created.Body.String())
+	}
+	if !bytes.Contains(created.Body.Bytes(), []byte(`"status":"disabled"`)) {
+		t.Fatalf("created channel was not disabled by default: %s", created.Body.String())
+	}
+	var payload struct {
+		Channel Channel `json:"channel"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode created channel: %v", err)
+	}
+
+	blocked := perform(router, http.MethodPatch, "/api/channels/"+payload.Channel.ID, `{"status":"healthy"}`, nil)
+	if blocked.Code != http.StatusBadRequest {
+		t.Fatalf("empty channel enable status = %d body = %s", blocked.Code, blocked.Body.String())
+	}
+
+	enabled := perform(router, http.MethodPatch, "/api/channels/"+payload.Channel.ID, `{"baseUrl":"https://edge.example.test/v1","status":"healthy"}`, nil)
+	if enabled.Code != http.StatusOK || !bytes.Contains(enabled.Body.Bytes(), []byte(`"status":"healthy"`)) {
+		t.Fatalf("configured channel enable status = %d body = %s", enabled.Code, enabled.Body.String())
+	}
+
+	channels := perform(router, http.MethodGet, "/api/channels", "", nil)
+	if channels.Code != http.StatusOK || !bytes.Contains(channels.Body.Bytes(), []byte("Edge Provider")) {
+		t.Fatalf("created channel was not listed: %d body = %s", channels.Code, channels.Body.String())
+	}
+}
+
 func TestOpenAICompatibleProviderForwardsRequest(t *testing.T) {
 	var upstreamModel string
 	var upstreamPath string

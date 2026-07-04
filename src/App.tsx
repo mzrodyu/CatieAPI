@@ -44,6 +44,10 @@ type Channel = {
   models: string[];
 };
 
+type ChannelPatch = Partial<Channel> & {
+  upstreamApiKey?: string;
+};
+
 type ModelItem = {
   id: string;
   name: string;
@@ -192,12 +196,15 @@ const navItems = [
 ] as const;
 
 function formatDate(value: string) {
+  if (!value) return "未使用";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
   return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit"
-  }).format(new Date(value));
+  }).format(date);
 }
 
 function statusLabel(status: string) {
@@ -213,6 +220,22 @@ function statusLabel(status: string) {
     failed: "失败"
   };
   return labels[status] || status;
+}
+
+async function copyText(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
 }
 
 function App() {
@@ -232,7 +255,7 @@ function App() {
   const [models, setModels] = useState<ModelItem[]>([]);
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [query, setQuery] = useState("");
-  const [selectedUserId, setSelectedUserId] = useState("usr_1001");
+  const [selectedUserId, setSelectedUserId] = useState("");
   const [selectedUser, setSelectedUser] = useState<UserDetail | null>(null);
   const [toast, setToast] = useState("");
   const [consoleReady, setConsoleReady] = useState(false);
@@ -256,6 +279,13 @@ function App() {
     setChannels(channelsData.channels);
     setModels(modelsData.models);
     setLogs(logsData.logs);
+    setSelectedUserId((current) => {
+      if (current && usersData.users.some((user) => user.id === current)) return current;
+      return usersData.users[0]?.id || "";
+    });
+    if (usersData.users.length === 0) {
+      setSelectedUser(null);
+    }
     setConsoleReady(true);
   }
 
@@ -273,6 +303,46 @@ function App() {
     setSelectedUser((current) => (current?.user.id === id ? { ...current, user: data.user } : current));
     setToast("已更新用户");
     window.setTimeout(() => setToast(""), 1800);
+  }
+
+  async function createAPIKeyForUser(userId: string) {
+    const data = await fetchJson<{ apiKey: ApiKey; secret: string }>(`/api/users/${userId}/api-keys`, {
+      method: "POST",
+      body: JSON.stringify({ name: "Console Key" })
+    });
+    if (selectedUser?.user.id === userId) {
+      setSelectedUser({ ...selectedUser, apiKeys: [...selectedUser.apiKeys, data.apiKey] });
+    }
+    await copyText(data.secret);
+    setToast("新 Key 已创建并复制，请立即保存");
+    window.setTimeout(() => setToast(""), 2400);
+  }
+
+  async function updateChannel(id: string, patch: ChannelPatch) {
+    const data = await fetchJson<{ channel: Channel }>(`/api/channels/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch)
+    });
+    setChannels((current) => current.map((channel) => (channel.id === id ? data.channel : channel)));
+    setToast("渠道已更新");
+    window.setTimeout(() => setToast(""), 1800);
+  }
+
+  async function createChannel() {
+    const data = await fetchJson<{ channel: Channel }>("/api/channels", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    setChannels((current) => [...current, data.channel]);
+    setActive("channels");
+    setToast("已创建禁用的新渠道，请补充上游地址后启用");
+    window.setTimeout(() => setToast(""), 2400);
+  }
+
+  async function copyAndToast(value: string, label = "已复制") {
+    await copyText(value);
+    setToast(label);
+    window.setTimeout(() => setToast(""), 1600);
   }
 
   function handleLoadError(error: unknown, fallback: string) {
@@ -416,7 +486,19 @@ function App() {
         </div>
       </header>
 
-        {active === "overview" && <OverviewView overview={overview} channels={channels} logs={logs} />}
+        {active === "overview" && (
+          <OverviewView
+            overview={overview}
+            channels={channels}
+            logs={logs}
+            onNavigate={(target) => {
+              setActive(target);
+              if (target === "channels" && channels.length === 0) setToast("渠道页可以创建第一个上游");
+              if (target === "logs" && logs.length === 0) setToast("暂无异常日志");
+              window.setTimeout(() => setToast(""), 1800);
+            }}
+          />
+        )}
         {active === "users" && (
           <UsersView
             users={filteredUsers}
@@ -425,11 +507,17 @@ function App() {
             onQuery={setQuery}
             onSelect={setSelectedUserId}
             onUpdate={updateUser}
+            onCreateKey={createAPIKeyForUser}
+            onOpenRegistration={() => {
+              setActive("settings");
+              setToast("在账号与注册里开放注册，用户即可自助创建账号");
+              window.setTimeout(() => setToast(""), 2400);
+            }}
           />
         )}
-        {active === "keys" && <KeysView selectedUser={selectedUser} />}
-        {active === "models" && <ModelsView models={models} />}
-        {active === "channels" && <ChannelsView channels={channels} />}
+        {active === "keys" && <KeysView selectedUser={selectedUser} onCopy={copyAndToast} onCreateKey={createAPIKeyForUser} />}
+        {active === "models" && <ModelsView models={models} onCopy={copyAndToast} />}
+        {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} />}
         {active === "logs" && <LogsView logs={logs} />}
         {active === "settings" && <SettingsView />}
       </main>
@@ -800,7 +888,18 @@ function HomeFeature({ icon, title, text }: { icon: IconName; title: string; tex
   );
 }
 
-function OverviewView({ overview, channels, logs }: { overview: Overview | null; channels: Channel[]; logs: RequestLog[] }) {
+function OverviewView({
+  overview,
+  channels,
+  logs,
+  onNavigate
+}: {
+  overview: Overview | null;
+  channels: Channel[];
+  logs: RequestLog[];
+  onNavigate: (target: (typeof navItems)[number]["id"]) => void;
+}) {
+  const failedLogs = logs.filter((log) => log.status !== "success");
   return (
     <section className="page-stack">
       <div className="hero-strip">
@@ -815,10 +914,10 @@ function OverviewView({ overview, channels, logs }: { overview: Overview | null;
         </div>
       </div>
       <div className="quick-actions" aria-label="快捷操作">
-        <QuickAction icon="key" label="创建 Key" />
-        <QuickAction icon="route" label="新增渠道" />
-        <QuickAction icon="users" label="调整额度" />
-        <QuickAction icon="logs" label="查看异常" />
+        <QuickAction icon="key" label="创建 Key" onClick={() => onNavigate("keys")} />
+        <QuickAction icon="route" label="配置渠道" onClick={() => onNavigate("channels")} />
+        <QuickAction icon="users" label="调整额度" onClick={() => onNavigate("users")} />
+        <QuickAction icon="logs" label="查看异常" onClick={() => onNavigate("logs")} />
       </div>
       <div className="metrics-grid">
         <Metric label="活跃用户" value={overview?.activeUsers ?? "-"} />
@@ -829,35 +928,43 @@ function OverviewView({ overview, channels, logs }: { overview: Overview | null;
       <GatewayFlow />
       <div className="split-grid">
         <Panel title="渠道状态">
-          {channels.map((channel) => (
-            <div className="list-row" key={channel.id}>
-              <div>
-                <strong>{channel.name}</strong>
-                <span>{channel.models.join(", ")}</span>
+          {channels.length ? (
+            channels.map((channel) => (
+              <div className="list-row" key={channel.id}>
+                <div>
+                  <strong>{channel.name}</strong>
+                  <span>{channel.models.join(", ") || "未绑定模型"}</span>
+                </div>
+                <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
               </div>
-              <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
-            </div>
-          ))}
+            ))
+          ) : (
+            <Empty text="暂无渠道" />
+          )}
         </Panel>
         <Panel title="最近请求">
-          {logs.slice(0, 4).map((log) => (
-            <div className="list-row" key={log.id}>
-              <div>
-                <strong>{log.model}</strong>
-                <span>{log.id} · {formatDate(log.createdAt)}</span>
+          {logs.length ? (
+            logs.slice(0, 4).map((log) => (
+              <div className="list-row" key={log.id}>
+                <div>
+                  <strong>{log.model || "未知模型"}</strong>
+                  <span>{log.id} · {formatDate(log.createdAt)}</span>
+                </div>
+                <Badge tone={log.status}>{statusLabel(log.status)}</Badge>
               </div>
-              <Badge tone={log.status}>{statusLabel(log.status)}</Badge>
-            </div>
-          ))}
+            ))
+          ) : (
+            <Empty text={failedLogs.length ? "暂无最近请求" : "暂无请求"} />
+          )}
         </Panel>
       </div>
     </section>
   );
 }
 
-function QuickAction({ icon, label }: { icon: IconName; label: string }) {
+function QuickAction({ icon, label, onClick }: { icon: IconName; label: string; onClick: () => void }) {
   return (
-    <button className="quick-action">
+    <button className="quick-action" onClick={onClick}>
       <Icon name={icon} />
       <span>{label}</span>
     </button>
@@ -897,7 +1004,9 @@ function UsersView({
   selectedUser,
   onQuery,
   onSelect,
-  onUpdate
+  onUpdate,
+  onCreateKey,
+  onOpenRegistration
 }: {
   users: User[];
   query: string;
@@ -905,6 +1014,8 @@ function UsersView({
   onQuery: (value: string) => void;
   onSelect: (id: string) => void;
   onUpdate: (id: string, patch: Partial<User>) => void;
+  onCreateKey: (id: string) => void;
+  onOpenRegistration: () => void;
 }) {
   return (
     <section className="users-layout">
@@ -914,7 +1025,7 @@ function UsersView({
             <Icon name="search" />
             <input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="搜索 ID、姓名或邮箱" />
           </div>
-          <button className="icon-button" title="新增用户">
+          <button className="icon-button" title="开放注册" onClick={onOpenRegistration}>
             <Icon name="plus" />
           </button>
         </div>
@@ -936,6 +1047,7 @@ function UsersView({
               <span>{user.requestsToday}</span>
             </button>
           ))}
+          {users.length === 0 && <Empty text="暂无用户" />}
         </div>
       </Panel>
 
@@ -963,6 +1075,9 @@ function UsersView({
               <button className="secondary-button" onClick={() => onUpdate(selectedUser.user.id, { balance: Number((selectedUser.user.balance + 10).toFixed(2)) })}>
                 额度 +10
               </button>
+              <button className="secondary-button" onClick={() => onCreateKey(selectedUser.user.id)}>
+                创建 Key
+              </button>
               <button
                 className="secondary-button"
                 onClick={() =>
@@ -986,6 +1101,7 @@ function UsersView({
                   <Badge tone={key.status}>{statusLabel(key.status)}</Badge>
                 </div>
               ))}
+              {selectedUser.apiKeys.length === 0 && <Empty text="暂无 API Key" />}
             </div>
           </div>
         ) : (
@@ -996,29 +1112,49 @@ function UsersView({
   );
 }
 
-function KeysView({ selectedUser }: { selectedUser: UserDetail | null }) {
+function KeysView({
+  selectedUser,
+  onCopy,
+  onCreateKey
+}: {
+  selectedUser: UserDetail | null;
+  onCopy: (value: string, label?: string) => void;
+  onCreateKey: (id: string) => void;
+}) {
   return (
     <Panel title="密钥管理">
-      {selectedUser?.apiKeys.length ? (
-        selectedUser.apiKeys.map((key) => (
-          <div className="list-row" key={key.id}>
-            <div>
-              <strong>{key.name}</strong>
-              <span>{key.prefix}*** · 最后使用 {formatDate(key.lastUsedAt)}</span>
-            </div>
-            <button className="icon-button" title="复制前缀">
-              <Icon name="copy" />
+      {selectedUser ? (
+        <>
+          <div className="panel-toolbar">
+            <span className="muted-inline">{selectedUser.user.name}</span>
+            <button className="primary-button" onClick={() => onCreateKey(selectedUser.user.id)}>
+              创建 Key
             </button>
           </div>
-        ))
+          {selectedUser.apiKeys.length ? (
+            selectedUser.apiKeys.map((key) => (
+              <div className="list-row" key={key.id}>
+                <div>
+                  <strong>{key.name}</strong>
+                  <span>{key.prefix}*** · 最后使用 {formatDate(key.lastUsedAt)}</span>
+                </div>
+                <button className="icon-button" title="复制前缀" onClick={() => onCopy(key.prefix, "Key 前缀已复制")}>
+                  <Icon name="copy" />
+                </button>
+              </div>
+            ))
+          ) : (
+            <Empty text="暂无密钥" />
+          )}
+        </>
       ) : (
-        <Empty text="暂无密钥" />
+        <Empty text="请选择一个用户" />
       )}
     </Panel>
   );
 }
 
-function ModelsView({ models }: { models: ModelItem[] }) {
+function ModelsView({ models, onCopy }: { models: ModelItem[]; onCopy: (value: string, label?: string) => void }) {
   const recommended = models.filter((model) => model.recommended);
 
   return (
@@ -1033,7 +1169,7 @@ function ModelsView({ models }: { models: ModelItem[] }) {
       <Panel title="推荐模型">
         <div className="model-grid">
           {recommended.map((model) => (
-            <ModelCard key={model.id} model={model} featured />
+            <ModelCard key={model.id} model={model} featured onCopy={onCopy} />
           ))}
         </div>
       </Panel>
@@ -1041,7 +1177,7 @@ function ModelsView({ models }: { models: ModelItem[] }) {
       <Panel title="全部模型">
         <div className="model-list">
           {models.map((model) => (
-            <ModelCard key={model.id} model={model} />
+            <ModelCard key={model.id} model={model} onCopy={onCopy} />
           ))}
         </div>
       </Panel>
@@ -1049,7 +1185,7 @@ function ModelsView({ models }: { models: ModelItem[] }) {
   );
 }
 
-function ModelCard({ model, featured = false }: { model: ModelItem; featured?: boolean }) {
+function ModelCard({ model, featured = false, onCopy }: { model: ModelItem; featured?: boolean; onCopy: (value: string, label?: string) => void }) {
   return (
     <article className={featured ? "model-card featured" : "model-card"}>
       <div className="model-card-head">
@@ -1071,7 +1207,7 @@ function ModelCard({ model, featured = false }: { model: ModelItem; featured?: b
       </div>
       <div className="model-id">
         <code>{model.id}</code>
-        <button className="icon-button" title="复制模型 ID">
+        <button className="icon-button" title="复制模型 ID" onClick={() => onCopy(model.id, "模型 ID 已复制")}>
           <Icon name="copy" />
         </button>
       </div>
@@ -1079,9 +1215,23 @@ function ModelCard({ model, featured = false }: { model: ModelItem; featured?: b
   );
 }
 
-function ChannelsView({ channels }: { channels: Channel[] }) {
+function ChannelsView({
+  channels,
+  onUpdate,
+  onCreate
+}: {
+  channels: Channel[];
+  onUpdate: (id: string, patch: ChannelPatch) => void;
+  onCreate: () => void;
+}) {
   return (
     <Panel title="渠道管理">
+      <div className="panel-toolbar">
+        <span className="muted-inline">新增渠道默认禁用，补充地址后再启用。</span>
+        <button className="primary-button" onClick={onCreate}>
+          新增渠道
+        </button>
+      </div>
       <div className="table">
         <div className="table-head channels-table">
           <span>渠道</span>
@@ -1091,19 +1241,70 @@ function ChannelsView({ channels }: { channels: Channel[] }) {
           <span>运行状态</span>
         </div>
         {channels.map((channel) => (
-          <div className="table-row channels-table" key={channel.id}>
-            <span>
-              <strong>{channel.name}</strong>
-              <small>{channel.baseUrl}</small>
-            </span>
-            <span>{channel.provider}</span>
-            <span>{channel.priority}</span>
-            <span>{channel.weight}</span>
-            <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
-          </div>
+          <ChannelEditor key={channel.id} channel={channel} onUpdate={onUpdate} />
         ))}
+        {channels.length === 0 && <Empty text="暂无渠道，先在后端添加渠道接口或导入配置" />}
       </div>
     </Panel>
+  );
+}
+
+function ChannelEditor({ channel, onUpdate }: { channel: Channel; onUpdate: (id: string, patch: ChannelPatch) => void }) {
+  const [baseUrl, setBaseUrl] = useState(channel.baseUrl);
+  const [models, setModels] = useState(channel.models.join(", "));
+  const [upstreamApiKey, setUpstreamApiKey] = useState("");
+
+  useEffect(() => {
+    setBaseUrl(channel.baseUrl);
+    setModels(channel.models.join(", "));
+    setUpstreamApiKey("");
+  }, [channel.id, channel.baseUrl, channel.models]);
+
+  function save() {
+    const patch: ChannelPatch = {
+      baseUrl,
+      models: models
+        .split(",")
+        .map((model) => model.trim())
+        .filter(Boolean)
+    };
+    if (upstreamApiKey.trim()) {
+      patch.upstreamApiKey = upstreamApiKey.trim();
+    }
+    onUpdate(channel.id, patch);
+  }
+
+  return (
+    <div className="table-row channels-table channel-editor">
+      <span>
+        <strong>{channel.name}</strong>
+        <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://provider.example/v1" />
+      </span>
+      <span>{channel.provider}</span>
+      <span>{channel.priority}</span>
+      <span>
+        <input value={models} onChange={(event) => setModels(event.target.value)} placeholder="gpt-5.6, ds" />
+      </span>
+      <span className="channel-actions">
+        <input
+          type="password"
+          value={upstreamApiKey}
+          onChange={(event) => setUpstreamApiKey(event.target.value)}
+          placeholder="上游 Key"
+          autoComplete="new-password"
+        />
+        <button className="secondary-button" onClick={save}>
+          保存
+        </button>
+        <button
+          className="status-button"
+          onClick={() => onUpdate(channel.id, { status: channel.status === "disabled" ? "healthy" : "disabled" })}
+          title={channel.status === "disabled" ? "启用渠道" : "停用渠道"}
+        >
+          <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
+        </button>
+      </span>
+    </div>
   );
 }
 
@@ -1232,8 +1433,8 @@ function SettingsView() {
         <div className="settings-group">
           <Setting label="网关模式" value="OpenAI Compatible" />
           <Setting label="默认模型" value="gpt-5.6" />
-          <Setting label="请求限流" value="启用" switchOn />
-          <Setting label="审计日志" value="启用" switchOn />
+          <Setting label="请求限流" value="内置启用" />
+          <Setting label="审计日志" value="内置启用" />
         </div>
       </Panel>
 

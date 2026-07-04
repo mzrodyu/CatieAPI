@@ -375,6 +375,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.POST("/users/:id/api-keys", s.createAPIKey)
 	admin.PATCH("/api-keys/:id", s.updateAPIKey)
 	admin.GET("/channels", s.listChannels)
+	admin.POST("/channels", s.createChannel)
 	admin.PATCH("/channels/:id", s.updateChannel)
 	admin.GET("/models", s.listModels)
 	admin.PATCH("/models/:id", s.updateModel)
@@ -1391,6 +1392,68 @@ func (s *Server) listChannels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"channels": channels})
 }
 
+func (s *Server) createChannel(c *gin.Context) {
+	var body struct {
+		Name           string   `json:"name"`
+		Provider       string   `json:"provider"`
+		BaseURL        string   `json:"baseUrl"`
+		UpstreamAPIKey string   `json:"upstreamApiKey"`
+		Priority       int      `json:"priority"`
+		Weight         int      `json:"weight"`
+		Models         []string `json:"models"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	body.Name = strings.TrimSpace(body.Name)
+	body.Provider = strings.TrimSpace(body.Provider)
+	body.BaseURL = strings.TrimSpace(body.BaseURL)
+	if body.Name == "" {
+		body.Name = "新渠道"
+	}
+	if body.Provider == "" {
+		body.Provider = "compatible"
+	}
+	if body.BaseURL != "" && !strings.HasPrefix(body.BaseURL, "http://") && !strings.HasPrefix(body.BaseURL, "https://") {
+		validationError(c, "Base URL must start with http:// or https://")
+		return
+	}
+	if body.Priority <= 0 {
+		body.Priority = 10
+	}
+	if body.Weight <= 0 {
+		body.Weight = 10
+	}
+	if len(body.Models) == 0 {
+		body.Models = []string{"gpt-5.6"}
+	}
+	protectedKey := ""
+	if strings.TrimSpace(body.UpstreamAPIKey) != "" {
+		var err error
+		protectedKey, err = s.protectSecret(strings.TrimSpace(body.UpstreamAPIKey))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "Failed to protect upstream key"}})
+			return
+		}
+	}
+
+	channel := Channel{
+		ID:             newID("chn"),
+		Name:           body.Name,
+		Provider:       body.Provider,
+		BaseURL:        strings.TrimRight(body.BaseURL, "/"),
+		UpstreamAPIKey: protectedKey,
+		Status:         "disabled",
+		Priority:       body.Priority,
+		Weight:         body.Weight,
+		Models:         body.Models,
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.Channels = append(s.state.Channels, channel)
+	s.saveStateLocked()
+	c.JSON(http.StatusCreated, gin.H{"channel": publicChannel(channel)})
+}
+
 func (s *Server) updateChannel(c *gin.Context) {
 	var patch map[string]interface{}
 	if err := c.ShouldBindJSON(&patch); err != nil {
@@ -1452,6 +1515,10 @@ func (s *Server) updateChannel(c *gin.Context) {
 	}
 	if value, ok := patch["models"].([]interface{}); ok {
 		channel.Models = stringSlice(value)
+	}
+	if channel.Status != "disabled" && strings.TrimSpace(channel.BaseURL) == "" {
+		validationError(c, "Base URL is required before enabling a channel")
+		return
 	}
 	s.saveStateLocked()
 

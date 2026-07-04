@@ -296,6 +296,28 @@ h3 {
   border: 1px solid var(--hairline);
 }
 
+.primary-button:disabled,
+.secondary-button:disabled,
+.icon-button:disabled,
+.theme-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.muted-inline {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.status-button {
+  display: inline-flex;
+  justify-content: flex-start;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
 .segmented-control {
   display: inline-grid;
   grid-auto-flow: column;
@@ -873,7 +895,36 @@ button.table-row:hover {
 }
 
 .channels-table {
-  grid-template-columns: minmax(190px, 1.5fr) 100px 70px 70px 80px;
+  grid-template-columns: minmax(220px, 1.4fr) 90px 64px minmax(150px, 0.8fr) minmax(240px, 1fr);
+}
+
+.channel-editor {
+  align-items: start;
+  padding-block: 12px;
+}
+
+.channel-editor input {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  color: var(--text);
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  outline: none;
+}
+
+.channel-editor strong {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.channel-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
 }
 
 .logs-table {
@@ -1891,6 +1942,19 @@ button.table-row:hover {
 
   .table-row span:nth-child(n + 3) {
     display: none;
+  }
+
+  .channel-editor.channels-table {
+    grid-template-columns: 1fr;
+  }
+
+  .channel-editor span:nth-child(n + 3),
+  .channel-actions {
+    display: grid;
+  }
+
+  .channel-actions {
+    grid-template-columns: 1fr;
   }
 
   .table-head,
