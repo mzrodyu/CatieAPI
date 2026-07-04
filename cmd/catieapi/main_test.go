@@ -611,6 +611,41 @@ func TestDefaultStateStartsWithoutModels(t *testing.T) {
 	}
 }
 
+func TestDeleteModelCleansReferences(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+
+	server.mu.Lock()
+	server.state.APIKeys[1].AllowedModels = []string{"deepseek-v4", "gpt-5.6"}
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodDelete, "/api/models/deepseek-v4", "", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("delete model status = %d body = %s", response.Code, response.Body.String())
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.findModel("deepseek-v4") != nil {
+		t.Fatal("deleted model still exists")
+	}
+	for _, channel := range server.state.Channels {
+		for _, modelID := range channel.Models {
+			if modelID == "deepseek-v4" {
+				t.Fatalf("deleted model still referenced by channel %#v", channel)
+			}
+		}
+	}
+	for _, apiKey := range server.state.APIKeys {
+		for _, modelID := range apiKey.AllowedModels {
+			if modelID == "deepseek-v4" {
+				t.Fatalf("deleted model still referenced by api key %#v", apiKey)
+			}
+		}
+	}
+}
+
 func TestCreatedAPIKeyUsesSecretWithoutLeakingHash(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)

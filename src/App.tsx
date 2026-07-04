@@ -649,6 +649,29 @@ function App() {
     window.setTimeout(() => setToast(""), 1800);
   }
 
+  async function updateModel(id: string, patch: Partial<ModelItem>) {
+    const data = await fetchJson<{ model: ModelItem }>(`/api/models/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch)
+    });
+    setModels((current) => current.map((model) => (model.id === id ? normalizeModel(data.model) : model)));
+    setToast("模型已更新");
+    window.setTimeout(() => setToast(""), 1600);
+  }
+
+  async function deleteModel(id: string) {
+    if (!window.confirm(`删除模型 ${id}？渠道和 Key 中的引用也会一起清理。`)) return;
+    await fetchJson(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
+    setModels((current) => current.filter((model) => model.id !== id));
+    setChannels((current) => current.map((channel) => ({ ...channel, models: channel.models.filter((modelId) => modelId !== id) })));
+    setSelectedUser((current) => current ? {
+      ...current,
+      apiKeys: current.apiKeys.map((apiKey) => ({ ...apiKey, allowedModels: apiKey.allowedModels.filter((modelId) => modelId !== id) }))
+    } : current);
+    setToast("模型已删除");
+    window.setTimeout(() => setToast(""), 1800);
+  }
+
   async function copyAndToast(value: string, label = "已复制") {
     await copyText(value);
     setToast(label);
@@ -827,7 +850,7 @@ function App() {
           />
         )}
         {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} onUpdateKey={updateAPIKey} onDeleteKey={deleteAPIKey} />}
-        {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} />}
+        {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} onUpdate={updateModel} onDelete={deleteModel} />}
         {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onDelete={deleteChannel} onSyncModels={syncChannelModels} onCheck={checkChannel} />}
         {active === "logs" && <LogsView logs={logs} />}
         {active === "settings" && <SettingsView models={models} channels={channels} />}
@@ -1836,7 +1859,19 @@ function KeyEditor({
   );
 }
 
-function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy: (value: string, label?: string) => void; onCreate: (model: ModelCreate) => Promise<void> }) {
+function ModelsView({
+  models,
+  onCopy,
+  onCreate,
+  onUpdate,
+  onDelete
+}: {
+  models: ModelItem[];
+  onCopy: (value: string, label?: string) => void;
+  onCreate: (model: ModelCreate) => Promise<void>;
+  onUpdate: (id: string, patch: Partial<ModelItem>) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}) {
   const recommended = models.filter((model) => model.recommended);
   const [query, setQuery] = useState("");
   const [activeProvider, setActiveProvider] = useState("all");
@@ -1951,11 +1986,11 @@ function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy:
 
       {recommended.length > 0 && (
         <Panel title="推荐模型">
-        <div className="model-grid">
-          {recommended.map((model) => (
-            <ModelCard key={model.id} model={model} featured onCopy={onCopy} />
-          ))}
-        </div>
+          <div className="model-grid">
+            {recommended.map((model) => (
+              <ModelCard key={model.id} model={model} featured onCopy={onCopy} onUpdate={onUpdate} />
+            ))}
+          </div>
         </Panel>
       )}
 
@@ -2007,7 +2042,7 @@ function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy:
                   </header>
                   <div className="model-compact-grid">
                     {providerModels.map((model) => (
-                      <ModelCompactRow key={model.id} model={model} onCopy={onCopy} />
+                      <ModelCompactRow key={model.id} model={model} onCopy={onCopy} onUpdate={onUpdate} onDelete={onDelete} />
                     ))}
                   </div>
                 </section>
@@ -2029,8 +2064,19 @@ function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy:
   );
 }
 
-function ModelCompactRow({ model, onCopy }: { model: ModelItem; onCopy: (value: string, label?: string) => void }) {
+function ModelCompactRow({
+  model,
+  onCopy,
+  onUpdate,
+  onDelete
+}: {
+  model: ModelItem;
+  onCopy: (value: string, label?: string) => void;
+  onUpdate: (id: string, patch: Partial<ModelItem>) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}) {
   const aliases = arrayOf(model.aliases).slice(0, 3);
+  const disabled = model.status === "disabled";
   return (
     <article className="model-compact-row">
       <div className="model-compact-main">
@@ -2044,15 +2090,34 @@ function ModelCompactRow({ model, onCopy }: { model: ModelItem; onCopy: (value: 
           </span>
         )}
       </div>
-      <Badge tone={model.status}>{statusLabel(model.status)}</Badge>
-      <button className="icon-button" title="复制模型 ID" onClick={() => onCopy(model.id, "模型 ID 已复制")}>
-        <Icon name="copy" />
-      </button>
+      <div className="model-row-actions">
+        <Badge tone={model.status}>{statusLabel(model.status)}</Badge>
+        <button className="icon-button" title="复制模型 ID" onClick={() => onCopy(model.id, "模型 ID 已复制")}>
+          <Icon name="copy" />
+        </button>
+        <button className="secondary-button compact-button" type="button" onClick={() => onUpdate(model.id, { recommended: !model.recommended })}>
+          {model.recommended ? "取消推荐" : "推荐"}
+        </button>
+        <button className="secondary-button compact-button" type="button" onClick={() => onUpdate(model.id, { status: disabled ? "available" : "disabled" })}>
+          {disabled ? "启用" : "停用"}
+        </button>
+        <button className="danger-button compact-button" type="button" onClick={() => onDelete(model.id)}>删除</button>
+      </div>
     </article>
   );
 }
 
-function ModelCard({ model, featured = false, onCopy }: { model: ModelItem; featured?: boolean; onCopy: (value: string, label?: string) => void }) {
+function ModelCard({
+  model,
+  featured = false,
+  onCopy,
+  onUpdate
+}: {
+  model: ModelItem;
+  featured?: boolean;
+  onCopy: (value: string, label?: string) => void;
+  onUpdate?: (id: string, patch: Partial<ModelItem>) => Promise<void>;
+}) {
   return (
     <article className={featured ? "model-card featured" : "model-card"}>
       <div className="model-card-head">
@@ -2078,6 +2143,14 @@ function ModelCard({ model, featured = false, onCopy }: { model: ModelItem; feat
           <Icon name="copy" />
         </button>
       </div>
+      {onUpdate && (
+        <div className="model-card-actions">
+          <button className="secondary-button compact-button" type="button" onClick={() => onUpdate(model.id, { recommended: false })}>取消推荐</button>
+          <button className="secondary-button compact-button" type="button" onClick={() => onUpdate(model.id, { status: model.status === "disabled" ? "available" : "disabled" })}>
+            {model.status === "disabled" ? "启用" : "停用"}
+          </button>
+        </div>
+      )}
     </article>
   );
 }

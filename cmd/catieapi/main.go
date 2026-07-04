@@ -445,6 +445,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.GET("/models", s.listModels)
 	admin.POST("/models", s.createModel)
 	admin.PATCH("/models/:id", s.updateModel)
+	admin.DELETE("/models/:id", s.deleteModel)
 	admin.GET("/logs", s.listLogs)
 	admin.GET("/quota-ledger", s.quotaLedger)
 	admin.GET("/settings/discord", s.getDiscordSettings)
@@ -2451,6 +2452,40 @@ func (s *Server) updateModel(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"model": model})
 }
 
+func (s *Server) deleteModel(c *gin.Context) {
+	modelID := strings.TrimSpace(c.Param("id"))
+	if modelID == "" {
+		validationError(c, "模型 ID 不能为空")
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	index := -1
+	for i, model := range s.state.Models {
+		if model.ID == modelID {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Model not found"}})
+		return
+	}
+
+	s.state.Models = append(s.state.Models[:index], s.state.Models[index+1:]...)
+	for i := range s.state.Channels {
+		s.state.Channels[i].Models = removeString(s.state.Channels[i].Models, modelID)
+	}
+	for i := range s.state.APIKeys {
+		s.state.APIKeys[i].AllowedModels = removeString(s.state.APIKeys[i].AllowedModels, modelID)
+	}
+	s.saveStateLocked()
+
+	c.JSON(http.StatusOK, gin.H{"deleted": true, "modelId": modelID})
+}
+
 func (s *Server) openAIModels(c *gin.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -3411,6 +3446,20 @@ func mergeStrings(current []string, next []string) []string {
 		}
 	}
 	return merged
+}
+
+func removeString(values []string, target string) []string {
+	target = strings.TrimSpace(target)
+	if target == "" || len(values) == 0 {
+		return values
+	}
+	next := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != target {
+			next = append(next, value)
+		}
+	}
+	return next
 }
 
 func providerLabel(provider string) string {

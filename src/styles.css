@@ -1073,7 +1073,7 @@ h3 {
 
 .model-compact-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 38px;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   min-width: 0;
@@ -1124,6 +1124,19 @@ h3 {
   background: var(--surface-solid);
   border: 1px solid var(--hairline);
   border-radius: 999px;
+}
+
+.model-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.model-row-actions .compact-button {
+  min-height: 32px;
+  padding-inline: 11px;
 }
 
 .pager {
@@ -1209,6 +1222,12 @@ h3 {
 .model-card p {
   color: var(--muted);
   line-height: 1.55;
+}
+
+.model-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .alias-row,
@@ -2833,6 +2852,16 @@ button.table-row:hover {
 
   .model-create-wide {
     grid-column: auto;
+  }
+
+  .model-compact-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .model-row-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
   }
 
   .auth-stage {
