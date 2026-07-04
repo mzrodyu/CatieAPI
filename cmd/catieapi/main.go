@@ -379,6 +379,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.POST("/channels", s.createChannel)
 	admin.PATCH("/channels/:id", s.updateChannel)
 	admin.GET("/models", s.listModels)
+	admin.POST("/models", s.createModel)
 	admin.PATCH("/models/:id", s.updateModel)
 	admin.GET("/logs", s.listLogs)
 	admin.GET("/quota-ledger", s.quotaLedger)
@@ -1515,9 +1516,6 @@ func (s *Server) createChannel(c *gin.Context) {
 	if body.Weight <= 0 {
 		body.Weight = 10
 	}
-	if len(body.Models) == 0 {
-		body.Models = []string{"gpt-5.6"}
-	}
 	protectedKey := ""
 	if strings.TrimSpace(body.UpstreamAPIKey) != "" {
 		var err error
@@ -1622,6 +1620,94 @@ func (s *Server) listModels(c *gin.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c.JSON(http.StatusOK, gin.H{"models": s.state.Models})
+}
+
+func (s *Server) createModel(c *gin.Context) {
+	var body struct {
+		ID               string   `json:"id"`
+		Name             string   `json:"name"`
+		Vendor           string   `json:"vendor"`
+		Aliases          []string `json:"aliases"`
+		Category         string   `json:"category"`
+		Description      string   `json:"description"`
+		Price            string   `json:"price"`
+		InputPricePer1K  float64  `json:"inputPricePer1K"`
+		OutputPricePer1K float64  `json:"outputPricePer1K"`
+		Context          string   `json:"context"`
+		Status           string   `json:"status"`
+		Recommended      bool     `json:"recommended"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		validationError(c, "无效的模型信息")
+		return
+	}
+	body.ID = strings.TrimSpace(body.ID)
+	body.Name = strings.TrimSpace(body.Name)
+	body.Vendor = strings.TrimSpace(body.Vendor)
+	body.Category = strings.TrimSpace(body.Category)
+	body.Description = strings.TrimSpace(body.Description)
+	body.Price = strings.TrimSpace(body.Price)
+	body.Context = strings.TrimSpace(body.Context)
+	body.Status = strings.TrimSpace(body.Status)
+	if body.ID == "" {
+		validationError(c, "模型 ID 不能为空")
+		return
+	}
+	if strings.ContainsAny(body.ID, " \t\r\n") || len(body.ID) > 128 {
+		validationError(c, "模型 ID 不能包含空白字符，且不能超过 128 个字符")
+		return
+	}
+	if body.Name == "" {
+		body.Name = body.ID
+	}
+	if body.Vendor == "" {
+		body.Vendor = "Custom"
+	}
+	if body.Category == "" {
+		body.Category = "通用"
+	}
+	if body.Price == "" {
+		body.Price = "自定义"
+	}
+	if body.Context == "" {
+		body.Context = "未配置上下文"
+	}
+	if body.Status == "" {
+		body.Status = "available"
+	}
+	if !allowedString(body.Status, "available", "limited", "disabled") {
+		validationError(c, "Invalid model status")
+		return
+	}
+	if body.InputPricePer1K < 0 || body.OutputPricePer1K < 0 {
+		validationError(c, "Model price must be greater than or equal to 0")
+		return
+	}
+
+	model := Model{
+		ID:               body.ID,
+		Name:             body.Name,
+		Vendor:           body.Vendor,
+		Aliases:          cleanAliases(body.Aliases),
+		Category:         body.Category,
+		Description:      body.Description,
+		Price:            body.Price,
+		InputPricePer1K:  round4(body.InputPricePer1K),
+		OutputPricePer1K: round4(body.OutputPricePer1K),
+		Context:          body.Context,
+		Status:           body.Status,
+		Recommended:      body.Recommended,
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.findModel(model.ID) != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": gin.H{"message": "模型 ID 已存在"}})
+		return
+	}
+	s.state.Models = append(s.state.Models, model)
+	s.saveStateLocked()
+	c.JSON(http.StatusCreated, gin.H{"model": model})
 }
 
 func (s *Server) updateModel(c *gin.Context) {
@@ -1768,7 +1854,7 @@ func (s *Server) chatCompletions(c *gin.Context) {
 	if model == nil || model.Status != "available" {
 		name := body.Model
 		if name == "" {
-			name = "gpt-5.6"
+			name = "<model>"
 		}
 		s.openAIErrorLocked(c, http.StatusBadRequest, "model_not_available", "No available model: "+name, "invalid_request_error", stringPtr("model"))
 		s.mu.Unlock()
@@ -2357,6 +2443,24 @@ func validateUsername(username string) string {
 	return ""
 }
 
+func cleanAliases(values []string) []string {
+	seen := map[string]bool{}
+	aliases := []string{}
+	for _, value := range values {
+		alias := strings.TrimSpace(value)
+		if alias == "" {
+			continue
+		}
+		lower := strings.ToLower(alias)
+		if seen[lower] {
+			continue
+		}
+		seen[lower] = true
+		aliases = append(aliases, alias)
+	}
+	return aliases
+}
+
 func normalizeRegistrationMode(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "email":
@@ -2626,7 +2730,7 @@ func (s *Server) findUserByAPIKeyLocked(authHeader string) *AuthContext {
 func (s *Server) resolveModelLocked(input string) *Model {
 	value := strings.TrimSpace(input)
 	if value == "" {
-		value = "gpt-5.6"
+		return nil
 	}
 	lower := strings.ToLower(value)
 	for i := range s.state.Models {
@@ -2787,6 +2891,16 @@ func (s *Server) migrateDemoSeedData() bool {
 	}
 	s.state.Channels = channels
 
+	models := make([]Model, 0, len(s.state.Models))
+	for _, model := range s.state.Models {
+		if isDemoSeedModel(model) {
+			changed = true
+			continue
+		}
+		models = append(models, model)
+	}
+	s.state.Models = models
+
 	logs := make([]RequestLog, 0, len(s.state.Logs))
 	for _, log := range s.state.Logs {
 		if isDemoSeedRequestID(log.ID) {
@@ -2857,6 +2971,23 @@ func isDemoSeedChannel(channel Channel) bool {
 		return channel.Name == "OpenAI Compatible" && strings.Contains(channel.BaseURL, "api.openai.example")
 	case "chn_1002":
 		return channel.Name == "Backup Provider" && strings.Contains(channel.BaseURL, "gateway.example")
+	default:
+		return false
+	}
+}
+
+func isDemoSeedModel(model Model) bool {
+	switch model.ID {
+	case "gpt-5.6":
+		return model.Name == "GPT-5.6" && model.Vendor == "OpenAI"
+	case "gpt-5.5":
+		return model.Name == "GPT-5.5" && model.Vendor == "OpenAI"
+	case "claude-fable-5":
+		return model.Name == "Claude Fable 5" && model.Vendor == "Claude"
+	case "gemini-3.1":
+		return model.Name == "Gemini 3.1" && model.Vendor == "Google"
+	case "deepseek-v4":
+		return model.Name == "DeepSeek V4" && model.Vendor == "DeepSeek"
 	default:
 		return false
 	}
@@ -3022,16 +3153,10 @@ ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()
 
 func defaultState() AppState {
 	return AppState{
-		Users:    []User{},
-		APIKeys:  []APIKey{},
-		Channels: []Channel{},
-		Models: []Model{
-			{ID: "gpt-5.6", Name: "GPT-5.6", Vendor: "OpenAI", Aliases: []string{"安全区", "gpt"}, Category: "通用", Description: "主力通用模型，适合复杂对话、工具调用和综合任务。", Price: "高", InputPricePer1K: 0.03, OutputPricePer1K: 0.06, Context: "长上下文", Status: "available", Recommended: true},
-			{ID: "gpt-5.5", Name: "GPT-5.5", Vendor: "OpenAI", Aliases: []string{"安全区", "gpt"}, Category: "通用", Description: "均衡通用模型，适合日常调用和产品默认模型。", Price: "中", InputPricePer1K: 0.01, OutputPricePer1K: 0.02, Context: "长上下文", Status: "available", Recommended: false},
-			{ID: "claude-fable-5", Name: "Claude Fable 5", Vendor: "Claude", Aliases: []string{"肥波5", "f5", "克", "小克"}, Category: "写作", Description: "适合长文、写作、总结和稳健的对话任务。", Price: "中", InputPricePer1K: 0.01, OutputPricePer1K: 0.02, Context: "长上下文", Status: "available", Recommended: true},
-			{ID: "gemini-3.1", Name: "Gemini 3.1", Vendor: "Google", Aliases: []string{"哈基米", "基米"}, Category: "多模态", Description: "适合多模态理解、长文本整理和通用任务。", Price: "中", InputPricePer1K: 0.01, OutputPricePer1K: 0.02, Context: "超长上下文", Status: "available", Recommended: false},
-			{ID: "deepseek-v4", Name: "DeepSeek V4", Vendor: "DeepSeek", Aliases: []string{"ds", "deepseek", "鲸鱼"}, Category: "推理", Description: "适合代码、推理和高性价比文本任务。", Price: "低", InputPricePer1K: 0.002, OutputPricePer1K: 0.004, Context: "长上下文", Status: "available", Recommended: true},
-		},
+		Users:       []User{},
+		APIKeys:     []APIKey{},
+		Channels:    []Channel{},
+		Models:      []Model{},
 		QuotaLedger: []QuotaEntry{},
 		Logs:        []RequestLog{},
 		Accounts:    []Account{},

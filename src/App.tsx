@@ -1,3 +1,4 @@
+import type { FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
 
 type Overview = {
@@ -46,6 +47,17 @@ type Channel = {
 
 type ChannelPatch = Partial<Channel> & {
   upstreamApiKey?: string;
+};
+
+type ModelCreate = {
+  id: string;
+  name: string;
+  vendor: string;
+  aliases: string[];
+  category: string;
+  description: string;
+  price: string;
+  context: string;
 };
 
 type ModelItem = {
@@ -391,6 +403,16 @@ function App() {
     window.setTimeout(() => setToast(""), 2400);
   }
 
+  async function createModel(model: ModelCreate) {
+    const data = await fetchJson<{ model: ModelItem }>("/api/models", {
+      method: "POST",
+      body: JSON.stringify(model)
+    });
+    setModels((current) => [...current, data.model]);
+    setToast("模型已添加");
+    window.setTimeout(() => setToast(""), 1800);
+  }
+
   async function copyAndToast(value: string, label = "已复制") {
     await copyText(value);
     setToast(label);
@@ -568,7 +590,7 @@ function App() {
           />
         )}
         {active === "keys" && <KeysView selectedUser={selectedUser} onCopy={copyAndToast} onCreateKey={createAPIKeyForUser} />}
-        {active === "models" && <ModelsView models={models} onCopy={copyAndToast} />}
+        {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} />}
         {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} />}
         {active === "logs" && <LogsView logs={logs} />}
         {active === "settings" && <SettingsView models={models} channels={channels} />}
@@ -937,7 +959,7 @@ function PublicHome({
           </div>
           <pre>{`curl /v1/chat/completions
   -H "Authorization: Bearer cat_..."
-  -d '{"model":"gpt-5.6"}'`}</pre>
+  -d '{"model":"你的模型ID"}'`}</pre>
         </div>
       </section>
 
@@ -1227,8 +1249,40 @@ function KeysView({
   );
 }
 
-function ModelsView({ models, onCopy }: { models: ModelItem[]; onCopy: (value: string, label?: string) => void }) {
+function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy: (value: string, label?: string) => void; onCreate: (model: ModelCreate) => Promise<void> }) {
   const recommended = models.filter((model) => model.recommended);
+  const [id, setId] = useState("");
+  const [name, setName] = useState("");
+  const [vendor, setVendor] = useState("");
+  const [aliases, setAliases] = useState("");
+  const [description, setDescription] = useState("");
+  const [message, setMessage] = useState("");
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const modelId = id.trim();
+    if (!modelId) return;
+    setMessage("");
+    try {
+      await onCreate({
+        id: modelId,
+        name: name.trim() || modelId,
+        vendor: vendor.trim() || "Custom",
+        aliases: aliases.split(",").map((alias) => alias.trim()).filter(Boolean),
+        category: "通用",
+        description: description.trim(),
+        price: "自定义",
+        context: "未配置上下文"
+      });
+      setId("");
+      setName("");
+      setVendor("");
+      setAliases("");
+      setDescription("");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "模型添加失败");
+    }
+  }
 
   return (
     <section className="models-page">
@@ -1239,20 +1293,38 @@ function ModelsView({ models, onCopy }: { models: ModelItem[]; onCopy: (value: s
         </div>
       </div>
 
-      <Panel title="推荐模型">
+      <Panel title="新增模型">
+        <form className="model-create-form" onSubmit={submit}>
+          <input value={id} onChange={(event) => setId(event.target.value)} placeholder="模型 ID，例如 openai/gpt-4.1" />
+          <input value={name} onChange={(event) => setName(event.target.value)} placeholder="显示名称（可选）" />
+          <input value={vendor} onChange={(event) => setVendor(event.target.value)} placeholder="供应商（可选）" />
+          <input value={aliases} onChange={(event) => setAliases(event.target.value)} placeholder="代称，多个用逗号分隔（可选）" />
+          <input className="model-create-wide" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="描述（可选）" />
+          <button className="primary-button" type="submit">新增模型</button>
+          <div className="model-create-message" role="status">{message}</div>
+        </form>
+      </Panel>
+
+      {recommended.length > 0 && (
+        <Panel title="推荐模型">
         <div className="model-grid">
           {recommended.map((model) => (
             <ModelCard key={model.id} model={model} featured onCopy={onCopy} />
           ))}
         </div>
-      </Panel>
+        </Panel>
+      )}
 
       <Panel title="全部模型">
-        <div className="model-list">
-          {models.map((model) => (
-            <ModelCard key={model.id} model={model} onCopy={onCopy} />
-          ))}
-        </div>
+        {models.length > 0 ? (
+          <div className="model-list">
+            {models.map((model) => (
+              <ModelCard key={model.id} model={model} onCopy={onCopy} />
+            ))}
+          </div>
+        ) : (
+          <Empty text="暂无模型，请先添加你要开放给用户调用的模型 ID" />
+        )}
       </Panel>
     </section>
   );
@@ -1388,7 +1460,7 @@ function ChannelEditor({ channel, onUpdate }: { channel: Channel; onUpdate: (id:
       </span>
       <span>{channel.priority}</span>
       <span>
-        <input value={models} onChange={(event) => setModels(event.target.value)} placeholder="gpt-5.6, ds" />
+        <input value={models} onChange={(event) => setModels(event.target.value)} placeholder="模型 ID，多个用逗号分隔" />
       </span>
       <span className="channel-actions">
         <input

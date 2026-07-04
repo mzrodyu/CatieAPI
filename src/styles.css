@@ -731,6 +731,41 @@ h3 {
   gap: 10px;
 }
 
+.model-create-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.model-create-form input {
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  padding: 0 12px;
+  color: var(--text);
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  outline: none;
+}
+
+.model-create-form input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent);
+}
+
+.model-create-wide {
+  grid-column: span 2;
+}
+
+.model-create-message {
+  grid-column: 1 / -1;
+  min-height: 18px;
+  color: #ff3b30;
+  font-size: 13px;
+}
+
 .model-card {
   display: grid;
   gap: 12px;
@@ -1818,6 +1853,14 @@ button.table-row:hover {
 
   .home-hero {
     min-height: 0;
+  }
+
+  .model-create-form {
+    grid-template-columns: 1fr;
+  }
+
+  .model-create-wide {
+    grid-column: auto;
   }
 
   .auth-stage {

@@ -51,6 +51,13 @@ func seedGatewayFixtures(server *Server) {
 		{ID: "chn_1001", Name: "OpenAI Compatible", Provider: "openai", BaseURL: "https://upstream-one.example.test/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-5.6", "gpt-5.5"}},
 		{ID: "chn_1002", Name: "Backup Provider", Provider: "compatible", BaseURL: "https://upstream-two.example.test/v1", Status: "standby", Priority: 2, Weight: 20, Models: []string{"claude-fable-5", "gemini-3.1", "deepseek-v4"}},
 	}
+	server.state.Models = []Model{
+		{ID: "gpt-5.6", Name: "GPT-5.6", Vendor: "OpenAI", Aliases: []string{"gpt"}, Category: "通用", Description: "Test model", Price: "高", InputPricePer1K: 0.03, OutputPricePer1K: 0.06, Context: "长上下文", Status: "available", Recommended: true},
+		{ID: "gpt-5.5", Name: "GPT-5.5", Vendor: "OpenAI", Aliases: []string{"gpt55"}, Category: "通用", Description: "Test model", Price: "中", InputPricePer1K: 0.01, OutputPricePer1K: 0.02, Context: "长上下文", Status: "available", Recommended: false},
+		{ID: "claude-fable-5", Name: "Claude Fable 5", Vendor: "Claude", Aliases: []string{"f5"}, Category: "写作", Description: "Test model", Price: "中", InputPricePer1K: 0.01, OutputPricePer1K: 0.02, Context: "长上下文", Status: "available", Recommended: true},
+		{ID: "gemini-3.1", Name: "Gemini 3.1", Vendor: "Google", Aliases: []string{"gemini"}, Category: "多模态", Description: "Test model", Price: "中", InputPricePer1K: 0.01, OutputPricePer1K: 0.02, Context: "超长上下文", Status: "available", Recommended: false},
+		{ID: "deepseek-v4", Name: "DeepSeek V4", Vendor: "DeepSeek", Aliases: []string{"ds", "deepseek"}, Category: "推理", Description: "Test model", Price: "低", InputPricePer1K: 0.002, OutputPricePer1K: 0.004, Context: "长上下文", Status: "available", Recommended: true},
+	}
 	server.state.Logs = []RequestLog{
 		{ID: "req_fixture_1", UserID: stringPtr("usr_1002"), APIKeyPrefix: stringPtr("cat_live"), Model: stringPtr("gpt-5.6"), Channel: stringPtr("OpenAI Compatible"), Status: "success", Cost: 0.04, LatencyMS: 820, CreatedAt: "2026-07-04T01:22:00.000Z"},
 		{ID: "req_fixture_2", UserID: stringPtr("usr_1003"), APIKeyPrefix: stringPtr("cat_trial"), Model: stringPtr("deepseek-v4"), Channel: stringPtr("Backup Provider"), Status: "failed", Cost: 0, LatencyMS: 1200, ErrorCode: "upstream_timeout", CreatedAt: "2026-07-04T01:25:00.000Z"},
@@ -270,6 +277,10 @@ func TestDemoSeedDataIsRemovedOnLoad(t *testing.T) {
 		{ID: "chn_1001", Name: "OpenAI Compatible", Provider: "openai", BaseURL: "https://api.openai.example/v1", Status: "healthy"},
 		{ID: "chn_real", Name: "Real Provider", Provider: "compatible", BaseURL: "https://real.example.test/v1", Status: "healthy"},
 	}
+	stored.Models = []Model{
+		{ID: "gpt-5.6", Name: "GPT-5.6", Vendor: "OpenAI", Status: "available"},
+		{ID: "real-model", Name: "Real Model", Vendor: "Custom", Status: "available"},
+	}
 	stored.Logs = []RequestLog{
 		{ID: "req_9001", Status: "success"},
 		{ID: "req_real", Status: "success"},
@@ -309,6 +320,9 @@ func TestDemoSeedDataIsRemovedOnLoad(t *testing.T) {
 	if len(server.state.Channels) != 1 || server.state.Channels[0].ID != "chn_real" {
 		t.Fatalf("channels after seed cleanup = %#v", server.state.Channels)
 	}
+	if len(server.state.Models) != 1 || server.state.Models[0].ID != "real-model" {
+		t.Fatalf("models after seed cleanup = %#v", server.state.Models)
+	}
 	if len(server.state.Logs) != 1 || server.state.Logs[0].ID != "req_real" {
 		t.Fatalf("logs after seed cleanup = %#v", server.state.Logs)
 	}
@@ -317,6 +331,19 @@ func TestDemoSeedDataIsRemovedOnLoad(t *testing.T) {
 	}
 	if server.state.Settings.Discord.Managed {
 		t.Fatalf("incomplete sample Discord settings were not cleared: %#v", server.state.Settings.Discord)
+	}
+}
+
+func TestDefaultStateStartsWithoutModels(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	_, router := testServerRouter(t)
+
+	response := perform(router, http.MethodGet, "/api/models", "", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("models status = %d body = %s", response.Code, response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"models":[]`)) {
+		t.Fatalf("default models were not empty: %s", response.Body.String())
 	}
 }
 
