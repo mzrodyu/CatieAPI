@@ -924,6 +924,122 @@ button.table-row:hover {
   padding: 0 14px;
 }
 
+.settings-layout {
+  display: grid;
+  gap: 18px;
+}
+
+.discord-settings {
+  display: grid;
+  gap: 18px;
+}
+
+.admin-token-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.admin-token-form label {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.admin-token-form input {
+  width: 100%;
+  min-width: 0;
+  height: 44px;
+  padding: 0 12px;
+  color: var(--text);
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  outline: none;
+}
+
+.admin-token-form .secondary-button {
+  min-height: 44px;
+}
+
+.discord-toggle-row,
+.settings-save-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.discord-toggle-row {
+  min-height: 56px;
+  padding: 0 2px 16px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.discord-toggle-row strong,
+.discord-toggle-row span {
+  display: block;
+}
+
+.discord-toggle-row span,
+.settings-save-row span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.settings-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.settings-form-grid label {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.settings-form-grid input {
+  width: 100%;
+  min-width: 0;
+  height: 44px;
+  padding: 0 12px;
+  color: var(--text);
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  outline: none;
+}
+
+.settings-form-grid input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent);
+}
+
+.settings-form-grid input::placeholder {
+  color: var(--muted);
+  opacity: 0.72;
+}
+
+.settings-form-wide {
+  grid-column: 1 / -1;
+}
+
+.settings-save-row {
+  min-height: 44px;
+}
+
+.settings-save-row .primary-button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
 .setting {
   min-height: 50px;
 }
@@ -938,11 +1054,13 @@ button.table-row:hover {
 
 .ios-switch {
   position: relative;
+  flex: 0 0 auto;
   width: 49px;
   height: 30px;
   padding: 2px;
   background: #d1d1d6;
   border-radius: 999px;
+  cursor: pointer;
   transition: background 160ms ease;
 }
 
@@ -1339,6 +1457,31 @@ button.table-row:hover {
   .quick-action {
     min-width: 132px;
     scroll-snap-align: start;
+  }
+
+  .settings-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-token-form {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-token-form .secondary-button {
+    width: 100%;
+  }
+
+  .settings-form-wide {
+    grid-column: auto;
+  }
+
+  .settings-save-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-save-row .primary-button {
+    width: 100%;
   }
 
   .public-home {

@@ -376,6 +376,57 @@ func TestDiscordOAuthRoleGateCreatesSessionForAdminRoutes(t *testing.T) {
 	}
 }
 
+func TestDiscordSettingsCanBeManagedWithoutEnvironmentVariables(t *testing.T) {
+	dataFile := filepath.Join(t.TempDir(), "state.json")
+	withEnv(t, map[string]string{
+		"PERSISTENCE": "file",
+		"DATA_FILE":   dataFile,
+		"SECRET_KEY":  "test-encryption-key",
+	})
+	router := testRouter(t)
+	body := `{
+		"enabled": true,
+		"clientId": "1446547305208746115",
+		"clientSecret": "discord-secret-value",
+		"redirectUri": "https://api.example.com/api/auth/discord/callback",
+		"allowedGuildId": "123456789012345678",
+		"allowedRoleId": "987654321098765432",
+		"authSuccessUrl": "https://api.example.com/",
+		"sessionTtlHours": 168
+	}`
+
+	saved := perform(router, http.MethodPatch, "/api/settings/discord", body, nil)
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save Discord settings status = %d body = %s", saved.Code, saved.Body.String())
+	}
+	if bytes.Contains(saved.Body.Bytes(), []byte("discord-secret-value")) {
+		t.Fatal("Discord Client Secret leaked in settings response")
+	}
+	if !bytes.Contains(saved.Body.Bytes(), []byte(`"clientSecretSet":true`)) {
+		t.Fatalf("Discord Client Secret status missing: %s", saved.Body.String())
+	}
+
+	stateContent, err := os.ReadFile(dataFile)
+	if err != nil {
+		t.Fatalf("read state file: %v", err)
+	}
+	if bytes.Contains(stateContent, []byte("discord-secret-value")) {
+		t.Fatal("plain Discord Client Secret was stored in state file")
+	}
+	if !bytes.Contains(stateContent, []byte("enc:v1:")) {
+		t.Fatalf("encrypted Discord Client Secret marker missing: %s", string(stateContent))
+	}
+
+	reloaded := testRouter(t)
+	start := perform(reloaded, http.MethodGet, "/api/auth/discord/start", "", nil)
+	if start.Code != http.StatusFound {
+		t.Fatalf("persisted Discord settings were not activated: %d body = %s", start.Code, start.Body.String())
+	}
+	if !strings.Contains(start.Header().Get("Location"), "client_id=1446547305208746115") {
+		t.Fatalf("Discord authorization URL used the wrong Client ID: %s", start.Header().Get("Location"))
+	}
+}
+
 func TestStaticSPAFallbackDoesNotCaptureAPIRoutes(t *testing.T) {
 	staticDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte("<html>CatieAPI</html>"), 0644); err != nil {

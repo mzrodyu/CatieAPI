@@ -2,7 +2,20 @@
 
 CatieAPI 支持 Discord OAuth2 登录，并可用服务器 ID 和身份组 ID 控制管理后台准入。
 
-## 环境变量
+## 后台配置
+
+推荐在 CatieAPI 的“设置”页面配置 Discord：
+
+1. 在“管理验证”中填写部署时设置的 `ADMIN_TOKEN`，点击“应用”。
+2. 填写 Client ID、Client Secret 和回调地址。
+3. 按需填写服务器 ID、身份组 ID 和登录成功跳转地址。
+4. 打开 Discord 登录开关并保存。
+
+Client Secret 会使用 `SECRET_KEY` 加密保存，接口不会返回明文。配置保存后立即生效，不需要重启。
+
+## 环境变量兜底
+
+以下变量仍可用于首次启动或故障恢复，后台保存配置后以后台配置为准：
 
 ```text
 ADMIN_TOKEN=你的管理密钥

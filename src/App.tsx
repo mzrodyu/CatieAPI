@@ -76,6 +76,17 @@ type UserDetail = {
   logs: RequestLog[];
 };
 
+type DiscordSettings = {
+  enabled: boolean;
+  clientId: string;
+  clientSecretSet: boolean;
+  redirectUri: string;
+  allowedGuildId: string;
+  allowedRoleId: string;
+  authSuccessUrl: string;
+  sessionTtlHours: number;
+};
+
 type IconName =
   | "home"
   | "users"
@@ -118,12 +129,19 @@ function Icon({ name }: { name: IconName }) {
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  headers.set("Content-Type", "application/json");
+  const adminToken = window.sessionStorage.getItem("catieapi-admin-token");
+  if (adminToken) headers.set("Authorization", `Bearer ${adminToken}`);
   const response = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
     credentials: "include",
-    ...init
+    ...init,
+    headers
   });
-  if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.error?.message || `Request failed: ${response.status}`);
+  }
   return response.json();
 }
 
@@ -738,15 +756,184 @@ function LogsView({ logs }: { logs: RequestLog[] }) {
 }
 
 function SettingsView() {
+  const [discord, setDiscord] = useState<DiscordSettings | null>(null);
+  const [clientSecret, setClientSecret] = useState("");
+  const [adminToken, setAdminToken] = useState(() => window.sessionStorage.getItem("catieapi-admin-token") || "");
+  const [message, setMessage] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    fetchJson<{ discord: DiscordSettings }>("/api/settings/discord")
+      .then((data) => setDiscord(data.discord))
+      .catch(() => setMessage("Discord 配置加载失败"));
+  }, []);
+
+  async function saveDiscordSettings() {
+    if (!discord) return;
+    setSaving(true);
+    setMessage("");
+    try {
+      const data = await fetchJson<{ discord: DiscordSettings }>("/api/settings/discord", {
+        method: "PATCH",
+        body: JSON.stringify({ ...discord, clientSecret })
+      });
+      setDiscord(data.discord);
+      setClientSecret("");
+      setMessage("Discord 配置已保存");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "保存失败，请检查填写内容");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
-    <Panel title="系统设置">
-      <div className="settings-group">
-        <Setting label="网关模式" value="OpenAI Compatible" />
-        <Setting label="默认模型" value="gpt-5.6" />
-        <Setting label="请求限流" value="启用" switchOn />
-        <Setting label="审计日志" value="启用" switchOn />
-      </div>
-    </Panel>
+    <div className="settings-layout">
+      <Panel title="管理验证">
+        <form
+          className="admin-token-form"
+          autoComplete="off"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const value = adminToken.trim();
+            if (value) {
+              window.sessionStorage.setItem("catieapi-admin-token", value);
+            } else {
+              window.sessionStorage.removeItem("catieapi-admin-token");
+            }
+            window.location.reload();
+          }}
+        >
+          <label>
+            <span>管理密钥</span>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={adminToken}
+              onChange={(event) => setAdminToken(event.target.value)}
+              placeholder="ADMIN_TOKEN"
+            />
+          </label>
+          <button className="secondary-button" type="submit">应用</button>
+        </form>
+      </Panel>
+
+      <Panel title="系统设置">
+        <div className="settings-group">
+          <Setting label="网关模式" value="OpenAI Compatible" />
+          <Setting label="默认模型" value="gpt-5.6" />
+          <Setting label="请求限流" value="启用" switchOn />
+          <Setting label="审计日志" value="启用" switchOn />
+        </div>
+      </Panel>
+
+      <Panel title="Discord 登录">
+        {!discord ? (
+          <div className="empty">正在读取配置</div>
+        ) : (
+          <form
+            className="discord-settings"
+            autoComplete="off"
+            onSubmit={(event) => {
+              event.preventDefault();
+              saveDiscordSettings();
+            }}
+          >
+            <div className="discord-toggle-row">
+              <div>
+                <strong>Discord 登录</strong>
+                <span>{discord.enabled ? "已启用" : "未启用"}</span>
+              </div>
+              <button
+                type="button"
+                className={discord.enabled ? "ios-switch is-on" : "ios-switch"}
+                aria-label={discord.enabled ? "停用 Discord 登录" : "启用 Discord 登录"}
+                aria-pressed={discord.enabled}
+                onClick={() => setDiscord({ ...discord, enabled: !discord.enabled })}
+              >
+                <span />
+              </button>
+            </div>
+
+            <div className="settings-form-grid">
+              <label>
+                <span>Client ID</span>
+                <input
+                  inputMode="numeric"
+                  autoComplete="off"
+                  value={discord.clientId}
+                  onChange={(event) => setDiscord({ ...discord, clientId: event.target.value })}
+                  placeholder="1446547305208746115"
+                />
+              </label>
+              <label>
+                <span>Client Secret</span>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={clientSecret}
+                  onChange={(event) => setClientSecret(event.target.value)}
+                  placeholder={discord.clientSecretSet ? "已设置，留空表示不修改" : "粘贴 Discord Client Secret"}
+                />
+              </label>
+              <label className="settings-form-wide">
+                <span>回调地址</span>
+                <input
+                  type="url"
+                  value={discord.redirectUri}
+                  onChange={(event) => setDiscord({ ...discord, redirectUri: event.target.value })}
+                  placeholder="https://你的域名/api/auth/discord/callback"
+                />
+              </label>
+              <label>
+                <span>服务器 ID</span>
+                <input
+                  inputMode="numeric"
+                  value={discord.allowedGuildId}
+                  onChange={(event) => setDiscord({ ...discord, allowedGuildId: event.target.value })}
+                  placeholder="允许登录的服务器 ID"
+                />
+              </label>
+              <label>
+                <span>身份组 ID</span>
+                <input
+                  inputMode="numeric"
+                  value={discord.allowedRoleId}
+                  onChange={(event) => setDiscord({ ...discord, allowedRoleId: event.target.value })}
+                  placeholder="允许登录的身份组 ID"
+                />
+              </label>
+              <label className="settings-form-wide">
+                <span>登录成功跳转地址</span>
+                <input
+                  type="url"
+                  value={discord.authSuccessUrl}
+                  onChange={(event) => setDiscord({ ...discord, authSuccessUrl: event.target.value })}
+                  placeholder="https://你的域名/"
+                />
+              </label>
+              <label>
+                <span>登录有效期（小时）</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="8760"
+                  value={discord.sessionTtlHours}
+                  onChange={(event) => setDiscord({ ...discord, sessionTtlHours: Number(event.target.value) })}
+                />
+              </label>
+            </div>
+
+            <div className="settings-save-row">
+              <span role="status">{message}</span>
+              <button className="primary-button" type="submit" disabled={saving}>
+                {saving ? "保存中" : "保存配置"}
+              </button>
+            </div>
+          </form>
+        )}
+      </Panel>
+    </div>
   );
 }
 

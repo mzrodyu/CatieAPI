@@ -34,6 +34,34 @@ type AppState struct {
 	Models      []Model      `json:"models"`
 	QuotaLedger []QuotaEntry `json:"quotaLedger"`
 	Logs        []RequestLog `json:"logs"`
+	Settings    AppSettings  `json:"settings,omitempty"`
+}
+
+type AppSettings struct {
+	Discord DiscordSettings `json:"discord,omitempty"`
+}
+
+type DiscordSettings struct {
+	Managed         bool   `json:"managed,omitempty"`
+	Enabled         bool   `json:"enabled"`
+	ClientID        string `json:"clientId,omitempty"`
+	ClientSecret    string `json:"clientSecret,omitempty"`
+	RedirectURI     string `json:"redirectUri,omitempty"`
+	AllowedGuildID  string `json:"allowedGuildId,omitempty"`
+	AllowedRoleID   string `json:"allowedRoleId,omitempty"`
+	AuthSuccessURL  string `json:"authSuccessUrl,omitempty"`
+	SessionTTLHours int    `json:"sessionTtlHours,omitempty"`
+}
+
+type PublicDiscordSettings struct {
+	Enabled         bool   `json:"enabled"`
+	ClientID        string `json:"clientId"`
+	ClientSecretSet bool   `json:"clientSecretSet"`
+	RedirectURI     string `json:"redirectUri"`
+	AllowedGuildID  string `json:"allowedGuildId"`
+	AllowedRoleID   string `json:"allowedRoleId"`
+	AuthSuccessURL  string `json:"authSuccessUrl"`
+	SessionTTLHours int    `json:"sessionTtlHours"`
 }
 
 type User struct {
@@ -227,6 +255,17 @@ type DiscordGuildMember struct {
 	Roles []string    `json:"roles"`
 }
 
+type DiscordRuntimeConfig struct {
+	ClientID       string
+	ClientSecret   string
+	RedirectURI    string
+	AllowedGuildID string
+	AllowedRoleID  string
+	OAuthBase      string
+	AuthSuccessURL string
+	SessionTTL     time.Duration
+}
+
 func main() {
 	loadDotEnv(".env")
 	gin.SetMode(gin.ReleaseMode)
@@ -280,6 +319,7 @@ func NewServer() *Server {
 	}
 	s.initStorage()
 	s.loadState()
+	s.applyPersistedDiscordSettings()
 	return s
 }
 
@@ -306,6 +346,8 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.PATCH("/models/:id", s.updateModel)
 	admin.GET("/logs", s.listLogs)
 	admin.GET("/quota-ledger", s.quotaLedger)
+	admin.GET("/settings/discord", s.getDiscordSettings)
+	admin.PATCH("/settings/discord", s.updateDiscordSettings)
 
 	router.GET("/v1/models", s.openAIModels)
 	router.GET("/v1/models/:id", s.openAIModel)
@@ -388,6 +430,12 @@ func (s *Server) health(c *gin.Context) {
 }
 
 func (s *Server) configStatus(c *gin.Context) {
+	s.mu.Lock()
+	discordEnabled := s.discordLoginEnabledLocked()
+	discordGuildGate := s.discordAllowedGuildID != ""
+	discordRoleGate := s.discordAllowedRoleID != ""
+	s.mu.Unlock()
+
 	c.JSON(http.StatusOK, gin.H{
 		"runtime":                 "go",
 		"framework":               "gin",
@@ -399,9 +447,9 @@ func (s *Server) configStatus(c *gin.Context) {
 		"upstreamConfigured":      s.upstreamAPIKey != "",
 		"upstreamTimeout":         int(s.upstreamTimeout.Seconds()),
 		"secretEncryptionEnabled": len(s.secretKey) > 0,
-		"discordLoginEnabled":     s.discordLoginEnabled(),
-		"discordGuildGate":        s.discordAllowedGuildID != "",
-		"discordRoleGate":         s.discordAllowedRoleID != "",
+		"discordLoginEnabled":     discordEnabled,
+		"discordGuildGate":        discordGuildGate,
+		"discordRoleGate":         discordRoleGate,
 		"corsOrigin":              s.corsOrigin,
 		"adminAuthEnabled":        s.adminToken != "",
 		"requestLimitPerMinute":   s.requestLimitPerMinute,
@@ -416,17 +464,170 @@ func (s *Server) configStatus(c *gin.Context) {
 			"channelToggle":   true,
 			"modelToggle":     true,
 			"adminAuth":       s.adminToken != "",
-			"discordLogin":    s.discordLoginEnabled(),
+			"discordLogin":    discordEnabled,
 		},
 	})
 }
 
+func (s *Server) getDiscordSettings(c *gin.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c.JSON(http.StatusOK, gin.H{"discord": s.publicDiscordSettingsLocked()})
+}
+
+func (s *Server) updateDiscordSettings(c *gin.Context) {
+	var body struct {
+		Enabled           bool   `json:"enabled"`
+		ClientID          string `json:"clientId"`
+		ClientSecret      string `json:"clientSecret"`
+		ClearClientSecret bool   `json:"clearClientSecret"`
+		RedirectURI       string `json:"redirectUri"`
+		AllowedGuildID    string `json:"allowedGuildId"`
+		AllowedRoleID     string `json:"allowedRoleId"`
+		AuthSuccessURL    string `json:"authSuccessUrl"`
+		SessionTTLHours   int    `json:"sessionTtlHours"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		s.openAIError(c, http.StatusBadRequest, "invalid_json", "Invalid JSON body", "invalid_request_error", nil)
+		return
+	}
+
+	body.ClientID = strings.TrimSpace(body.ClientID)
+	body.ClientSecret = strings.TrimSpace(body.ClientSecret)
+	body.RedirectURI = strings.TrimSpace(body.RedirectURI)
+	body.AllowedGuildID = strings.TrimSpace(body.AllowedGuildID)
+	body.AllowedRoleID = strings.TrimSpace(body.AllowedRoleID)
+	body.AuthSuccessURL = strings.TrimSpace(body.AuthSuccessURL)
+	if body.SessionTTLHours == 0 {
+		body.SessionTTLHours = 168
+	}
+	if body.SessionTTLHours < 1 || body.SessionTTLHours > 8760 {
+		validationError(c, "Session 有效期必须在 1 到 8760 小时之间")
+		return
+	}
+	if body.AllowedRoleID != "" && body.AllowedGuildID == "" {
+		validationError(c, "设置身份组 ID 时必须同时填写服务器 ID")
+		return
+	}
+	if body.ClientID != "" && !digitsOnly(body.ClientID) {
+		validationError(c, "Discord Client ID 只能包含数字")
+		return
+	}
+	if body.AllowedGuildID != "" && !digitsOnly(body.AllowedGuildID) {
+		validationError(c, "Discord 服务器 ID 只能包含数字")
+		return
+	}
+	if body.AllowedRoleID != "" && !digitsOnly(body.AllowedRoleID) {
+		validationError(c, "Discord 身份组 ID 只能包含数字")
+		return
+	}
+	if body.RedirectURI != "" && !validHTTPURL(body.RedirectURI) {
+		validationError(c, "Discord 回调地址必须是完整的 http:// 或 https:// 地址")
+		return
+	}
+	if body.AuthSuccessURL != "" && !validHTTPURL(body.AuthSuccessURL) {
+		validationError(c, "登录成功跳转地址必须是完整的 http:// 或 https:// 地址")
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	plainSecret := s.discordClientSecret
+	storedSecret := s.state.Settings.Discord.ClientSecret
+	if body.ClearClientSecret {
+		plainSecret = ""
+		storedSecret = ""
+	}
+	if body.ClientSecret != "" {
+		if len(s.secretKey) == 0 {
+			validationError(c, "保存 Discord Client Secret 前请先设置 SECRET_KEY")
+			return
+		}
+		protected, err := s.protectSecret(body.ClientSecret)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "Discord Client Secret 加密失败"}})
+			return
+		}
+		plainSecret = body.ClientSecret
+		storedSecret = protected
+	} else if storedSecret == "" && plainSecret != "" {
+		if len(s.secretKey) == 0 {
+			validationError(c, "保存 Discord 配置前请先设置 SECRET_KEY")
+			return
+		}
+		protected, err := s.protectSecret(plainSecret)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "Discord Client Secret 加密失败"}})
+			return
+		}
+		storedSecret = protected
+	}
+	if body.Enabled && (body.ClientID == "" || plainSecret == "" || body.RedirectURI == "" || body.AuthSuccessURL == "") {
+		validationError(c, "启用 Discord 登录前请填写 Client ID、Client Secret、回调地址和登录成功跳转地址")
+		return
+	}
+
+	s.state.Settings.Discord = DiscordSettings{
+		Managed:         true,
+		Enabled:         body.Enabled,
+		ClientID:        body.ClientID,
+		ClientSecret:    storedSecret,
+		RedirectURI:     body.RedirectURI,
+		AllowedGuildID:  body.AllowedGuildID,
+		AllowedRoleID:   body.AllowedRoleID,
+		AuthSuccessURL:  body.AuthSuccessURL,
+		SessionTTLHours: body.SessionTTLHours,
+	}
+	s.discordClientID = body.ClientID
+	s.discordClientSecret = plainSecret
+	s.discordRedirectURI = body.RedirectURI
+	s.discordAllowedGuildID = body.AllowedGuildID
+	s.discordAllowedRoleID = body.AllowedRoleID
+	s.authSuccessURL = body.AuthSuccessURL
+	s.sessionTTL = time.Duration(body.SessionTTLHours) * time.Hour
+	if !body.Enabled {
+		s.discordClientID = ""
+	}
+	s.saveStateLocked()
+
+	c.JSON(http.StatusOK, gin.H{"discord": s.publicDiscordSettingsLocked()})
+}
+
+func (s *Server) publicDiscordSettingsLocked() PublicDiscordSettings {
+	settings := s.state.Settings.Discord
+	enabled := s.discordLoginEnabledLocked()
+	if !settings.Managed {
+		return PublicDiscordSettings{
+			Enabled:         enabled,
+			ClientID:        s.discordClientID,
+			ClientSecretSet: s.discordClientSecret != "",
+			RedirectURI:     s.discordRedirectURI,
+			AllowedGuildID:  s.discordAllowedGuildID,
+			AllowedRoleID:   s.discordAllowedRoleID,
+			AuthSuccessURL:  s.authSuccessURL,
+			SessionTTLHours: int(s.sessionTTL.Hours()),
+		}
+	}
+	return PublicDiscordSettings{
+		Enabled:         settings.Enabled && enabled,
+		ClientID:        settings.ClientID,
+		ClientSecretSet: settings.ClientSecret != "",
+		RedirectURI:     settings.RedirectURI,
+		AllowedGuildID:  settings.AllowedGuildID,
+		AllowedRoleID:   settings.AllowedRoleID,
+		AuthSuccessURL:  settings.AuthSuccessURL,
+		SessionTTLHours: settings.SessionTTLHours,
+	}
+}
+
 func (s *Server) discordStart(c *gin.Context) {
-	if !s.discordLoginEnabled() {
+	config := s.discordRuntimeConfig()
+	if !config.enabled() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{"message": "Discord login is not configured"}})
 		return
 	}
-	if s.discordAllowedRoleID != "" && s.discordAllowedGuildID == "" {
+	if config.AllowedRoleID != "" && config.AllowedGuildID == "" {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{"message": "DISCORD_ALLOWED_GUILD_ID is required when DISCORD_ALLOWED_ROLE_ID is set"}})
 		return
 	}
@@ -437,20 +638,21 @@ func (s *Server) discordStart(c *gin.Context) {
 	s.mu.Unlock()
 
 	values := url.Values{}
-	values.Set("client_id", s.discordClientID)
-	values.Set("redirect_uri", s.discordRedirectURI)
+	values.Set("client_id", config.ClientID)
+	values.Set("redirect_uri", config.RedirectURI)
 	values.Set("response_type", "code")
 	values.Set("scope", "identify guilds.members.read")
 	values.Set("state", state)
-	c.Redirect(http.StatusFound, strings.TrimRight(s.discordOAuthBase, "/")+"/authorize?"+values.Encode())
+	c.Redirect(http.StatusFound, strings.TrimRight(config.OAuthBase, "/")+"/authorize?"+values.Encode())
 }
 
 func (s *Server) discordCallback(c *gin.Context) {
-	if !s.discordLoginEnabled() {
+	config := s.discordRuntimeConfig()
+	if !config.enabled() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{"message": "Discord login is not configured"}})
 		return
 	}
-	if s.discordAllowedRoleID != "" && s.discordAllowedGuildID == "" {
+	if config.AllowedRoleID != "" && config.AllowedGuildID == "" {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{"message": "DISCORD_ALLOWED_GUILD_ID is required when DISCORD_ALLOWED_ROLE_ID is set"}})
 		return
 	}
@@ -461,7 +663,7 @@ func (s *Server) discordCallback(c *gin.Context) {
 		return
 	}
 
-	token, err := s.exchangeDiscordCode(code)
+	token, err := s.exchangeDiscordCode(code, config)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": err.Error()}})
 		return
@@ -473,29 +675,30 @@ func (s *Server) discordCallback(c *gin.Context) {
 	}
 
 	roleID := ""
-	if s.discordAllowedGuildID != "" {
-		member, err := s.fetchDiscordGuildMember(token.AccessToken, s.discordAllowedGuildID)
+	if config.AllowedGuildID != "" {
+		member, err := s.fetchDiscordGuildMember(token.AccessToken, config.AllowedGuildID)
 		if err != nil {
 			c.JSON(http.StatusForbidden, gin.H{"error": gin.H{"message": "Discord server membership required"}})
 			return
 		}
-		if s.discordAllowedRoleID != "" && !containsString(member.Roles, s.discordAllowedRoleID) {
+		if config.AllowedRoleID != "" && !containsString(member.Roles, config.AllowedRoleID) {
 			c.JSON(http.StatusForbidden, gin.H{"error": gin.H{"message": "Discord role required"}})
 			return
 		}
-		roleID = s.discordAllowedRoleID
+		roleID = config.AllowedRoleID
 	}
 
-	session := s.createSession(user, s.discordAllowedGuildID, roleID)
+	session := s.createSession(user, config.AllowedGuildID, roleID, config.SessionTTL)
+	expiresAt, _ := time.Parse(time.RFC3339Nano, session.ExpiresAt)
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     "catie_session",
 		Value:    session.ID,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Expires:  time.Now().Add(s.sessionTTL),
+		Expires:  expiresAt,
 	})
-	c.Redirect(http.StatusFound, s.authSuccessURL)
+	c.Redirect(http.StatusFound, config.AuthSuccessURL)
 }
 
 func (s *Server) currentSession(c *gin.Context) {
@@ -1272,7 +1475,32 @@ func (s *Server) openAIErrorLocked(c *gin.Context, status int, code string, mess
 }
 
 func (s *Server) discordLoginEnabled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.discordLoginEnabledLocked()
+}
+
+func (s *Server) discordLoginEnabledLocked() bool {
 	return s.discordClientID != "" && s.discordClientSecret != "" && s.discordRedirectURI != ""
+}
+
+func (config DiscordRuntimeConfig) enabled() bool {
+	return config.ClientID != "" && config.ClientSecret != "" && config.RedirectURI != ""
+}
+
+func (s *Server) discordRuntimeConfig() DiscordRuntimeConfig {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return DiscordRuntimeConfig{
+		ClientID:       s.discordClientID,
+		ClientSecret:   s.discordClientSecret,
+		RedirectURI:    s.discordRedirectURI,
+		AllowedGuildID: s.discordAllowedGuildID,
+		AllowedRoleID:  s.discordAllowedRoleID,
+		OAuthBase:      s.discordOAuthBase,
+		AuthSuccessURL: s.authSuccessURL,
+		SessionTTL:     s.sessionTTL,
+	}
 }
 
 func (s *Server) consumeAuthState(state string) bool {
@@ -1286,15 +1514,15 @@ func (s *Server) consumeAuthState(state string) bool {
 	return time.Now().Before(expiresAt)
 }
 
-func (s *Server) exchangeDiscordCode(code string) (*DiscordTokenResponse, error) {
+func (s *Server) exchangeDiscordCode(code string, config DiscordRuntimeConfig) (*DiscordTokenResponse, error) {
 	values := url.Values{}
-	values.Set("client_id", s.discordClientID)
-	values.Set("client_secret", s.discordClientSecret)
+	values.Set("client_id", config.ClientID)
+	values.Set("client_secret", config.ClientSecret)
 	values.Set("grant_type", "authorization_code")
 	values.Set("code", code)
-	values.Set("redirect_uri", s.discordRedirectURI)
+	values.Set("redirect_uri", config.RedirectURI)
 
-	request, err := http.NewRequest(http.MethodPost, strings.TrimRight(s.discordOAuthBase, "/")+"/token", strings.NewReader(values.Encode()))
+	request, err := http.NewRequest(http.MethodPost, strings.TrimRight(config.OAuthBase, "/")+"/token", strings.NewReader(values.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -1359,7 +1587,7 @@ func (s *Server) discordGet(accessToken string, path string, target interface{})
 	return json.Unmarshal(content, target)
 }
 
-func (s *Server) createSession(user *DiscordUser, guildID string, roleID string) Session {
+func (s *Server) createSession(user *DiscordUser, guildID string, roleID string, ttl time.Duration) Session {
 	username := user.GlobalName
 	if username == "" {
 		username = user.Username
@@ -1373,7 +1601,7 @@ func (s *Server) createSession(user *DiscordUser, guildID string, roleID string)
 		GuildID:   guildID,
 		RoleID:    roleID,
 		CreatedAt: now(),
-		ExpiresAt: time.Now().Add(s.sessionTTL).UTC().Format(time.RFC3339Nano),
+		ExpiresAt: time.Now().Add(ttl).UTC().Format(time.RFC3339Nano),
 	}
 	s.mu.Lock()
 	s.sessions[session.ID] = session
@@ -1434,6 +1662,23 @@ func containsString(values []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func digitsOnly(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validHTTPURL(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
 func writeOpenAIError(c *gin.Context, status int, code string, message string, errorType string, param *string) {
@@ -1589,6 +1834,9 @@ func (s *Server) loadState() {
 	if stored.Logs != nil {
 		s.state.Logs = stored.Logs
 	}
+	if stored.Settings.Discord.Managed {
+		s.state.Settings = stored.Settings
+	}
 	changed := false
 	if s.migrateSeedKeys() {
 		changed = true
@@ -1598,6 +1846,30 @@ func (s *Server) loadState() {
 	}
 	if changed {
 		s.saveStateLocked()
+	}
+}
+
+func (s *Server) applyPersistedDiscordSettings() {
+	settings := s.state.Settings.Discord
+	if !settings.Managed {
+		return
+	}
+	secret, err := s.revealSecret(settings.ClientSecret)
+	if err != nil {
+		fmt.Printf("CatieAPI could not decrypt Discord Client Secret: %v\n", err)
+		secret = ""
+	}
+	s.discordClientID = settings.ClientID
+	s.discordClientSecret = secret
+	s.discordRedirectURI = settings.RedirectURI
+	s.discordAllowedGuildID = settings.AllowedGuildID
+	s.discordAllowedRoleID = settings.AllowedRoleID
+	s.authSuccessURL = settings.AuthSuccessURL
+	if settings.SessionTTLHours > 0 {
+		s.sessionTTL = time.Duration(settings.SessionTTLHours) * time.Hour
+	}
+	if !settings.Enabled {
+		s.discordClientID = ""
 	}
 }
 
@@ -1731,6 +2003,9 @@ func (s *Server) loadPostgresState() {
 	}
 	if stored.Logs != nil {
 		s.state.Logs = stored.Logs
+	}
+	if stored.Settings.Discord.Managed {
+		s.state.Settings = stored.Settings
 	}
 	changed := false
 	if s.migrateSeedKeys() {
@@ -1908,7 +2183,7 @@ func (s *Server) revealSecret(secret string) (string, error) {
 		return secret, nil
 	}
 	if len(s.secretKey) == 0 {
-		return "", fmt.Errorf("SECRET_KEY is required to decrypt channel upstream key")
+		return "", fmt.Errorf("SECRET_KEY is required to decrypt stored secret")
 	}
 	parts := strings.Split(secret, ":")
 	if len(parts) != 4 {

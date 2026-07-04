@@ -28,7 +28,6 @@ DATABASE_URL=postgres://数据库用户名:数据库密码@数据库地址:5432/
 ADMIN_TOKEN=你的管理密钥
 SECRET_KEY=你的随机加密密钥
 CORS_ORIGIN=https://你的域名
-AUTH_SUCCESS_URL=https://你的域名/
 ```
 
 变量说明：
@@ -42,9 +41,9 @@ AUTH_SUCCESS_URL=https://你的域名/
 | `ADMIN_TOKEN` | 管理接口备用令牌。没有 Discord session 时，可用 `Authorization: Bearer 你的管理密钥` 访问后台接口。 |
 | `SECRET_KEY` | 用来加密保存渠道上游 Key。上线后不要随意更换。 |
 | `CORS_ORIGIN` | 前端访问域名，例如 `https://api.example.com` 或你的站点域名。 |
-| `AUTH_SUCCESS_URL` | Discord 登录成功后跳转的前端地址。 |
+启动后进入“设置”，填写 `ADMIN_TOKEN` 对应的管理密钥并点击“应用”，即可在“Discord 登录”区域完成 OAuth 配置。
 
-如果使用 Discord 登录：
+Discord 配置会加密保存到当前持久化存储，保存后立即生效，不需要重启容器。以下环境变量仅作为首次启动或故障恢复时的可选兜底：
 
 ```text
 DISCORD_CLIENT_ID=1446547305208746115
@@ -114,7 +113,8 @@ https://your-domain.example/api/auth/discord/callback
 ## 环境变量原则
 
 - 不需要在生产服务器编辑 `.env`
-- 1Panel 的“环境变量”区域就是最终配置来源
+- 数据库、管理密钥和加密密钥由 1Panel 环境变量提供
+- Discord 登录等日常配置优先在 CatieAPI 后台管理
 - `.env.example` 只用于查看变量名和默认值
 - `SECRET_KEY` 上线后不要随意更换，否则已加密的渠道上游 Key 无法解密
-- `ADMIN_TOKEN` 和 `DISCORD_CLIENT_SECRET` 不要写进前端代码
+- `ADMIN_TOKEN` 和 `DISCORD_CLIENT_SECRET` 不要提交到 Git 仓库
