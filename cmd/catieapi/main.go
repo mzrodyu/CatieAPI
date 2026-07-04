@@ -135,6 +135,8 @@ type Channel struct {
 	Priority       int      `json:"priority"`
 	Weight         int      `json:"weight"`
 	Models         []string `json:"models"`
+	LastCheckedAt  string   `json:"lastCheckedAt,omitempty"`
+	LastError      string   `json:"lastError,omitempty"`
 }
 
 type PublicChannel struct {
@@ -147,6 +149,8 @@ type PublicChannel struct {
 	Priority       int      `json:"priority"`
 	Weight         int      `json:"weight"`
 	Models         []string `json:"models"`
+	LastCheckedAt  string   `json:"lastCheckedAt"`
+	LastError      string   `json:"lastError"`
 }
 
 type Model struct {
@@ -402,6 +406,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.GET("/channels", s.listChannels)
 	admin.POST("/channels", s.createChannel)
 	admin.PATCH("/channels/:id", s.updateChannel)
+	admin.POST("/channels/:id/check", s.checkChannel)
 	admin.POST("/channels/:id/sync-models", s.syncChannelModels)
 	admin.GET("/models", s.listModels)
 	admin.POST("/models", s.createModel)
@@ -1920,6 +1925,57 @@ func (s *Server) syncChannelModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"channel": publicChannel(*channel), "models": channel.Models, "addedModels": added})
 }
 
+func (s *Server) checkChannel(c *gin.Context) {
+	s.mu.Lock()
+	channel := s.findChannel(c.Param("id"))
+	if channel == nil {
+		s.mu.Unlock()
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
+		return
+	}
+	channelCopy := *channel
+	upstreamKey, err := s.revealSecret(channelCopy.UpstreamAPIKey)
+	if err != nil {
+		s.mu.Unlock()
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": err.Error()}})
+		return
+	}
+	if strings.TrimSpace(upstreamKey) == "" {
+		upstreamKey = s.upstreamAPIKey
+	}
+	s.mu.Unlock()
+
+	modelIDs, err := s.fetchUpstreamModelIDs(channelCopy, upstreamKey)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	channel = s.findChannel(channelCopy.ID)
+	if channel == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
+		return
+	}
+	channel.LastCheckedAt = now()
+	if err != nil {
+		channel.LastError = err.Error()
+		if channel.Status != "disabled" {
+			channel.Status = "standby"
+		}
+		s.saveStateLocked()
+		c.JSON(http.StatusBadGateway, gin.H{
+			"channel": publicChannel(*channel),
+			"ok":      false,
+			"error":   gin.H{"message": channel.LastError},
+		})
+		return
+	}
+	channel.LastError = ""
+	if channel.Status != "disabled" {
+		channel.Status = "healthy"
+	}
+	s.saveStateLocked()
+	c.JSON(http.StatusOK, gin.H{"channel": publicChannel(*channel), "ok": true, "models": modelIDs})
+}
+
 func (s *Server) listModels(c *gin.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2374,7 +2430,7 @@ type ProviderError struct {
 }
 
 func (s *Server) callProvider(call GatewayCall) (gin.H, *ProviderError) {
-	if strings.EqualFold(s.providerMode, "compatible") {
+	if s.shouldUseCompatibleProvider(call.Channel) {
 		return s.callOpenAICompatible(call)
 	}
 	return gin.H{
@@ -2417,11 +2473,7 @@ func (s *Server) callOpenAICompatible(call GatewayCall) (gin.H, *ProviderError) 
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		message := strings.TrimSpace(string(content))
-		if message == "" {
-			message = response.Status
-		}
-		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_error", Message: message, Type: "api_error"}
+		return nil, providerErrorFromUpstream(response.StatusCode, content)
 	}
 
 	var body gin.H
@@ -2499,11 +2551,7 @@ func (s *Server) streamOpenAICompatible(c *gin.Context, call GatewayCall) *Provi
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		content, _ := io.ReadAll(response.Body)
-		message := strings.TrimSpace(string(content))
-		if message == "" {
-			message = response.Status
-		}
-		return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_error", Message: message, Type: "api_error"}
+		return providerErrorFromUpstream(response.StatusCode, content)
 	}
 
 	c.Header("Content-Type", "text/event-stream")
@@ -2512,6 +2560,13 @@ func (s *Server) streamOpenAICompatible(c *gin.Context, call GatewayCall) *Provi
 	_, _ = io.Copy(c.Writer, response.Body)
 	c.Writer.Flush()
 	return nil
+}
+
+func (s *Server) shouldUseCompatibleProvider(channel Channel) bool {
+	if strings.EqualFold(s.providerMode, "compatible") {
+		return true
+	}
+	return strings.TrimSpace(channel.BaseURL) != "" && (strings.TrimSpace(channel.UpstreamAPIKey) != "" || strings.TrimSpace(s.upstreamAPIKey) != "")
 }
 
 func (s *Server) newOpenAICompatibleRequest(call GatewayCall, stream bool) (*http.Request, *ProviderError) {
@@ -2561,7 +2616,7 @@ func (s *Server) newOpenAICompatibleRequest(call GatewayCall, stream bool) (*htt
 }
 
 func (s *Server) writeProviderStream(c *gin.Context, call GatewayCall) *ProviderError {
-	if strings.EqualFold(s.providerMode, "compatible") {
+	if s.shouldUseCompatibleProvider(call.Channel) {
 		return s.streamOpenAICompatible(c, call)
 	}
 
@@ -4067,6 +4122,56 @@ func assistantTextFromChoice(choice map[string]interface{}) string {
 	return completionPrompt(message["content"])
 }
 
+func providerErrorFromUpstream(status int, content []byte) *ProviderError {
+	code := "upstream_error"
+	message := strings.TrimSpace(string(content))
+	errorType := "api_error"
+	var payload struct {
+		Error struct {
+			Code    interface{} `json:"code"`
+			Message string      `json:"message"`
+			Type    string      `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(content, &payload); err == nil {
+		if payload.Error.Message != "" {
+			message = payload.Error.Message
+		}
+		if payload.Error.Type != "" {
+			errorType = payload.Error.Type
+		}
+		if parsedCode := completionPrompt(payload.Error.Code); strings.TrimSpace(parsedCode) != "" && parsedCode != "null" {
+			code = "upstream_" + sanitizeErrorCode(parsedCode)
+		}
+	}
+	if message == "" {
+		message = http.StatusText(status)
+	}
+	if message == "" {
+		message = fmt.Sprintf("Upstream returned HTTP %d", status)
+	}
+	return &ProviderError{Status: status, Code: code, Message: message, Type: errorType}
+}
+
+func sanitizeErrorCode(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var builder strings.Builder
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') {
+			builder.WriteRune(character)
+			continue
+		}
+		if character == '_' || character == '-' || character == '.' {
+			builder.WriteRune('_')
+		}
+	}
+	result := strings.Trim(builder.String(), "_")
+	if result == "" {
+		return "error"
+	}
+	return result
+}
+
 func joinURL(base string, path string) string {
 	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(path, "/")
 }
@@ -4116,6 +4221,8 @@ func publicChannel(channel Channel) PublicChannel {
 		Priority:       channel.Priority,
 		Weight:         channel.Weight,
 		Models:         append([]string{}, channel.Models...),
+		LastCheckedAt:  channel.LastCheckedAt,
+		LastError:      channel.LastError,
 	}
 }
 

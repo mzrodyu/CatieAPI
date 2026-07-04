@@ -43,6 +43,8 @@ type Channel = {
   priority: number;
   weight: number;
   models: string[];
+  lastCheckedAt: string;
+  lastError: string;
 };
 
 type ChannelPatch = Partial<Channel> & {
@@ -167,10 +169,12 @@ function normalizeUserDetail(detail: UserDetail): UserDetail {
 
 class ApiError extends Error {
   status: number;
+  payload: unknown;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, payload?: unknown) {
     super(message);
     this.status = status;
+    this.payload = payload;
   }
 }
 
@@ -227,7 +231,7 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new ApiError(response.status, payload?.error?.message || `Request failed: ${response.status}`);
+    throw new ApiError(response.status, payload?.error?.message || `Request failed: ${response.status}`, payload);
   }
   return response.json();
 }
@@ -481,6 +485,24 @@ function App() {
     window.setTimeout(() => setToast(""), 2200);
   }
 
+  async function checkChannel(id: string) {
+    try {
+      const data = await fetchJson<{ channel: Channel; ok: boolean; models?: string[] }>(`/api/channels/${id}/check`, {
+        method: "POST",
+        body: JSON.stringify({})
+      });
+      setChannels((current) => current.map((channel) => (channel.id === id ? normalizeChannel(data.channel) : channel)));
+      setToast(data.ok ? `渠道可用，检测到 ${arrayOf(data.models).length} 个模型` : "渠道检测失败");
+    } catch (error) {
+      const channel = error instanceof ApiError ? (error.payload as { channel?: Channel } | null)?.channel : null;
+      if (channel) {
+        setChannels((current) => current.map((item) => (item.id === id ? normalizeChannel(channel) : item)));
+      }
+      setToast(error instanceof Error ? error.message : "渠道检测失败");
+    }
+    window.setTimeout(() => setToast(""), 2400);
+  }
+
   async function createChannel() {
     const data = await fetchJson<{ channel: Channel }>("/api/channels", {
       method: "POST",
@@ -681,7 +703,7 @@ function App() {
         )}
         {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} />}
         {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} />}
-        {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onSyncModels={syncChannelModels} />}
+        {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onSyncModels={syncChannelModels} onCheck={checkChannel} />}
         {active === "logs" && <LogsView logs={logs} />}
         {active === "settings" && <SettingsView models={models} channels={channels} />}
       </main>
@@ -1621,12 +1643,14 @@ function ChannelsView({
   channels,
   onUpdate,
   onCreate,
-  onSyncModels
+  onSyncModels,
+  onCheck
 }: {
   channels: Channel[];
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
   onCreate: () => void;
   onSyncModels: (id: string) => Promise<void>;
+  onCheck: (id: string) => Promise<void>;
 }) {
   return (
     <Panel title="渠道管理">
@@ -1638,7 +1662,7 @@ function ChannelsView({
       </div>
       <div className="channels-stack">
         {channels.map((channel) => (
-          <ChannelEditor key={channel.id} channel={channel} onUpdate={onUpdate} onSyncModels={onSyncModels} />
+          <ChannelEditor key={channel.id} channel={channel} onUpdate={onUpdate} onSyncModels={onSyncModels} onCheck={onCheck} />
         ))}
         {channels.length === 0 && <Empty text="暂无渠道，先在后端添加渠道接口或导入配置" />}
       </div>
@@ -1649,11 +1673,13 @@ function ChannelsView({
 function ChannelEditor({
   channel,
   onUpdate,
-  onSyncModels
+  onSyncModels,
+  onCheck
 }: {
   channel: Channel;
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
   onSyncModels: (id: string) => Promise<void>;
+  onCheck: (id: string) => Promise<void>;
 }) {
   const [provider, setProvider] = useState(channel.provider);
   const [baseUrl, setBaseUrl] = useState(channel.baseUrl);
@@ -1699,12 +1725,25 @@ function ChannelEditor({
     }
   }
 
+  async function check() {
+    setBusy("check");
+    try {
+      await save();
+      await onCheck(channel.id);
+    } finally {
+      setBusy("");
+    }
+  }
+
   return (
     <div className="channel-card">
       <div className="channel-card-head">
         <div>
           <strong>{channel.name}</strong>
           <span>{channel.baseUrl || "未配置上游地址"}</span>
+          {(channel.lastCheckedAt || channel.lastError) && (
+            <small>{channel.lastError ? `检测失败：${channel.lastError}` : `上次检测 ${formatDate(channel.lastCheckedAt)}`}</small>
+          )}
         </div>
         <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
       </div>
@@ -1737,6 +1776,9 @@ function ChannelEditor({
       </div>
 
       <div className="channel-card-actions">
+        <button className="secondary-button" onClick={check} disabled={busy !== ""}>
+          {busy === "check" ? "检测中" : "检测渠道"}
+        </button>
         <button className="secondary-button" onClick={syncModels} disabled={busy !== ""}>
           {busy === "sync" ? "拉取中" : "拉取模型"}
         </button>

@@ -773,6 +773,51 @@ func TestSyncChannelModelsPullsFromUpstream(t *testing.T) {
 	}
 }
 
+func TestCheckChannelUpdatesHealthState(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"provider-model-a"}]}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	_, router := testServerRouter(t)
+
+	created := perform(router, http.MethodPost, "/api/channels", `{"name":"Health","baseUrl":"`+upstream.URL+`/v1","status":"healthy"}`, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create channel status = %d body = %s", created.Code, created.Body.String())
+	}
+	var payload struct {
+		Channel PublicChannel `json:"channel"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode channel: %v", err)
+	}
+	enabled := perform(router, http.MethodPatch, "/api/channels/"+payload.Channel.ID, `{"status":"healthy"}`, nil)
+	if enabled.Code != http.StatusOK {
+		t.Fatalf("enable channel status = %d body = %s", enabled.Code, enabled.Body.String())
+	}
+	checked := perform(router, http.MethodPost, "/api/channels/"+payload.Channel.ID+"/check", `{}`, nil)
+	if checked.Code != http.StatusOK {
+		t.Fatalf("check channel status = %d body = %s", checked.Code, checked.Body.String())
+	}
+	if !bytes.Contains(checked.Body.Bytes(), []byte(`"ok":true`)) || !bytes.Contains(checked.Body.Bytes(), []byte(`"lastCheckedAt"`)) {
+		t.Fatalf("check channel response missing health state: %s", checked.Body.String())
+	}
+
+	upstream.Close()
+	failed := perform(router, http.MethodPost, "/api/channels/"+payload.Channel.ID+"/check", `{}`, nil)
+	if failed.Code != http.StatusBadGateway {
+		t.Fatalf("failed check status = %d body = %s", failed.Code, failed.Body.String())
+	}
+	if !bytes.Contains(failed.Body.Bytes(), []byte(`"status":"standby"`)) || !bytes.Contains(failed.Body.Bytes(), []byte(`"lastError"`)) {
+		t.Fatalf("failed check did not mark channel standby with error: %s", failed.Body.String())
+	}
+}
+
 func TestOpenAICompatibleProviderForwardsRequest(t *testing.T) {
 	var upstreamModel string
 	var upstreamPath string
@@ -844,6 +889,75 @@ func TestOpenAICompatibleProviderForwardsRequest(t *testing.T) {
 	}
 	if !bytes.Contains(ledger.Body.Bytes(), []byte(`"amount":-0.0001`)) {
 		t.Fatalf("usage-based minimum cost was not recorded: %s", ledger.Body.String())
+	}
+}
+
+func TestChannelKeyForwardsWithoutGlobalCompatibleMode(t *testing.T) {
+	var upstreamCalled bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		if auth := r.Header.Get("Authorization"); auth != "Bearer channel-secret" {
+			t.Fatalf("upstream auth = %s", auth)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_real","object":"chat.completion","model":"deepseek-v4","choices":[{"index":0,"message":{"role":"assistant","content":"real upstream"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":   "memory",
+		"PROVIDER_MODE": "mock",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	patchBody := `{"baseUrl":"` + upstream.URL + `/v1","upstreamApiKey":"channel-secret"}`
+	patched := perform(router, http.MethodPatch, "/api/channels/chn_1002", patchBody, nil)
+	if patched.Code != http.StatusOK {
+		t.Fatalf("patch channel status = %d body = %s", patched.Code, patched.Body.String())
+	}
+
+	chatBody := `{"model":"ds","messages":[{"role":"user","content":"hello"}]}`
+	chat := perform(router, http.MethodPost, "/v1/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if chat.Code != http.StatusOK {
+		t.Fatalf("chat status = %d body = %s", chat.Code, chat.Body.String())
+	}
+	if !upstreamCalled || !bytes.Contains(chat.Body.Bytes(), []byte(`real upstream`)) {
+		t.Fatalf("channel key request did not forward upstream: called=%v body=%s", upstreamCalled, chat.Body.String())
+	}
+}
+
+func TestOpenAICompatibleProviderPreservesUpstreamError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"code":"invalid_api_key","message":"bad upstream key","type":"invalid_request_error"}}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "compatible",
+		"UPSTREAM_API_KEY": "upstream-secret",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+
+	patchBody := `{"baseUrl":"` + upstream.URL + `/v1"}`
+	patched := perform(router, http.MethodPatch, "/api/channels/chn_1002", patchBody, nil)
+	if patched.Code != http.StatusOK {
+		t.Fatalf("patch channel status = %d body = %s", patched.Code, patched.Body.String())
+	}
+
+	chatBody := `{"model":"ds","messages":[{"role":"user","content":"hello"}]}`
+	chat := perform(router, http.MethodPost, "/v1/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if chat.Code != http.StatusUnauthorized {
+		t.Fatalf("chat upstream error status = %d body = %s", chat.Code, chat.Body.String())
+	}
+	if !bytes.Contains(chat.Body.Bytes(), []byte(`upstream_invalid_api_key`)) || !bytes.Contains(chat.Body.Bytes(), []byte(`bad upstream key`)) {
+		t.Fatalf("upstream error was not preserved: %s", chat.Body.String())
 	}
 }
 

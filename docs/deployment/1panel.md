@@ -82,7 +82,7 @@ UPSTREAM_TIMEOUT_SECONDS=60
 
 | 变量 | 作用 |
 | --- | --- |
-| `PROVIDER_MODE` | 上游模式。`mock` 为本地模拟，`compatible` 为转发到 OpenAI-compatible 上游。 |
+| `PROVIDER_MODE` | 上游模式。`mock` 为本地模拟，`compatible` 为强制转发到 OpenAI-compatible 上游。后台渠道填写了 Base URL 和上游 Key 时，即使这里仍是 `mock`，也会优先走真实上游。 |
 | `UPSTREAM_API_KEY` | 全局兜底上游 Key。更推荐在后台渠道里配置渠道级 Key。 |
 | `UPSTREAM_TIMEOUT_SECONDS` | 请求上游的超时时间，单位秒。 |
 
