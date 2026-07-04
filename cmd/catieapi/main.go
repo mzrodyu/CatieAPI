@@ -416,9 +416,11 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	router.GET("/v1/models", s.openAIModels)
 	router.GET("/v1/models/:id", s.openAIModel)
 	router.POST("/v1/chat/completions", s.chatCompletions)
+	router.POST("/v1/completions", s.completions)
 	router.GET("/models", s.openAIModels)
 	router.GET("/models/:id", s.openAIModel)
 	router.POST("/chat/completions", s.chatCompletions)
+	router.POST("/completions", s.completions)
 
 	router.NoRoute(func(c *gin.Context) {
 		if s.serveStatic(c) {
@@ -451,7 +453,7 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 			c.Header("Access-Control-Allow-Credentials", "true")
 			c.Header("Vary", "Origin")
 		}
-		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, X-Request-ID")
+		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, X-API-Key, X-Request-ID")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
@@ -2116,6 +2118,33 @@ func (s *Server) quotaLedger(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"entries": entries})
 }
 
+func (s *Server) completions(c *gin.Context) {
+	startedAt := time.Now()
+	idempotencyKey := c.GetHeader("Idempotency-Key")
+
+	var payload map[string]interface{}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		s.openAIError(c, http.StatusBadRequest, "invalid_json", "Invalid JSON body: "+err.Error(), "invalid_request_error", nil)
+		return
+	}
+
+	model, _ := payload["model"].(string)
+	stream, _ := payload["stream"].(bool)
+	prompt := completionPrompt(payload["prompt"])
+	if strings.TrimSpace(prompt) == "" {
+		s.openAIError(c, http.StatusBadRequest, "invalid_prompt", "prompt is required", "invalid_request_error", stringPtr("prompt"))
+		return
+	}
+	delete(payload, "prompt")
+	body := ChatRequest{
+		Model:    model,
+		Stream:   stream,
+		Messages: []ChatMessage{{Role: "user", Content: prompt}},
+		Payload:  payload,
+	}
+	s.handleChatCompletion(c, body, startedAt, idempotencyKey)
+}
+
 func (s *Server) chatCompletions(c *gin.Context) {
 	startedAt := time.Now()
 	idempotencyKey := c.GetHeader("Idempotency-Key")
@@ -2137,9 +2166,13 @@ func (s *Server) chatCompletions(c *gin.Context) {
 		return
 	}
 
+	s.handleChatCompletion(c, body, startedAt, idempotencyKey)
+}
+
+func (s *Server) handleChatCompletion(c *gin.Context, body ChatRequest, startedAt time.Time, idempotencyKey string) {
 	s.mu.Lock()
 
-	auth := s.findUserByAPIKeyLocked(c.GetHeader("Authorization"))
+	auth := s.findUserByAPIKeyLocked(apiTokenFromRequest(c))
 	if auth == nil {
 		s.openAIErrorLocked(c, http.StatusUnauthorized, "invalid_api_key", "Invalid CatieAPI key", "invalid_request_error", nil)
 		s.mu.Unlock()
@@ -3137,8 +3170,8 @@ func (s *Server) appendInitialQuotaLocked(user *User) {
 	})
 }
 
-func (s *Server) findUserByAPIKeyLocked(authHeader string) *AuthContext {
-	token := bearerToken(authHeader)
+func (s *Server) findUserByAPIKeyLocked(secret string) *AuthContext {
+	token := bearerToken(secret)
 	if token == "" {
 		return nil
 	}
@@ -3154,6 +3187,21 @@ func (s *Server) findUserByAPIKeyLocked(authHeader string) *AuthContext {
 		return &AuthContext{User: user, Key: key}
 	}
 	return nil
+}
+
+func apiTokenFromRequest(c *gin.Context) string {
+	for _, value := range []string{
+		c.GetHeader("Authorization"),
+		c.GetHeader("X-API-Key"),
+		c.GetHeader("X-Api-Key"),
+		c.GetHeader("Api-Key"),
+		c.Query("api_key"),
+	} {
+		if token := bearerToken(value); token != "" {
+			return token
+		}
+	}
+	return ""
 }
 
 func (s *Server) resolveModelLocked(input string) *Model {
@@ -3813,6 +3861,26 @@ func modelRates(model Model) (float64, float64) {
 		return 0, 0
 	}
 	return model.InputPricePer1K, model.OutputPricePer1K
+}
+
+func completionPrompt(value interface{}) string {
+	switch prompt := value.(type) {
+	case string:
+		return prompt
+	case []interface{}:
+		parts := []string{}
+		for _, item := range prompt {
+			parts = append(parts, completionPrompt(item))
+		}
+		return strings.Join(parts, "\n")
+	case []string:
+		return strings.Join(prompt, "\n")
+	case nil:
+		return ""
+	default:
+		encoded, _ := json.Marshal(prompt)
+		return string(encoded)
+	}
 }
 
 func joinURL(base string, path string) string {

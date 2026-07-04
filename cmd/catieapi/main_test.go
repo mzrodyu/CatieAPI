@@ -524,6 +524,63 @@ func TestCreatedAPIKeyUsesSecretWithoutLeakingHash(t *testing.T) {
 	}
 }
 
+func TestXAPIKeyHeaderIsAccepted(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+
+	chatBody := `{"model":"ds","messages":[{"role":"user","content":"hello"}]}`
+	chat := perform(router, http.MethodPost, "/chat/completions", chatBody, map[string]string{"X-API-Key": "cat_fixture_live_secret"})
+	if chat.Code != http.StatusOK {
+		t.Fatalf("chat with x-api-key status = %d body = %s", chat.Code, chat.Body.String())
+	}
+	if !bytes.Contains(chat.Body.Bytes(), []byte(`"model":"deepseek-v4"`)) {
+		t.Fatalf("x-api-key request did not resolve model: %s", chat.Body.String())
+	}
+}
+
+func TestLegacyCompletionsEndpointUsesChatFlow(t *testing.T) {
+	var upstreamPayload map[string]interface{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamPayload); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_completion","object":"chat.completion","model":"deepseek-v4","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "compatible",
+		"UPSTREAM_API_KEY": "upstream-secret",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.findChannel("chn_1002").BaseURL = upstream.URL + "/v1"
+	server.mu.Unlock()
+
+	body := `{"model":"ds","prompt":["hello","world"],"temperature":0.2}`
+	response := perform(router, http.MethodPost, "/v1/completions", body, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("legacy completions status = %d body = %s", response.Code, response.Body.String())
+	}
+	if upstreamPayload["prompt"] != nil {
+		t.Fatalf("legacy prompt leaked to chat upstream: %#v", upstreamPayload)
+	}
+	if upstreamPayload["temperature"] != 0.2 {
+		t.Fatalf("legacy completion options were not forwarded: %#v", upstreamPayload)
+	}
+	messages, ok := upstreamPayload["messages"].([]interface{})
+	if !ok || len(messages) != 1 {
+		t.Fatalf("legacy prompt was not converted to messages: %#v", upstreamPayload["messages"])
+	}
+}
+
 func TestUnpricedModelAllowsZeroBalance(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)
