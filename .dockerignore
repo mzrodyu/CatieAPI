@@ -1,0 +1,11 @@
+node_modules
+dist
+data
+.logs
+.playwright-cli
+output
+.git
+.codex
+.agents
+Dockerfile
+*.log
