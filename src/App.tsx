@@ -309,6 +309,10 @@ function channelModelSummary(models: string[]) {
   return list.length > 3 ? `${visible} 等 ${list.length} 个模型` : visible;
 }
 
+function providerDisplayName(provider: string) {
+  return providerOptions.find((option) => option.value === provider)?.label || provider || "Custom";
+}
+
 async function copyText(value: string) {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(value);
@@ -1519,7 +1523,7 @@ function KeysView({
               <div className="list-row" key={key.id}>
                 <div>
                   <strong>{key.name}</strong>
-                  <span>{key.prefix}*** · 仅用于识别，不是完整密钥 · 最后使用 {formatDate(key.lastUsedAt)}</span>
+                  <span>{key.prefix}*** · 最后使用 {formatDate(key.lastUsedAt)}</span>
                 </div>
                 <Badge tone={key.status}>{statusLabel(key.status)}</Badge>
               </div>
@@ -1688,6 +1692,7 @@ function ChannelEditor({
   onSyncModels: (id: string) => Promise<void>;
   onCheck: (id: string) => Promise<void>;
 }) {
+  const [name, setName] = useState(channel.name);
   const [provider, setProvider] = useState(channel.provider);
   const [baseUrl, setBaseUrl] = useState(channel.baseUrl);
   const [models, setModels] = useState(arrayOf(channel.models).join(", "));
@@ -1695,14 +1700,16 @@ function ChannelEditor({
   const [busy, setBusy] = useState("");
 
   useEffect(() => {
+    setName(channel.name);
     setProvider(channel.provider);
     setBaseUrl(channel.baseUrl);
     setModels(arrayOf(channel.models).join(", "));
     setUpstreamApiKey("");
-  }, [channel.id, channel.provider, channel.baseUrl, channel.models]);
+  }, [channel.id, channel.name, channel.provider, channel.baseUrl, channel.models]);
 
   async function save() {
     const patch: ChannelPatch = {
+      name: name.trim() || channel.name,
       provider,
       baseUrl,
       models: models
@@ -1764,6 +1771,14 @@ function ChannelEditor({
       </div>
 
       <div className="channel-form-grid">
+        <label>
+          <span>渠道名称</span>
+          <input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如 Gemini 主线路" />
+        </label>
+        <label>
+          <span>供应商</span>
+          <input value={providerDisplayName(provider)} readOnly />
+        </label>
         <label className="channel-form-wide">
           <span>Base URL</span>
           <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://provider.example/v1" />

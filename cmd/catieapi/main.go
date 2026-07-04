@@ -1905,15 +1905,23 @@ func (s *Server) syncChannelModels(c *gin.Context) {
 	channel.Models = mergeStrings(channel.Models, modelIDs)
 	added := []Model{}
 	for _, id := range modelIDs {
-		if s.findModel(id) != nil {
+		sourceName := strings.TrimSpace(channel.Name)
+		if sourceName == "" {
+			sourceName = providerLabel(channel.Provider)
+		}
+		if existing := s.findModel(id); existing != nil {
+			if existing.Description == "从上游模型列表拉取" {
+				existing.Vendor = sourceName
+				existing.Description = "由 " + sourceName + " 拉取"
+			}
 			continue
 		}
 		model := Model{
 			ID:          id,
 			Name:        id,
-			Vendor:      providerLabel(channel.Provider),
+			Vendor:      sourceName,
 			Category:    "通用",
-			Description: "从上游模型列表拉取",
+			Description: "由 " + sourceName + " 拉取",
 			Price:       "自定义",
 			Context:     "未配置上下文",
 			Status:      "available",
