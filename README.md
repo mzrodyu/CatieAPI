@@ -80,6 +80,7 @@ MIT License. Copyright (c) 2026 Catie.
 - [文档方案](docs/DOCUMENTATION_PLAN.md)
 - [本地开发](docs/deployment/local-development.md)
 - [1Panel 部署](docs/deployment/1panel.md)
+- [账号与登录](docs/deployment/accounts.md)
 - [Discord 登录](docs/deployment/discord-login.md)
 - [Postgres 持久化](docs/deployment/postgres.md)
 - [路线图](docs/ROADMAP.md)

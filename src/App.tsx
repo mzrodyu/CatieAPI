@@ -87,6 +87,42 @@ type DiscordSettings = {
   sessionTtlHours: number;
 };
 
+type AuthSession = {
+  id: string;
+  provider: string;
+  userId: string;
+  username: string;
+  avatar: string;
+  role: "admin" | "user";
+  expiresAt: string;
+};
+
+type AuthStatus = {
+  initialized: boolean;
+  authenticated: boolean;
+  registrationEnabled: boolean;
+  discordEnabled: boolean;
+  session: AuthSession | null;
+};
+
+type AccountProfile = {
+  id: string;
+  userId: string;
+  username: string;
+  email: string;
+  discordUserId: string;
+  role: "admin" | "user";
+};
+
+class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 type IconName =
   | "home"
   | "users"
@@ -140,7 +176,7 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new Error(payload?.error?.message || `Request failed: ${response.status}`);
+    throw new ApiError(response.status, payload?.error?.message || `Request failed: ${response.status}`);
   }
   return response.json();
 }
@@ -180,7 +216,9 @@ function statusLabel(status: string) {
 }
 
 function App() {
-  const [surface, setSurface] = useState<"home" | "console">("home");
+  const [surface, setSurface] = useState<"home" | "auth" | "console" | "account">("home");
+  const [authMode, setAuthMode] = useState<"setup" | "login" | "register">("login");
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [active, setActive] = useState<(typeof navItems)[number]["id"]>("overview");
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const saved = window.localStorage.getItem("catieapi-theme");
@@ -197,6 +235,7 @@ function App() {
   const [selectedUserId, setSelectedUserId] = useState("usr_1001");
   const [selectedUser, setSelectedUser] = useState<UserDetail | null>(null);
   const [toast, setToast] = useState("");
+  const [consoleReady, setConsoleReady] = useState(false);
 
   const filteredUsers = useMemo(() => {
     const value = query.trim().toLowerCase();
@@ -217,6 +256,7 @@ function App() {
     setChannels(channelsData.channels);
     setModels(modelsData.models);
     setLogs(logsData.logs);
+    setConsoleReady(true);
   }
 
   async function loadUser(id: string) {
@@ -235,20 +275,85 @@ function App() {
     window.setTimeout(() => setToast(""), 1800);
   }
 
-  useEffect(() => {
-    loadAll().catch(() => setToast("加载数据失败"));
-  }, []);
+  function handleLoadError(error: unknown, fallback: string) {
+    if (error instanceof ApiError && error.status === 401) {
+      setConsoleReady(false);
+      setAuthMode("login");
+      setSurface("auth");
+      return;
+    }
+    setToast(fallback);
+  }
+
+  async function openPortal() {
+    try {
+      const status = await fetchJson<AuthStatus>("/api/auth/status");
+      setAuthStatus(status);
+      if (!status.initialized) {
+        setAuthMode("setup");
+        setSurface("auth");
+        return;
+      }
+      if (!status.authenticated) {
+        setAuthMode("login");
+        setSurface("auth");
+        return;
+      }
+      setSurface(status.session?.role === "admin" ? "console" : "account");
+    } catch (error) {
+      handleLoadError(error, "认证状态加载失败");
+    }
+  }
+
+  async function logout() {
+    await fetchJson("/api/auth/logout", { method: "POST" });
+    window.sessionStorage.removeItem("catieapi-admin-token");
+    setAuthStatus(null);
+    setSurface("home");
+  }
 
   useEffect(() => {
-    loadUser(selectedUserId).catch(() => setToast("加载用户详情失败"));
-  }, [selectedUserId]);
+    if (surface !== "console") return;
+    setConsoleReady(false);
+    loadAll().catch((error) => handleLoadError(error, "加载数据失败"));
+  }, [surface]);
+
+  useEffect(() => {
+    if (surface !== "console" || !consoleReady) return;
+    loadUser(selectedUserId).catch((error) => handleLoadError(error, "加载用户详情失败"));
+  }, [selectedUserId, surface, consoleReady]);
 
   useEffect(() => {
     window.localStorage.setItem("catieapi-theme", theme);
   }, [theme]);
 
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0 });
+  }, [surface, active]);
+
   if (surface === "home") {
-    return <PublicHome theme={theme} setTheme={setTheme} enterConsole={() => setSurface("console")} />;
+    return <PublicHome theme={theme} setTheme={setTheme} enterConsole={openPortal} />;
+  }
+
+  if (surface === "auth") {
+    return (
+      <AuthScreen
+        theme={theme}
+        mode={authMode}
+        status={authStatus}
+        setTheme={setTheme}
+        setMode={setAuthMode}
+        goHome={() => setSurface("home")}
+        onAuthenticated={(session) => {
+          setAuthStatus((current) => current ? { ...current, authenticated: true, initialized: true, session } : null);
+          setSurface(session.role === "admin" ? "console" : "account");
+        }}
+      />
+    );
+  }
+
+  if (surface === "account") {
+    return <AccountHome theme={theme} setTheme={setTheme} goHome={() => setSurface("home")} openLogin={openPortal} />;
   }
 
   return (
@@ -299,11 +404,14 @@ function App() {
               <Icon name={theme === "dark" ? "sun" : "moon"} />
               <span>{theme === "dark" ? "浅色" : "暗色"}</span>
             </button>
-          <button className="primary-button" onClick={() => loadAll()}>
+          <button className="primary-button" onClick={() => loadAll().catch((error) => handleLoadError(error, "刷新失败"))}>
             刷新
           </button>
           <button className="secondary-button home-link" onClick={() => setSurface("home")}>
             首页
+          </button>
+          <button className="secondary-button" onClick={logout}>
+            退出
           </button>
         </div>
       </header>
@@ -328,6 +436,278 @@ function App() {
 
       {toast && <div className="toast">{toast}</div>}
     </div>
+  );
+}
+
+function AuthScreen({
+  theme,
+  mode,
+  status,
+  setTheme,
+  setMode,
+  goHome,
+  onAuthenticated
+}: {
+  theme: "light" | "dark";
+  mode: "setup" | "login" | "register";
+  status: AuthStatus | null;
+  setTheme: (theme: "light" | "dark") => void;
+  setMode: (mode: "setup" | "login" | "register") => void;
+  goHome: () => void;
+  onAuthenticated: (session: AuthSession) => void;
+}) {
+  const [username, setUsername] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [email, setEmail] = useState("");
+  const [discordUserId, setDiscordUserId] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [message, setMessage] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const isSetup = mode === "setup";
+  const isRegister = mode === "register";
+
+  async function submit() {
+    if ((isSetup || isRegister) && password !== confirmPassword) {
+      setMessage("两次输入的密码不一致");
+      return;
+    }
+    setSubmitting(true);
+    setMessage("");
+    try {
+      const endpoint = isSetup ? "/api/auth/setup" : isRegister ? "/api/auth/register" : "/api/auth/login";
+      const body = mode === "login"
+        ? { identifier: username, password }
+        : { username, password, displayName, email, discordUserId: isSetup ? discordUserId : "" };
+      const data = await fetchJson<{ session: AuthSession }>(endpoint, {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+      onAuthenticated(data.session);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "操作失败");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="auth-page" data-theme={theme}>
+      <header className="auth-topbar">
+        <button className="auth-brand" onClick={goHome}>
+          <span className="brand-mark">C</span>
+          <strong>CatieAPI</strong>
+        </button>
+        <button className="theme-toggle" aria-label="切换暗色模式" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+          <Icon name={theme === "dark" ? "sun" : "moon"} />
+          <span>{theme === "dark" ? "浅色" : "暗色"}</span>
+        </button>
+      </header>
+
+      <section className="auth-stage">
+        <div className="auth-intro">
+          <span>{isSetup ? "First Run" : "Welcome Back"}</span>
+          <h1>{isSetup ? "初始化 CatieAPI" : isRegister ? "创建账号" : "登录"}</h1>
+          <p>{isSetup ? "创建第一个管理员账号，完成后即可进入控制台。" : "使用你的 CatieAPI 账号继续。"}</p>
+        </div>
+
+        <form
+          className="auth-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submit();
+          }}
+        >
+          {mode !== "login" && (
+            <label>
+              <span>显示名称</span>
+              <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} autoComplete="name" placeholder="Catie" />
+            </label>
+          )}
+          <label>
+            <span>{mode === "login" ? "账号或邮箱" : "账号"}</span>
+            <input
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              autoComplete="username"
+              placeholder={mode === "login" ? "输入账号或邮箱" : "3-32 位字母、数字、_ 或 -"}
+            />
+          </label>
+          {mode !== "login" && (
+            <label>
+              <span>邮箱（可选）</span>
+              <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" placeholder="name@example.com" />
+            </label>
+          )}
+          {isSetup && (
+            <label>
+              <span>Discord 用户 ID（可选）</span>
+              <input
+                inputMode="numeric"
+                autoComplete="off"
+                value={discordUserId}
+                onChange={(event) => setDiscordUserId(event.target.value)}
+                placeholder="绑定管理员 Discord 账号"
+              />
+            </label>
+          )}
+          <label>
+            <span>密码</span>
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              autoComplete={mode === "login" ? "current-password" : "new-password"}
+              placeholder="至少 8 个字符"
+            />
+          </label>
+          {mode !== "login" && (
+            <label>
+              <span>确认密码</span>
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                autoComplete="new-password"
+                placeholder="再次输入密码"
+              />
+            </label>
+          )}
+          <div className="auth-message" role="status">{message}</div>
+          <button className="primary-button auth-submit" type="submit" disabled={submitting}>
+            {submitting ? "请稍候" : isSetup ? "创建管理员" : isRegister ? "注册" : "登录"}
+          </button>
+
+          {!isSetup && status?.discordEnabled && (
+            <a className="discord-login-button" href="/api/auth/discord/start">使用 Discord 登录</a>
+          )}
+          {!isSetup && (
+            <div className="auth-switch">
+              {mode === "login" && status?.registrationEnabled ? (
+                <button type="button" onClick={() => setMode("register")}>创建账号</button>
+              ) : (
+                <button type="button" onClick={() => setMode("login")}>返回登录</button>
+              )}
+            </div>
+          )}
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function AccountHome({
+  theme,
+  setTheme,
+  goHome,
+  openLogin
+}: {
+  theme: "light" | "dark";
+  setTheme: (theme: "light" | "dark") => void;
+  goHome: () => void;
+  openLogin: () => void;
+}) {
+  const [data, setData] = useState<{ user: User; apiKeys: ApiKey[]; session: AuthSession } | null>(null);
+  const [models, setModels] = useState<ModelItem[]>([]);
+  const [newSecret, setNewSecret] = useState("");
+  const [message, setMessage] = useState("");
+
+  async function load() {
+    try {
+      const [account, catalog] = await Promise.all([
+        fetchJson<{ user: User; apiKeys: ApiKey[]; session: AuthSession }>("/api/account/me"),
+        fetchJson<{ models: ModelItem[] }>("/api/catalog/models")
+      ]);
+      setData(account);
+      setModels(catalog.models);
+    } catch {
+      openLogin();
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function createKey() {
+    try {
+      const result = await fetchJson<{ secret: string }>("/api/account/api-keys", {
+        method: "POST",
+        body: JSON.stringify({ name: "My API Key" })
+      });
+      setNewSecret(result.secret);
+      setMessage("新密钥只显示这一次");
+      await load();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "创建密钥失败");
+    }
+  }
+
+  async function logout() {
+    await fetchJson("/api/auth/logout", { method: "POST" });
+    goHome();
+  }
+
+  return (
+    <main className="account-page" data-theme={theme}>
+      <header className="account-topbar">
+        <button className="auth-brand" onClick={goHome}>
+          <span className="brand-mark">C</span>
+          <strong>CatieAPI</strong>
+        </button>
+        <div className="account-actions">
+          <button className="theme-toggle" aria-label="切换暗色模式" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+            <Icon name={theme === "dark" ? "sun" : "moon"} />
+          </button>
+          <button className="secondary-button" onClick={logout}>退出</button>
+        </div>
+      </header>
+
+      <section className="account-content">
+        <div className="account-heading">
+          <div>
+            <p className="eyebrow">My CatieAPI</p>
+            <h1>{data?.user.name || "账户"}</h1>
+          </div>
+          <div className="account-balance">
+            <span>余额</span>
+            <strong>{data ? data.user.balance.toFixed(2) : "-"}</strong>
+          </div>
+        </div>
+
+        <section className="account-section">
+          <div className="account-section-title">
+            <h2>API 密钥</h2>
+            <button className="primary-button" onClick={createKey}>创建密钥</button>
+          </div>
+          {newSecret && <code className="one-time-secret">{newSecret}</code>}
+          {message && <p className="account-message">{message}</p>}
+          <div className="account-key-list">
+            {data?.apiKeys.map((key) => (
+              <div key={key.id}>
+                <span><strong>{key.name}</strong><small>{key.prefix}...</small></span>
+                <Badge tone={key.status}>{statusLabel(key.status)}</Badge>
+              </div>
+            ))}
+            {data?.apiKeys.length === 0 && <div className="empty">还没有 API 密钥</div>}
+          </div>
+        </section>
+
+        <section className="account-section">
+          <div className="account-section-title"><h2>可用模型</h2></div>
+          <div className="account-model-grid">
+            {models.map((model) => (
+              <article key={model.id}>
+                <span>{model.vendor}</span>
+                <strong>{model.name}</strong>
+                <p>{model.description}</p>
+                <code>{model.id}</code>
+              </article>
+            ))}
+          </div>
+        </section>
+      </section>
+    </main>
   );
 }
 
@@ -757,16 +1137,50 @@ function LogsView({ logs }: { logs: RequestLog[] }) {
 
 function SettingsView() {
   const [discord, setDiscord] = useState<DiscordSettings | null>(null);
+  const [registrationEnabled, setRegistrationEnabled] = useState<boolean | null>(null);
+  const [account, setAccount] = useState<AccountProfile | null>(null);
+  const [accountUsername, setAccountUsername] = useState("");
+  const [accountDisplayName, setAccountDisplayName] = useState("");
+  const [accountEmail, setAccountEmail] = useState("");
+  const [discordUserId, setDiscordUserId] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const [clientSecret, setClientSecret] = useState("");
-  const [adminToken, setAdminToken] = useState(() => window.sessionStorage.getItem("catieapi-admin-token") || "");
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    fetchJson<{ discord: DiscordSettings }>("/api/settings/discord")
-      .then((data) => setDiscord(data.discord))
+    Promise.all([
+      fetchJson<{ discord: DiscordSettings }>("/api/settings/discord"),
+      fetchJson<{ auth: { registrationEnabled: boolean } }>("/api/settings/auth"),
+      fetchJson<{ account: AccountProfile; user: User }>("/api/account/me")
+    ])
+      .then(([discordData, authData, accountData]) => {
+        setDiscord(discordData.discord);
+        setRegistrationEnabled(authData.auth.registrationEnabled);
+        setAccount(accountData.account);
+        setAccountUsername(accountData.account?.username || "");
+        setAccountDisplayName(accountData.user.name || "");
+        setAccountEmail(accountData.account?.email || "");
+        setDiscordUserId(accountData.account?.discordUserId || "");
+      })
       .catch(() => setMessage("Discord 配置加载失败"));
   }, []);
+
+  async function toggleRegistration() {
+    if (registrationEnabled === null) return;
+    const next = !registrationEnabled;
+    try {
+      const data = await fetchJson<{ auth: { registrationEnabled: boolean } }>("/api/settings/auth", {
+        method: "PATCH",
+        body: JSON.stringify({ registrationEnabled: next })
+      });
+      setRegistrationEnabled(data.auth.registrationEnabled);
+      setMessage(data.auth.registrationEnabled ? "已开放用户注册" : "已关闭用户注册");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "注册设置保存失败");
+    }
+  }
 
   async function saveDiscordSettings() {
     if (!discord) return;
@@ -787,37 +1201,33 @@ function SettingsView() {
     }
   }
 
+  async function saveAccountBinding() {
+    try {
+      const data = await fetchJson<{ account: AccountProfile }>("/api/account/profile", {
+        method: "PATCH",
+        body: JSON.stringify({
+          username: accountUsername,
+          displayName: accountDisplayName,
+          email: accountEmail,
+          discordUserId,
+          currentPassword,
+          newPassword
+        })
+      });
+      setAccount(data.account);
+      setAccountUsername(data.account.username);
+      setAccountEmail(data.account.email || "");
+      setDiscordUserId(data.account.discordUserId || "");
+      setCurrentPassword("");
+      setNewPassword("");
+      setMessage("管理员账号已保存");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "账号设置保存失败");
+    }
+  }
+
   return (
     <div className="settings-layout">
-      <Panel title="管理验证">
-        <form
-          className="admin-token-form"
-          autoComplete="off"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const value = adminToken.trim();
-            if (value) {
-              window.sessionStorage.setItem("catieapi-admin-token", value);
-            } else {
-              window.sessionStorage.removeItem("catieapi-admin-token");
-            }
-            window.location.reload();
-          }}
-        >
-          <label>
-            <span>管理密钥</span>
-            <input
-              type="password"
-              autoComplete="current-password"
-              value={adminToken}
-              onChange={(event) => setAdminToken(event.target.value)}
-              placeholder="ADMIN_TOKEN"
-            />
-          </label>
-          <button className="secondary-button" type="submit">应用</button>
-        </form>
-      </Panel>
-
       <Panel title="系统设置">
         <div className="settings-group">
           <Setting label="网关模式" value="OpenAI Compatible" />
@@ -825,6 +1235,85 @@ function SettingsView() {
           <Setting label="请求限流" value="启用" switchOn />
           <Setting label="审计日志" value="启用" switchOn />
         </div>
+      </Panel>
+
+      <Panel title="账号与注册">
+        <div className="settings-group">
+          <div className="setting">
+            <span>开放用户注册</span>
+            <div className="setting-value">
+              <strong>{registrationEnabled ? "启用" : "关闭"}</strong>
+              <button
+                type="button"
+                className={registrationEnabled ? "ios-switch is-on" : "ios-switch"}
+                aria-label={registrationEnabled ? "关闭用户注册" : "开放用户注册"}
+                aria-pressed={Boolean(registrationEnabled)}
+                onClick={toggleRegistration}
+              >
+                <span />
+              </button>
+            </div>
+          </div>
+        </div>
+      </Panel>
+
+      <Panel title="管理员账号">
+        <form
+          className="discord-settings"
+          onSubmit={(event) => {
+            event.preventDefault();
+            saveAccountBinding();
+          }}
+        >
+          <div className="settings-form-grid">
+            <label>
+              <span>登录账号</span>
+              <input value={accountUsername} onChange={(event) => setAccountUsername(event.target.value)} autoComplete="username" />
+            </label>
+            <label>
+              <span>显示名称</span>
+              <input value={accountDisplayName} onChange={(event) => setAccountDisplayName(event.target.value)} autoComplete="name" />
+            </label>
+            <label>
+              <span>邮箱</span>
+              <input type="email" value={accountEmail} onChange={(event) => setAccountEmail(event.target.value)} autoComplete="email" />
+            </label>
+            <label>
+              <span>Discord 用户 ID（可选）</span>
+              <input
+                inputMode="numeric"
+                autoComplete="off"
+                value={discordUserId}
+                onChange={(event) => setDiscordUserId(event.target.value)}
+                placeholder={account?.discordUserId ? "已绑定" : "输入管理员的 Discord 用户 ID"}
+              />
+            </label>
+            <label>
+              <span>当前密码</span>
+              <input
+                type="password"
+                value={currentPassword}
+                onChange={(event) => setCurrentPassword(event.target.value)}
+                autoComplete="current-password"
+                placeholder="修改密码时填写"
+              />
+            </label>
+            <label>
+              <span>新密码</span>
+              <input
+                type="password"
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+                autoComplete="new-password"
+                placeholder="留空表示不修改"
+              />
+            </label>
+          </div>
+          <div className="settings-save-row">
+            <span role="status">{message}</span>
+            <button className="primary-button" type="submit">保存账号</button>
+          </div>
+        </form>
       </Panel>
 
       <Panel title="Discord 登录">

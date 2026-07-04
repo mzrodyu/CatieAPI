@@ -934,37 +934,6 @@ button.table-row:hover {
   gap: 18px;
 }
 
-.admin-token-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 10px;
-}
-
-.admin-token-form label {
-  display: grid;
-  min-width: 0;
-  gap: 7px;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.admin-token-form input {
-  width: 100%;
-  min-width: 0;
-  height: 44px;
-  padding: 0 12px;
-  color: var(--text);
-  background: var(--group);
-  border: 1px solid var(--hairline);
-  border-radius: 8px;
-  outline: none;
-}
-
-.admin-token-form .secondary-button {
-  min-height: 44px;
-}
-
 .discord-toggle-row,
 .settings-save-row {
   display: flex;
@@ -1111,6 +1080,286 @@ button.table-row:hover {
   font-size: 14px;
   box-shadow: var(--shadow);
   backdrop-filter: blur(18px);
+}
+
+.auth-page,
+.account-page {
+  --bg: #f2f2f7;
+  --surface-solid: #ffffff;
+  --group: #f9f9fb;
+  --text: #1d1d1f;
+  --muted: #6e6e73;
+  --hairline: rgba(60, 60, 67, 0.16);
+  --blue: #007aff;
+  --green: #34c759;
+  --shadow: 0 18px 45px rgba(0, 0, 0, 0.08);
+  min-height: 100vh;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.auth-page[data-theme="dark"],
+.account-page[data-theme="dark"] {
+  --bg: #000000;
+  --surface-solid: #1c1c1e;
+  --group: #2c2c2e;
+  --text: #f5f5f7;
+  --muted: #a1a1aa;
+  --hairline: rgba(255, 255, 255, 0.12);
+  --shadow: 0 24px 60px rgba(0, 0, 0, 0.36);
+}
+
+.auth-topbar,
+.account-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: min(1120px, calc(100% - 40px));
+  min-height: 76px;
+  margin: 0 auto;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.auth-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+}
+
+.auth-brand .brand-mark {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+}
+
+.auth-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(360px, 1fr);
+  align-items: start;
+  width: min(920px, calc(100% - 40px));
+  gap: 72px;
+  margin: 0 auto;
+  padding: 72px 0;
+}
+
+.auth-intro {
+  padding-top: 24px;
+}
+
+.auth-intro > span {
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.auth-intro h1 {
+  margin: 10px 0 14px;
+  font-size: 42px;
+}
+
+.auth-intro p {
+  max-width: 390px;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.auth-form {
+  display: grid;
+  gap: 15px;
+  padding: 24px;
+  background: var(--surface-solid);
+  border: 1px solid var(--hairline);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+}
+
+.auth-form label {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.auth-form input {
+  width: 100%;
+  height: 46px;
+  padding: 0 12px;
+  color: var(--text);
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  outline: none;
+}
+
+.auth-form input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent);
+}
+
+.auth-message {
+  min-height: 18px;
+  color: #ff3b30;
+  font-size: 13px;
+}
+
+.auth-submit,
+.discord-login-button {
+  min-height: 44px;
+  width: 100%;
+}
+
+.auth-submit:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.discord-login-button {
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.auth-switch {
+  display: flex;
+  justify-content: center;
+}
+
+.auth-switch button {
+  padding: 6px 10px;
+  color: var(--blue);
+  background: transparent;
+  cursor: pointer;
+}
+
+.account-actions,
+.account-section-title,
+.account-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.account-content {
+  display: grid;
+  width: min(1120px, calc(100% - 40px));
+  gap: 18px;
+  margin: 0 auto;
+  padding: 42px 0 72px;
+}
+
+.account-heading {
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.account-balance {
+  text-align: right;
+}
+
+.account-balance span,
+.account-balance strong {
+  display: block;
+}
+
+.account-balance span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.account-balance strong {
+  margin-top: 4px;
+  font-size: 26px;
+}
+
+.account-section {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  background: var(--surface-solid);
+  border: 1px solid var(--hairline);
+  border-radius: 18px;
+}
+
+.one-time-secret {
+  overflow-x: auto;
+  padding: 13px;
+  color: var(--text);
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+}
+
+.account-message {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.account-key-list {
+  display: grid;
+}
+
+.account-key-list > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 58px;
+  border-top: 1px solid var(--hairline);
+}
+
+.account-key-list > div:first-child {
+  border-top: 0;
+}
+
+.account-key-list span,
+.account-key-list small {
+  display: block;
+}
+
+.account-key-list small {
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.account-model-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.account-model-grid article {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  padding: 16px;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+}
+
+.account-model-grid article > span,
+.account-model-grid article p {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.account-model-grid article p {
+  line-height: 1.5;
+}
+
+.account-model-grid code {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .public-home {
@@ -1408,6 +1657,21 @@ button.table-row:hover {
   .home-hero {
     min-height: 0;
   }
+
+  .auth-stage {
+    grid-template-columns: 1fr;
+    gap: 28px;
+    max-width: 560px;
+    padding: 38px 0 64px;
+  }
+
+  .auth-intro {
+    padding-top: 0;
+  }
+
+  .account-model-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 680px) {
@@ -1447,6 +1711,10 @@ button.table-row:hover {
     padding: 0;
   }
 
+  .topbar-actions .home-link {
+    display: none;
+  }
+
   .quick-actions {
     display: flex;
     overflow-x: auto;
@@ -1463,14 +1731,6 @@ button.table-row:hover {
     grid-template-columns: 1fr;
   }
 
-  .admin-token-form {
-    grid-template-columns: 1fr;
-  }
-
-  .admin-token-form .secondary-button {
-    width: 100%;
-  }
-
   .settings-form-wide {
     grid-column: auto;
   }
@@ -1482,6 +1742,29 @@ button.table-row:hover {
 
   .settings-save-row .primary-button {
     width: 100%;
+  }
+
+  .auth-topbar,
+  .account-topbar,
+  .auth-stage,
+  .account-content {
+    width: min(100% - 28px, 560px);
+  }
+
+  .auth-intro h1 {
+    font-size: 34px;
+  }
+
+  .auth-form {
+    padding: 18px;
+  }
+
+  .account-model-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .account-heading {
+    align-items: flex-start;
   }
 
   .public-home {

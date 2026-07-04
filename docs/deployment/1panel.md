@@ -25,7 +25,6 @@ PORT=8787
 STATIC_DIR=/app/dist
 PERSISTENCE=postgres
 DATABASE_URL=postgres://数据库用户名:数据库密码@数据库地址:5432/数据库名?sslmode=disable
-ADMIN_TOKEN=你的管理密钥
 SECRET_KEY=你的随机加密密钥
 CORS_ORIGIN=https://你的域名
 ```
@@ -38,10 +37,16 @@ CORS_ORIGIN=https://你的域名
 | `STATIC_DIR` | 前端静态文件目录，容器镜像内固定用 `/app/dist`。 |
 | `PERSISTENCE` | 持久化方式。生产建议 `postgres`。 |
 | `DATABASE_URL` | Postgres 连接地址。注意容器里不要写 `localhost`，要写 1Panel 提供的数据库主机或服务名。 |
-| `ADMIN_TOKEN` | 管理接口备用令牌。没有 Discord session 时，可用 `Authorization: Bearer 你的管理密钥` 访问后台接口。 |
 | `SECRET_KEY` | 用来加密保存渠道上游 Key。上线后不要随意更换。 |
 | `CORS_ORIGIN` | 前端访问域名，例如 `https://api.example.com` 或你的站点域名。 |
-启动后进入“设置”，填写 `ADMIN_TOKEN` 对应的管理密钥并点击“应用”，即可在“Discord 登录”区域完成 OAuth 配置。
+
+首次打开站点会进入初始化页面。直接创建管理员账号和密码，登录后即可在“设置”中配置 Discord、开放注册等选项。
+
+`ADMIN_TOKEN` 不再是正常使用的必填项。如需保留管理 API 应急入口，可额外设置：
+
+```text
+ADMIN_TOKEN=你的应急管理密钥
+```
 
 Discord 配置会加密保存到当前持久化存储，保存后立即生效，不需要重启容器。以下环境变量仅作为首次启动或故障恢复时的可选兜底：
 
@@ -113,8 +118,9 @@ https://your-domain.example/api/auth/discord/callback
 ## 环境变量原则
 
 - 不需要在生产服务器编辑 `.env`
-- 数据库、管理密钥和加密密钥由 1Panel 环境变量提供
+- 数据库连接和加密密钥由 1Panel 环境变量提供
+- 管理员账号、密码和日常设置在 CatieAPI 页面中管理
 - Discord 登录等日常配置优先在 CatieAPI 后台管理
 - `.env.example` 只用于查看变量名和默认值
 - `SECRET_KEY` 上线后不要随意更换，否则已加密的渠道上游 Key 无法解密
-- `ADMIN_TOKEN` 和 `DISCORD_CLIENT_SECRET` 不要提交到 Git 仓库
+- 可选的 `ADMIN_TOKEN` 和 `DISCORD_CLIENT_SECRET` 不要提交到 Git 仓库

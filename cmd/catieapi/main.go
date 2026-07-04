@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type AppState struct {
@@ -34,11 +36,31 @@ type AppState struct {
 	Models      []Model      `json:"models"`
 	QuotaLedger []QuotaEntry `json:"quotaLedger"`
 	Logs        []RequestLog `json:"logs"`
+	Accounts    []Account    `json:"accounts,omitempty"`
 	Settings    AppSettings  `json:"settings,omitempty"`
 }
 
 type AppSettings struct {
 	Discord DiscordSettings `json:"discord,omitempty"`
+	Auth    AuthSettings    `json:"auth,omitempty"`
+}
+
+type AuthSettings struct {
+	Managed             bool `json:"managed,omitempty"`
+	RegistrationEnabled bool `json:"registrationEnabled"`
+}
+
+type Account struct {
+	ID            string `json:"id"`
+	UserID        string `json:"userId"`
+	Username      string `json:"username"`
+	Email         string `json:"email,omitempty"`
+	DiscordUserID string `json:"discordUserId,omitempty"`
+	PasswordHash  string `json:"passwordHash"`
+	Role          string `json:"role"`
+	Status        string `json:"status"`
+	CreatedAt     string `json:"createdAt"`
+	LastLoginAt   string `json:"lastLoginAt,omitempty"`
 }
 
 type DiscordSettings struct {
@@ -208,6 +230,7 @@ type Session struct {
 	Avatar    string `json:"avatar"`
 	GuildID   string `json:"guildId"`
 	RoleID    string `json:"roleId"`
+	Role      string `json:"role"`
 	CreatedAt string `json:"createdAt"`
 	ExpiresAt string `json:"expiresAt"`
 }
@@ -327,10 +350,21 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	api := router.Group("/api")
 	api.GET("/health", s.health)
 	api.GET("/config/status", s.configStatus)
+	api.GET("/auth/status", s.authStatus)
+	api.POST("/auth/setup", s.setupAdmin)
+	api.POST("/auth/login", s.login)
+	api.POST("/auth/register", s.registerAccount)
 	api.GET("/auth/discord/start", s.discordStart)
 	api.GET("/auth/discord/callback", s.discordCallback)
 	api.GET("/auth/session", s.currentSession)
 	api.POST("/auth/logout", s.logout)
+	api.GET("/catalog/models", s.publicModelCatalog)
+
+	account := api.Group("/account")
+	account.Use(s.accountMiddleware())
+	account.GET("/me", s.accountMe)
+	account.POST("/api-keys", s.createOwnAPIKey)
+	account.PATCH("/profile", s.updateAccountProfile)
 
 	admin := api.Group("")
 	admin.Use(s.adminMiddleware())
@@ -348,6 +382,8 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.GET("/quota-ledger", s.quotaLedger)
 	admin.GET("/settings/discord", s.getDiscordSettings)
 	admin.PATCH("/settings/discord", s.updateDiscordSettings)
+	admin.GET("/settings/auth", s.getAuthSettings)
+	admin.PATCH("/settings/auth", s.updateAuthSettings)
 
 	router.GET("/v1/models", s.openAIModels)
 	router.GET("/v1/models/:id", s.openAIModel)
@@ -395,27 +431,40 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 
 func (s *Server) adminMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if s.adminToken == "" {
+		token := bearerToken(c.GetHeader("Authorization"))
+		if s.adminToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.adminToken)) == 1 {
 			c.Next()
 			return
 		}
-		token := bearerToken(c.GetHeader("Authorization"))
-		if subtle.ConstantTimeCompare([]byte(token), []byte(s.adminToken)) != 1 {
-			if _, ok := s.sessionFromRequest(c); ok {
-				c.Next()
-				return
-			}
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error": gin.H{
-					"message": "Invalid admin token",
-					"type":    "invalid_request_error",
-					"code":    "invalid_admin_token",
-				},
-			})
-			c.Abort()
+		if session, ok := s.sessionFromRequest(c); ok && session.Role == "admin" {
+			c.Next()
 			return
 		}
-		c.Next()
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": gin.H{
+				"message": "Administrator login required",
+				"type":    "invalid_request_error",
+				"code":    "admin_login_required",
+			},
+		})
+		c.Abort()
+	}
+}
+
+func (s *Server) accountMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if _, ok := s.sessionFromRequest(c); ok {
+			c.Next()
+			return
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": gin.H{
+				"message": "Login required",
+				"type":    "invalid_request_error",
+				"code":    "login_required",
+			},
+		})
+		c.Abort()
 	}
 }
 
@@ -467,6 +516,240 @@ func (s *Server) configStatus(c *gin.Context) {
 			"discordLogin":    discordEnabled,
 		},
 	})
+}
+
+func (s *Server) authStatus(c *gin.Context) {
+	session, authenticated := s.sessionFromRequest(c)
+	s.mu.Lock()
+	initialized := len(s.state.Accounts) > 0
+	registrationEnabled := s.registrationEnabledLocked()
+	discordEnabled := s.discordLoginEnabledLocked()
+	s.mu.Unlock()
+
+	c.JSON(http.StatusOK, gin.H{
+		"initialized":         initialized,
+		"authenticated":       authenticated,
+		"registrationEnabled": registrationEnabled,
+		"discordEnabled":      discordEnabled,
+		"session":             nullableSession(authenticated, session),
+	})
+}
+
+func (s *Server) setupAdmin(c *gin.Context) {
+	var body struct {
+		Username      string `json:"username"`
+		Password      string `json:"password"`
+		DisplayName   string `json:"displayName"`
+		Email         string `json:"email"`
+		DiscordUserID string `json:"discordUserId"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		validationError(c, "请填写管理员账号和密码")
+		return
+	}
+	body.Username = strings.TrimSpace(body.Username)
+	body.DisplayName = strings.TrimSpace(body.DisplayName)
+	body.Email = strings.TrimSpace(body.Email)
+	body.DiscordUserID = strings.TrimSpace(body.DiscordUserID)
+	if message := validateAccountInput(body.Username, body.Password, body.Email); message != "" {
+		validationError(c, message)
+		return
+	}
+	if body.DiscordUserID != "" && !digitsOnly(body.DiscordUserID) {
+		validationError(c, "Discord 用户 ID 只能包含数字")
+		return
+	}
+	if body.DisplayName == "" {
+		body.DisplayName = body.Username
+	}
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "密码加密失败"}})
+		return
+	}
+
+	s.mu.Lock()
+	if len(s.state.Accounts) > 0 {
+		s.mu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": gin.H{"message": "站点已经完成初始化"}})
+		return
+	}
+	user := s.findUser("usr_1001")
+	if user == nil {
+		s.state.Users = append(s.state.Users, User{ID: "usr_1001", CreatedAt: now(), Status: "active", Role: "admin"})
+		user = s.findUser("usr_1001")
+	}
+	user.Name = body.DisplayName
+	user.Email = body.Email
+	user.Role = "admin"
+	user.Status = "active"
+	user.LastLoginAt = now()
+	account := Account{
+		ID:            newID("acct"),
+		UserID:        user.ID,
+		Username:      body.Username,
+		Email:         body.Email,
+		DiscordUserID: body.DiscordUserID,
+		PasswordHash:  string(passwordHash),
+		Role:          "admin",
+		Status:        "active",
+		CreatedAt:     now(),
+		LastLoginAt:   now(),
+	}
+	s.state.Accounts = append(s.state.Accounts, account)
+	s.saveStateLocked()
+	s.mu.Unlock()
+
+	session := s.createAccountSession(account, body.DisplayName, "password")
+	s.setSessionCookie(c, session)
+	c.JSON(http.StatusCreated, gin.H{"account": publicAccount(account), "session": session})
+}
+
+func (s *Server) login(c *gin.Context) {
+	var body struct {
+		Identifier string `json:"identifier"`
+		Password   string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		validationError(c, "请填写账号和密码")
+		return
+	}
+	identifier := strings.ToLower(strings.TrimSpace(body.Identifier))
+	if identifier == "" || body.Password == "" {
+		validationError(c, "请填写账号和密码")
+		return
+	}
+
+	s.mu.Lock()
+	account := s.findAccountByIdentifierLocked(identifier)
+	if account == nil {
+		s.mu.Unlock()
+		invalidLogin(c)
+		return
+	}
+	accountCopy := *account
+	user := s.findUser(account.UserID)
+	displayName := account.Username
+	if user != nil && user.Name != "" {
+		displayName = user.Name
+	}
+	s.mu.Unlock()
+
+	if accountCopy.Status != "active" || bcrypt.CompareHashAndPassword([]byte(accountCopy.PasswordHash), []byte(body.Password)) != nil {
+		invalidLogin(c)
+		return
+	}
+
+	s.mu.Lock()
+	if current := s.findAccountByIDLocked(accountCopy.ID); current != nil {
+		current.LastLoginAt = now()
+		accountCopy.LastLoginAt = current.LastLoginAt
+	}
+	if currentUser := s.findUser(accountCopy.UserID); currentUser != nil {
+		currentUser.LastLoginAt = accountCopy.LastLoginAt
+	}
+	s.saveStateLocked()
+	s.mu.Unlock()
+
+	session := s.createAccountSession(accountCopy, displayName, "password")
+	s.setSessionCookie(c, session)
+	c.JSON(http.StatusOK, gin.H{"account": publicAccount(accountCopy), "session": session})
+}
+
+func (s *Server) registerAccount(c *gin.Context) {
+	var body struct {
+		Username    string `json:"username"`
+		Password    string `json:"password"`
+		DisplayName string `json:"displayName"`
+		Email       string `json:"email"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		validationError(c, "请完整填写注册信息")
+		return
+	}
+	body.Username = strings.TrimSpace(body.Username)
+	body.DisplayName = strings.TrimSpace(body.DisplayName)
+	body.Email = strings.TrimSpace(body.Email)
+	if message := validateAccountInput(body.Username, body.Password, body.Email); message != "" {
+		validationError(c, message)
+		return
+	}
+	if body.DisplayName == "" {
+		body.DisplayName = body.Username
+	}
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "密码加密失败"}})
+		return
+	}
+
+	s.mu.Lock()
+	if len(s.state.Accounts) == 0 {
+		s.mu.Unlock()
+		c.JSON(http.StatusPreconditionRequired, gin.H{"error": gin.H{"message": "请先初始化站点管理员"}})
+		return
+	}
+	if !s.registrationEnabledLocked() {
+		s.mu.Unlock()
+		c.JSON(http.StatusForbidden, gin.H{"error": gin.H{"message": "当前站点未开放注册"}})
+		return
+	}
+	if s.findAccountByIdentifierLocked(strings.ToLower(body.Username)) != nil ||
+		(body.Email != "" && s.findAccountByIdentifierLocked(strings.ToLower(body.Email)) != nil) {
+		s.mu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": gin.H{"message": "账号或邮箱已被使用"}})
+		return
+	}
+	userID := newID("usr")
+	user := User{
+		ID:          userID,
+		Name:        body.DisplayName,
+		Email:       body.Email,
+		Role:        "user",
+		Status:      "active",
+		CreatedAt:   now(),
+		LastLoginAt: now(),
+	}
+	account := Account{
+		ID:           newID("acct"),
+		UserID:       userID,
+		Username:     body.Username,
+		Email:        body.Email,
+		PasswordHash: string(passwordHash),
+		Role:         "user",
+		Status:       "active",
+		CreatedAt:    now(),
+		LastLoginAt:  now(),
+	}
+	s.state.Users = append(s.state.Users, user)
+	s.state.Accounts = append(s.state.Accounts, account)
+	s.saveStateLocked()
+	s.mu.Unlock()
+
+	session := s.createAccountSession(account, body.DisplayName, "password")
+	s.setSessionCookie(c, session)
+	c.JSON(http.StatusCreated, gin.H{"account": publicAccount(account), "session": session})
+}
+
+func (s *Server) getAuthSettings(c *gin.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c.JSON(http.StatusOK, gin.H{"auth": gin.H{"registrationEnabled": s.registrationEnabledLocked()}})
+}
+
+func (s *Server) updateAuthSettings(c *gin.Context) {
+	var body struct {
+		RegistrationEnabled bool `json:"registrationEnabled"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		validationError(c, "无效的认证设置")
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.Settings.Auth = AuthSettings{Managed: true, RegistrationEnabled: body.RegistrationEnabled}
+	s.saveStateLocked()
+	c.JSON(http.StatusOK, gin.H{"auth": gin.H{"registrationEnabled": body.RegistrationEnabled}})
 }
 
 func (s *Server) getDiscordSettings(c *gin.Context) {
@@ -674,6 +957,25 @@ func (s *Server) discordCallback(c *gin.Context) {
 		return
 	}
 
+	s.mu.Lock()
+	boundAccount := s.findAccountByDiscordIDLocked(user.ID)
+	var boundAccountCopy *Account
+	boundDisplayName := user.GlobalName
+	if boundAccount != nil && boundAccount.Status == "active" {
+		copy := *boundAccount
+		boundAccountCopy = &copy
+		if localUser := s.findUser(boundAccount.UserID); localUser != nil && localUser.Name != "" {
+			boundDisplayName = localUser.Name
+		}
+	}
+	s.mu.Unlock()
+	if boundAccountCopy != nil {
+		session := s.createAccountSession(*boundAccountCopy, boundDisplayName, "discord")
+		s.setSessionCookie(c, session)
+		c.Redirect(http.StatusFound, config.AuthSuccessURL)
+		return
+	}
+
 	roleID := ""
 	if config.AllowedGuildID != "" {
 		member, err := s.fetchDiscordGuildMember(token.AccessToken, config.AllowedGuildID)
@@ -689,22 +991,14 @@ func (s *Server) discordCallback(c *gin.Context) {
 	}
 
 	session := s.createSession(user, config.AllowedGuildID, roleID, config.SessionTTL)
-	expiresAt, _ := time.Parse(time.RFC3339Nano, session.ExpiresAt)
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     "catie_session",
-		Value:    session.ID,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Expires:  expiresAt,
-	})
+	s.setSessionCookie(c, session)
 	c.Redirect(http.StatusFound, config.AuthSuccessURL)
 }
 
 func (s *Server) currentSession(c *gin.Context) {
 	session, ok := s.sessionFromRequest(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"authenticated": false})
+		c.JSON(http.StatusOK, gin.H{"authenticated": false})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"authenticated": true, "session": session})
@@ -726,6 +1020,175 @@ func (s *Server) logout(c *gin.Context) {
 		MaxAge:   -1,
 	})
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) accountMe(c *gin.Context) {
+	session, ok := s.sessionFromRequest(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{"message": "Login required"}})
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user := s.findUser(session.UserID)
+	if user == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "User not found"}})
+		return
+	}
+	keys := []PublicAPIKey{}
+	for _, key := range s.state.APIKeys {
+		if key.UserID == user.ID {
+			keys = append(keys, publicAPIKey(key))
+		}
+	}
+	var account interface{}
+	if stored := s.findAccountByUserIDLocked(user.ID); stored != nil {
+		account = publicAccount(*stored)
+	}
+	c.JSON(http.StatusOK, gin.H{"user": user, "account": account, "apiKeys": keys, "session": session})
+}
+
+func (s *Server) updateAccountProfile(c *gin.Context) {
+	session, ok := s.sessionFromRequest(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{"message": "Login required"}})
+		return
+	}
+	var body struct {
+		Username        string `json:"username"`
+		DisplayName     string `json:"displayName"`
+		Email           string `json:"email"`
+		DiscordUserID   string `json:"discordUserId"`
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		validationError(c, "无效的账号设置")
+		return
+	}
+	body.Username = strings.TrimSpace(body.Username)
+	body.DisplayName = strings.TrimSpace(body.DisplayName)
+	body.Email = strings.TrimSpace(body.Email)
+	body.DiscordUserID = strings.TrimSpace(body.DiscordUserID)
+	if body.Username != "" {
+		if message := validateUsername(body.Username); message != "" {
+			validationError(c, message)
+			return
+		}
+	}
+	if body.Email != "" {
+		address, err := mail.ParseAddress(body.Email)
+		if err != nil || !strings.EqualFold(address.Address, body.Email) {
+			validationError(c, "邮箱格式不正确")
+			return
+		}
+	}
+	if body.DiscordUserID != "" && !digitsOnly(body.DiscordUserID) {
+		validationError(c, "Discord 用户 ID 只能包含数字")
+		return
+	}
+	if body.NewPassword != "" && (len(body.NewPassword) < 8 || len(body.NewPassword) > 128) {
+		validationError(c, "新密码长度必须在 8 到 128 个字符之间")
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	account := s.findAccountByUserIDLocked(session.UserID)
+	if account == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Account not found"}})
+		return
+	}
+	if body.DiscordUserID != "" {
+		if existing := s.findAccountByDiscordIDLocked(body.DiscordUserID); existing != nil && existing.ID != account.ID {
+			c.JSON(http.StatusConflict, gin.H{"error": gin.H{"message": "该 Discord 用户 ID 已绑定其他账号"}})
+			return
+		}
+	}
+	if body.Username != "" && !strings.EqualFold(body.Username, account.Username) {
+		if existing := s.findAccountByIdentifierLocked(strings.ToLower(body.Username)); existing != nil && existing.ID != account.ID {
+			c.JSON(http.StatusConflict, gin.H{"error": gin.H{"message": "该账号已被使用"}})
+			return
+		}
+		account.Username = body.Username
+	}
+	if body.Email != "" && !strings.EqualFold(body.Email, account.Email) {
+		if existing := s.findAccountByIdentifierLocked(strings.ToLower(body.Email)); existing != nil && existing.ID != account.ID {
+			c.JSON(http.StatusConflict, gin.H{"error": gin.H{"message": "该邮箱已被使用"}})
+			return
+		}
+		account.Email = body.Email
+	}
+	if body.NewPassword != "" {
+		if bcrypt.CompareHashAndPassword([]byte(account.PasswordHash), []byte(body.CurrentPassword)) != nil {
+			validationError(c, "当前密码不正确")
+			return
+		}
+		passwordHash, err := bcrypt.GenerateFromPassword([]byte(body.NewPassword), bcrypt.DefaultCost)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "密码加密失败"}})
+			return
+		}
+		account.PasswordHash = string(passwordHash)
+	}
+	account.DiscordUserID = body.DiscordUserID
+	if user := s.findUser(account.UserID); user != nil {
+		if body.DisplayName != "" {
+			user.Name = body.DisplayName
+		}
+		user.Email = account.Email
+	}
+	s.saveStateLocked()
+	c.JSON(http.StatusOK, gin.H{"account": publicAccount(*account)})
+}
+
+func (s *Server) publicModelCatalog(c *gin.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	models := []Model{}
+	for _, model := range s.state.Models {
+		if model.Status == "available" {
+			models = append(models, model)
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"models": models})
+}
+
+func (s *Server) createOwnAPIKey(c *gin.Context) {
+	session, ok := s.sessionFromRequest(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{"message": "Login required"}})
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	body.Name = strings.TrimSpace(body.Name)
+	if body.Name == "" {
+		body.Name = "API Key"
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user := s.findUser(session.UserID)
+	if user == nil || user.Status == "disabled" {
+		c.JSON(http.StatusForbidden, gin.H{"error": gin.H{"message": "User account is not available"}})
+		return
+	}
+	secret := "cat_" + randomHex(24)
+	key := APIKey{
+		ID:        newID("key"),
+		UserID:    user.ID,
+		Name:      body.Name,
+		Prefix:    secret[:12],
+		Hash:      hashSecret(secret),
+		Status:    "active",
+		CreatedAt: now(),
+	}
+	s.state.APIKeys = append(s.state.APIKeys, key)
+	s.saveStateLocked()
+	c.JSON(http.StatusCreated, gin.H{"apiKey": publicAPIKey(key), "secret": secret})
 }
 
 func (s *Server) overview(c *gin.Context) {
@@ -1600,6 +2063,7 @@ func (s *Server) createSession(user *DiscordUser, guildID string, roleID string,
 		Avatar:    user.Avatar,
 		GuildID:   guildID,
 		RoleID:    roleID,
+		Role:      "admin",
 		CreatedAt: now(),
 		ExpiresAt: time.Now().Add(ttl).UTC().Format(time.RFC3339Nano),
 	}
@@ -1607,6 +2071,35 @@ func (s *Server) createSession(user *DiscordUser, guildID string, roleID string,
 	s.sessions[session.ID] = session
 	s.mu.Unlock()
 	return session
+}
+
+func (s *Server) createAccountSession(account Account, displayName string, provider string) Session {
+	session := Session{
+		ID:        "sess_" + randomHex(24),
+		Provider:  provider,
+		UserID:    account.UserID,
+		Username:  displayName,
+		Role:      account.Role,
+		CreatedAt: now(),
+		ExpiresAt: time.Now().Add(s.sessionTTL).UTC().Format(time.RFC3339Nano),
+	}
+	s.mu.Lock()
+	s.sessions[session.ID] = session
+	s.mu.Unlock()
+	return session
+}
+
+func (s *Server) setSessionCookie(c *gin.Context, session Session) {
+	expiresAt, _ := time.Parse(time.RFC3339Nano, session.ExpiresAt)
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     "catie_session",
+		Value:    session.ID,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https") || c.Request.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  expiresAt,
+	})
 }
 
 func (s *Server) sessionFromRequest(c *gin.Context) (Session, bool) {
@@ -1662,6 +2155,69 @@ func containsString(values []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func validateAccountInput(username string, password string, email string) string {
+	if message := validateUsername(username); message != "" {
+		return message
+	}
+	if len(password) < 8 || len(password) > 128 {
+		return "密码长度必须在 8 到 128 个字符之间"
+	}
+	if email != "" {
+		address, err := mail.ParseAddress(email)
+		if err != nil || !strings.EqualFold(address.Address, email) {
+			return "邮箱格式不正确"
+		}
+	}
+	return ""
+}
+
+func validateUsername(username string) string {
+	if len(username) < 3 || len(username) > 32 {
+		return "账号长度必须在 3 到 32 个字符之间"
+	}
+	for _, character := range username {
+		valid := character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '_' || character == '-'
+		if !valid {
+			return "账号只能使用字母、数字、下划线和短横线"
+		}
+	}
+	return ""
+}
+
+func invalidLogin(c *gin.Context) {
+	c.JSON(http.StatusUnauthorized, gin.H{
+		"error": gin.H{
+			"message": "账号或密码不正确",
+			"type":    "invalid_request_error",
+			"code":    "invalid_credentials",
+		},
+	})
+}
+
+func publicAccount(account Account) gin.H {
+	return gin.H{
+		"id":            account.ID,
+		"userId":        account.UserID,
+		"username":      account.Username,
+		"email":         account.Email,
+		"discordUserId": account.DiscordUserID,
+		"role":          account.Role,
+		"status":        account.Status,
+		"createdAt":     account.CreatedAt,
+		"lastLoginAt":   account.LastLoginAt,
+	}
+}
+
+func nullableSession(ok bool, session Session) interface{} {
+	if !ok {
+		return nil
+	}
+	return session
 }
 
 func digitsOnly(value string) bool {
@@ -1726,6 +2282,51 @@ func (s *Server) findModel(id string) *Model {
 		}
 	}
 	return nil
+}
+
+func (s *Server) findAccountByIdentifierLocked(identifier string) *Account {
+	identifier = strings.ToLower(strings.TrimSpace(identifier))
+	for i := range s.state.Accounts {
+		account := &s.state.Accounts[i]
+		if strings.ToLower(account.Username) == identifier || (account.Email != "" && strings.ToLower(account.Email) == identifier) {
+			return account
+		}
+	}
+	return nil
+}
+
+func (s *Server) findAccountByIDLocked(id string) *Account {
+	for i := range s.state.Accounts {
+		if s.state.Accounts[i].ID == id {
+			return &s.state.Accounts[i]
+		}
+	}
+	return nil
+}
+
+func (s *Server) findAccountByUserIDLocked(userID string) *Account {
+	for i := range s.state.Accounts {
+		if s.state.Accounts[i].UserID == userID {
+			return &s.state.Accounts[i]
+		}
+	}
+	return nil
+}
+
+func (s *Server) findAccountByDiscordIDLocked(discordUserID string) *Account {
+	for i := range s.state.Accounts {
+		if s.state.Accounts[i].DiscordUserID == discordUserID {
+			return &s.state.Accounts[i]
+		}
+	}
+	return nil
+}
+
+func (s *Server) registrationEnabledLocked() bool {
+	if !s.state.Settings.Auth.Managed {
+		return true
+	}
+	return s.state.Settings.Auth.RegistrationEnabled
 }
 
 func (s *Server) findUserByAPIKeyLocked(authHeader string) *AuthContext {
@@ -1834,7 +2435,10 @@ func (s *Server) loadState() {
 	if stored.Logs != nil {
 		s.state.Logs = stored.Logs
 	}
-	if stored.Settings.Discord.Managed {
+	if stored.Accounts != nil {
+		s.state.Accounts = stored.Accounts
+	}
+	if stored.Settings.Discord.Managed || stored.Settings.Auth.Managed {
 		s.state.Settings = stored.Settings
 	}
 	changed := false
@@ -2004,7 +2608,10 @@ func (s *Server) loadPostgresState() {
 	if stored.Logs != nil {
 		s.state.Logs = stored.Logs
 	}
-	if stored.Settings.Discord.Managed {
+	if stored.Accounts != nil {
+		s.state.Accounts = stored.Accounts
+	}
+	if stored.Settings.Discord.Managed || stored.Settings.Auth.Managed {
 		s.state.Settings = stored.Settings
 	}
 	changed := false

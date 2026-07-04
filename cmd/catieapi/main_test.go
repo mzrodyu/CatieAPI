@@ -19,6 +19,9 @@ func testRouter(t *testing.T) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 
 	server := NewServer()
+	if server.adminToken == "" {
+		server.adminToken = "test-admin-token"
+	}
 	router := gin.New()
 	router.Use(server.requestMiddleware())
 	router.Use(server.corsMiddleware())
@@ -57,6 +60,9 @@ func perform(router http.Handler, method string, path string, body string, heade
 	if body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if os.Getenv("ADMIN_TOKEN") == "" && req.Header.Get("Authorization") == "" && strings.HasPrefix(path, "/api/") {
+		req.Header.Set("Authorization", "Bearer test-admin-token")
+	}
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, req)
 	return recorder
@@ -82,6 +88,118 @@ func TestAdminTokenProtectsManagementRoutes(t *testing.T) {
 	allowed := perform(router, http.MethodGet, "/api/users", "", map[string]string{"Authorization": "Bearer admin-secret"})
 	if allowed.Code != http.StatusOK {
 		t.Fatalf("users with admin token status = %d body = %s", allowed.Code, allowed.Body.String())
+	}
+}
+
+func TestFirstRunSetupLoginRegistrationAndRoleIsolation(t *testing.T) {
+	dataFile := filepath.Join(t.TempDir(), "state.json")
+	withEnv(t, map[string]string{
+		"ADMIN_TOKEN": "recovery-token",
+		"PERSISTENCE": "file",
+		"DATA_FILE":   dataFile,
+	})
+	router := testRouter(t)
+
+	status := perform(router, http.MethodGet, "/api/auth/status", "", nil)
+	if status.Code != http.StatusOK || !bytes.Contains(status.Body.Bytes(), []byte(`"initialized":false`)) {
+		t.Fatalf("initial auth status = %d body = %s", status.Code, status.Body.String())
+	}
+
+	setup := perform(router, http.MethodPost, "/api/auth/setup", `{
+		"username":"catie",
+		"password":"correct-horse-battery",
+		"displayName":"Catie",
+		"email":"catie@example.com",
+		"discordUserId":"1446547305208746115"
+	}`, nil)
+	if setup.Code != http.StatusCreated {
+		t.Fatalf("setup status = %d body = %s", setup.Code, setup.Body.String())
+	}
+	adminCookie := setup.Result().Cookies()[0]
+	adminHeaders := map[string]string{"Cookie": adminCookie.Name + "=" + adminCookie.Value}
+
+	protected := perform(router, http.MethodGet, "/api/users", "", adminHeaders)
+	if protected.Code != http.StatusOK {
+		t.Fatalf("admin session did not authorize management route: %d body = %s", protected.Code, protected.Body.String())
+	}
+	binding := perform(router, http.MethodPatch, "/api/account/profile", `{"discordUserId":"1446547305208746222"}`, adminHeaders)
+	if binding.Code != http.StatusOK || !bytes.Contains(binding.Body.Bytes(), []byte(`"discordUserId":"1446547305208746222"`)) {
+		t.Fatalf("Discord account binding status = %d body = %s", binding.Code, binding.Body.String())
+	}
+
+	stateContent, err := os.ReadFile(dataFile)
+	if err != nil {
+		t.Fatalf("read state file: %v", err)
+	}
+	if bytes.Contains(stateContent, []byte("correct-horse-battery")) {
+		t.Fatal("plain account password was stored")
+	}
+
+	badLogin := perform(router, http.MethodPost, "/api/auth/login", `{"identifier":"catie","password":"wrong-password"}`, nil)
+	if badLogin.Code != http.StatusUnauthorized {
+		t.Fatalf("bad login status = %d body = %s", badLogin.Code, badLogin.Body.String())
+	}
+	login := perform(router, http.MethodPost, "/api/auth/login", `{"identifier":"catie","password":"correct-horse-battery"}`, nil)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d body = %s", login.Code, login.Body.String())
+	}
+	passwordChange := perform(router, http.MethodPatch, "/api/account/profile", `{
+		"currentPassword":"correct-horse-battery",
+		"newPassword":"new-correct-password"
+	}`, adminHeaders)
+	if passwordChange.Code != http.StatusOK {
+		t.Fatalf("password change status = %d body = %s", passwordChange.Code, passwordChange.Body.String())
+	}
+	oldPassword := perform(router, http.MethodPost, "/api/auth/login", `{"identifier":"catie","password":"correct-horse-battery"}`, nil)
+	if oldPassword.Code != http.StatusUnauthorized {
+		t.Fatalf("old password remained valid: %d body = %s", oldPassword.Code, oldPassword.Body.String())
+	}
+	newPassword := perform(router, http.MethodPost, "/api/auth/login", `{"identifier":"catie","password":"new-correct-password"}`, nil)
+	if newPassword.Code != http.StatusOK {
+		t.Fatalf("new password login status = %d body = %s", newPassword.Code, newPassword.Body.String())
+	}
+	stateContent, err = os.ReadFile(dataFile)
+	if err != nil {
+		t.Fatalf("read updated state file: %v", err)
+	}
+	if bytes.Contains(stateContent, []byte("new-correct-password")) {
+		t.Fatal("new plain account password was stored")
+	}
+
+	register := perform(router, http.MethodPost, "/api/auth/register", `{
+		"username":"mika_user",
+		"password":"another-safe-password",
+		"displayName":"Mika",
+		"email":"mika-user@example.com"
+	}`, nil)
+	if register.Code != http.StatusCreated {
+		t.Fatalf("register status = %d body = %s", register.Code, register.Body.String())
+	}
+	userCookie := register.Result().Cookies()[0]
+	userHeaders := map[string]string{"Cookie": userCookie.Name + "=" + userCookie.Value}
+	userProtected := perform(router, http.MethodGet, "/api/users", "", userHeaders)
+	if userProtected.Code != http.StatusUnauthorized {
+		t.Fatalf("ordinary user reached admin route: %d body = %s", userProtected.Code, userProtected.Body.String())
+	}
+	account := perform(router, http.MethodGet, "/api/account/me", "", userHeaders)
+	if account.Code != http.StatusOK || !bytes.Contains(account.Body.Bytes(), []byte(`"name":"Mika"`)) {
+		t.Fatalf("ordinary user account status = %d body = %s", account.Code, account.Body.String())
+	}
+	ownKey := perform(router, http.MethodPost, "/api/account/api-keys", `{"name":"Personal Key"}`, userHeaders)
+	if ownKey.Code != http.StatusCreated || !bytes.Contains(ownKey.Body.Bytes(), []byte(`"secret":"cat_`)) {
+		t.Fatalf("ordinary user key creation status = %d body = %s", ownKey.Code, ownKey.Body.String())
+	}
+
+	disableRegistration := perform(router, http.MethodPatch, "/api/settings/auth", `{"registrationEnabled":false}`, adminHeaders)
+	if disableRegistration.Code != http.StatusOK {
+		t.Fatalf("disable registration status = %d body = %s", disableRegistration.Code, disableRegistration.Body.String())
+	}
+	blockedRegistration := perform(router, http.MethodPost, "/api/auth/register", `{
+		"username":"blocked_user",
+		"password":"another-safe-password"
+	}`, nil)
+	if blockedRegistration.Code != http.StatusForbidden {
+		t.Fatalf("disabled registration status = %d body = %s", blockedRegistration.Code, blockedRegistration.Body.String())
 	}
 }
 
@@ -373,6 +491,61 @@ func TestDiscordOAuthRoleGateCreatesSessionForAdminRoutes(t *testing.T) {
 	users := perform(router, http.MethodGet, "/api/users", "", map[string]string{"Cookie": cookies[0].Name + "=" + cookies[0].Value})
 	if users.Code != http.StatusOK {
 		t.Fatalf("session did not authorize admin route: %d body = %s", users.Code, users.Body.String())
+	}
+}
+
+func TestBoundDiscordIDRestoresLocalAdminAccount(t *testing.T) {
+	discordUserID := "1446547305208746115"
+	discord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth2/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"discord-access","token_type":"Bearer"}`))
+		case "/api/v10/users/@me":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"` + discordUserID + `","username":"catie","global_name":"Catie"}`))
+		default:
+			t.Fatalf("unexpected Discord path for bound account: %s", r.URL.Path)
+		}
+	}))
+	defer discord.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":           "memory",
+		"ADMIN_TOKEN":           "recovery-token",
+		"DISCORD_CLIENT_ID":     "client-id",
+		"DISCORD_CLIENT_SECRET": "client-secret",
+		"DISCORD_REDIRECT_URI":  "http://localhost:8787/api/auth/discord/callback",
+		"DISCORD_OAUTH_BASE":    discord.URL + "/oauth2",
+		"DISCORD_API_BASE":      discord.URL + "/api/v10",
+		"AUTH_SUCCESS_URL":      "http://localhost:5173/",
+	})
+	router := testRouter(t)
+	setup := perform(router, http.MethodPost, "/api/auth/setup", `{
+		"username":"catie",
+		"password":"correct-horse-battery",
+		"discordUserId":"`+discordUserID+`"
+	}`, nil)
+	if setup.Code != http.StatusCreated {
+		t.Fatalf("bound account setup status = %d body = %s", setup.Code, setup.Body.String())
+	}
+
+	start := perform(router, http.MethodGet, "/api/auth/discord/start", "", nil)
+	authURL, err := url.Parse(start.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Discord authorization URL: %v", err)
+	}
+	callback := perform(router, http.MethodGet, "/api/auth/discord/callback?code=oauth-code&state="+url.QueryEscape(authURL.Query().Get("state")), "", nil)
+	if callback.Code != http.StatusFound {
+		t.Fatalf("bound Discord callback status = %d body = %s", callback.Code, callback.Body.String())
+	}
+	cookies := callback.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("bound Discord callback did not set a session")
+	}
+	admin := perform(router, http.MethodGet, "/api/users", "", map[string]string{"Cookie": cookies[0].Name + "=" + cookies[0].Value})
+	if admin.Code != http.StatusOK {
+		t.Fatalf("bound Discord account did not restore admin role: %d body = %s", admin.Code, admin.Body.String())
 	}
 }
 
