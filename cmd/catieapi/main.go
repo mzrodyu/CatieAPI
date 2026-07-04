@@ -447,6 +447,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.PATCH("/models/:id", s.updateModel)
 	admin.DELETE("/models/:id", s.deleteModel)
 	admin.GET("/logs", s.listLogs)
+	admin.GET("/logs/:id", s.getLog)
 	admin.GET("/quota-ledger", s.quotaLedger)
 	admin.GET("/settings/discord", s.getDiscordSettings)
 	admin.PATCH("/settings/discord", s.updateDiscordSettings)
@@ -502,7 +503,7 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 			c.Header("Vary", "Origin")
 		}
 		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, X-API-Key, X-Request-ID")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
@@ -2556,6 +2557,24 @@ func (s *Server) listLogs(c *gin.Context) {
 		"page":     page,
 		"pageSize": pageSize,
 	})
+}
+
+func (s *Server) getLog(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	if id == "" {
+		validationError(c, "请求 ID 不能为空")
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, log := range s.state.Logs {
+		if log.ID == id {
+			c.JSON(http.StatusOK, gin.H{"log": log})
+			return
+		}
+	}
+	c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Log not found"}})
 }
 
 func (s *Server) quotaLedger(c *gin.Context) {

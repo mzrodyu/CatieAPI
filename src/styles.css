@@ -940,7 +940,7 @@ h3 {
   grid-template-columns: 34px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
-  flex: 0 0 190px;
+  flex: 0 0 240px;
   min-height: 58px;
   padding: 10px;
   color: var(--text);
@@ -963,9 +963,7 @@ h3 {
 }
 
 .model-provider-filter strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .model-provider-filter small {
@@ -1068,17 +1066,17 @@ h3 {
 
 .model-compact-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(560px, 1fr));
 }
 
 .model-compact-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 9px;
   min-width: 0;
-  min-height: 68px;
-  padding: 10px 12px;
+  min-height: 78px;
+  padding: 12px;
   border-bottom: 1px solid var(--hairline);
 }
 
@@ -1094,15 +1092,14 @@ h3 {
 .model-compact-main small {
   display: block;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .model-compact-main small {
   margin-top: 3px;
   color: var(--muted);
   font-size: 12px;
+  line-height: 1.35;
 }
 
 .model-compact-main span {
@@ -1132,6 +1129,7 @@ h3 {
   justify-content: flex-end;
   gap: 8px;
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .model-row-actions .compact-button {
@@ -1595,6 +1593,13 @@ button.table-row:hover {
   grid-template-columns: minmax(150px, 1.4fr) 130px minmax(130px, 1fr) 70px 80px;
 }
 
+.logs-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(320px, 0.8fr);
+  gap: 14px;
+  align-items: start;
+}
+
 .logs-toolbar {
   display: grid;
   grid-template-columns: minmax(260px, 1fr) auto auto;
@@ -1640,13 +1645,54 @@ button.table-row:hover {
   background: var(--group);
 }
 
+.log-inspector {
+  position: sticky;
+  top: 92px;
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 14px;
+  background: var(--surface-solid);
+  border: 1px solid var(--hairline);
+  border-radius: 18px;
+}
+
+.log-inspector header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.log-inspector header div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.log-inspector header span,
+.empty-inspector {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.log-inspector header strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.empty-inspector {
+  min-height: 180px;
+  place-items: center;
+}
+
 .log-detail {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 1px;
-  padding: 1px;
-  background: var(--hairline);
-  border-top: 1px solid var(--hairline);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .log-detail > div {
@@ -1654,7 +1700,9 @@ button.table-row:hover {
   gap: 5px;
   min-width: 0;
   padding: 12px;
-  background: var(--surface-solid);
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
 }
 
 .log-detail span {
@@ -1667,6 +1715,12 @@ button.table-row:hover {
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.log-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .detail-stack {
@@ -2824,6 +2878,14 @@ button.table-row:hover {
     grid-column: 1 / -1;
   }
 
+  .logs-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .log-inspector {
+    position: static;
+  }
+
   .log-detail {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -2852,6 +2914,10 @@ button.table-row:hover {
 
   .model-create-wide {
     grid-column: auto;
+  }
+
+  .model-compact-grid {
+    grid-template-columns: 1fr;
   }
 
   .model-compact-row {

@@ -852,7 +852,7 @@ function App() {
         {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} onUpdateKey={updateAPIKey} onDeleteKey={deleteAPIKey} />}
         {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} onUpdate={updateModel} onDelete={deleteModel} />}
         {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onDelete={deleteChannel} onSyncModels={syncChannelModels} onCheck={checkChannel} />}
-        {active === "logs" && <LogsView logs={logs} />}
+        {active === "logs" && <LogsView logs={logs} onCopy={copyAndToast} />}
         {active === "settings" && <SettingsView models={models} channels={channels} />}
       </main>
 
@@ -2340,7 +2340,7 @@ function ChannelEditor({
   );
 }
 
-function LogsView({ logs }: { logs: RequestLog[] }) {
+function LogsView({ logs, onCopy }: { logs: RequestLog[]; onCopy: (value: string, label?: string) => void }) {
   const [items, setItems] = useState(logs);
   const [total, setTotal] = useState(logs.length);
   const [page, setPage] = useState(1);
@@ -2348,6 +2348,7 @@ function LogsView({ logs }: { logs: RequestLog[] }) {
   const [status, setStatus] = useState<"all" | "success" | "failed">("all");
   const [selected, setSelected] = useState<RequestLog | null>(null);
   const [loading, setLoading] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
   const pageSize = 25;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
@@ -2376,7 +2377,7 @@ function LogsView({ logs }: { logs: RequestLog[] }) {
         const nextLogs = arrayOf(data.logs);
         setItems(nextLogs);
         setTotal(data.total || 0);
-        setSelected((current) => nextLogs.find((log) => log.id === current?.id) || null);
+        setSelected((current) => current && nextLogs.some((log) => log.id === current.id) ? current : null);
       } catch (error) {
         if (!(error instanceof DOMException && error.name === "AbortError")) {
           setItems([]);
@@ -2391,6 +2392,23 @@ function LogsView({ logs }: { logs: RequestLog[] }) {
       controller.abort();
     };
   }, [page, query, status]);
+
+  async function selectLog(log: RequestLog) {
+    if (selected?.id === log.id) {
+      setSelected(null);
+      return;
+    }
+    setSelected(log);
+    setDetailLoading(true);
+    try {
+      const data = await fetchJson<{ log: RequestLog }>(`/api/logs/${encodeURIComponent(log.id)}`);
+      setSelected(data.log);
+    } catch {
+      setSelected(log);
+    } finally {
+      setDetailLoading(false);
+    }
+  }
 
   return (
     <Panel title="调用日志">
@@ -2417,51 +2435,62 @@ function LogsView({ logs }: { logs: RequestLog[] }) {
         </div>
         <span className="muted-inline">{loading ? "加载中" : `共 ${total} 条`}</span>
       </div>
-      <div className="table">
-        <div className="table-head logs-table">
-          <span>请求</span>
-          <span>模型</span>
-          <span>渠道</span>
-          <span>消耗</span>
-          <span>状态</span>
-        </div>
-        {items.map((log) => (
-          <div className="log-entry" key={log.id}>
-            <div
-              className={selected?.id === log.id ? "table-row logs-table selected" : "table-row logs-table"}
-              role="button"
-              tabIndex={0}
-              onClick={() => setSelected((current) => current?.id === log.id ? null : log)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") setSelected((current) => current?.id === log.id ? null : log);
-              }}
-            >
-              <span>
-                <strong>{log.id}</strong>
-                <small>{formatDate(log.createdAt)} · {log.latencyMs}ms</small>
-              </span>
-              <span>{logModelText(log)}</span>
-              <span>{logChannelText(log)}</span>
-              <span>{log.cost.toFixed(4)}</span>
-              <Badge tone={log.status}>{statusLabel(log.status)}</Badge>
+      <div className="logs-layout">
+        <div>
+          <div className="table">
+            <div className="table-head logs-table">
+              <span>请求</span>
+              <span>模型</span>
+              <span>渠道</span>
+              <span>消耗</span>
+              <span>状态</span>
             </div>
-            {selected?.id === log.id && <LogDetail log={log} />}
+            {items.map((log) => (
+              <div className="log-entry" key={log.id}>
+                <div
+                  className={selected?.id === log.id ? "table-row logs-table selected" : "table-row logs-table"}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => selectLog(log)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") selectLog(log);
+                  }}
+                >
+                  <span>
+                    <strong>{logTitle(log)}</strong>
+                    <small>{log.id} · {formatDate(log.createdAt)} · {log.latencyMs}ms</small>
+                  </span>
+                  <span>{logModelText(log)}</span>
+                  <span>{logChannelText(log)}</span>
+                  <span>{log.cost.toFixed(4)}</span>
+                  <Badge tone={log.status}>{statusLabel(log.status)}</Badge>
+                </div>
+              </div>
+            ))}
+            {!loading && items.length === 0 && <Empty text={query || status !== "all" ? "没有匹配的日志" : "暂无调用日志"} />}
           </div>
-        ))}
-        {!loading && items.length === 0 && <Empty text={query || status !== "all" ? "没有匹配的日志" : "暂无调用日志"} />}
-      </div>
-      {totalPages > 1 && (
-        <div className="pagination-bar">
-          <button className="secondary-button" disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button>
-          <span>{page} / {totalPages}</span>
-          <button className="secondary-button" disabled={page >= totalPages || loading} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>下一页</button>
+          {totalPages > 1 && (
+            <div className="pagination-bar">
+              <button className="secondary-button" disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button>
+              <span>{page} / {totalPages}</span>
+              <button className="secondary-button" disabled={page >= totalPages || loading} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>下一页</button>
+            </div>
+          )}
         </div>
-      )}
+        <LogDetail log={selected} loading={detailLoading} onCopy={onCopy} />
+      </div>
     </Panel>
   );
 }
 
-function LogDetail({ log }: { log: RequestLog }) {
+function LogDetail({ log, loading, onCopy }: { log: RequestLog | null; loading: boolean; onCopy: (value: string, label?: string) => void }) {
+  if (!log) {
+    return (
+      <aside className="log-inspector empty-inspector">
+        <span>选择一条日志查看详情</span>
+      </aside>
+    );
+  }
   const details = [
     ["请求 ID", log.id],
     ["状态", statusLabel(log.status)],
@@ -2475,14 +2504,27 @@ function LogDetail({ log }: { log: RequestLog }) {
     ["错误码", log.errorCode || "无"]
   ];
   return (
-    <div className="log-detail">
-      {details.map(([label, value]) => (
-        <div key={label}>
-          <span>{label}</span>
-          <strong title={value}>{value}</strong>
+    <aside className="log-inspector">
+      <header>
+        <div>
+          <span>{loading ? "加载中" : "日志详情"}</span>
+          <strong>{logTitle(log)}</strong>
         </div>
-      ))}
-    </div>
+        <Badge tone={log.status}>{statusLabel(log.status)}</Badge>
+      </header>
+      <div className="log-detail">
+        {details.map(([label, value]) => (
+          <div key={label}>
+            <span>{label}</span>
+            <strong title={value}>{value}</strong>
+          </div>
+        ))}
+      </div>
+      <div className="log-actions">
+        <button type="button" className="secondary-button compact-button" onClick={() => onCopy(log.id, "请求 ID 已复制")}>复制请求 ID</button>
+        {log.errorCode && <button type="button" className="secondary-button compact-button" onClick={() => onCopy(log.errorCode || "", "错误码已复制")}>复制错误码</button>}
+      </div>
+    </aside>
   );
 }
 
