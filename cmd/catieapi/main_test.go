@@ -390,10 +390,19 @@ func TestFirstRunSetupLoginRegistrationAndRoleIsolation(t *testing.T) {
 		"password":"correct-horse-battery",
 		"displayName":"Catie",
 		"email":"catie@example.com",
-		"discordUserId":"100000000000000001"
+		"discordUserId":"100000000000000001",
+		"registrationEnabled":true,
+		"registrationMode":"email",
+		"defaultBalance":12.5
 	}`, nil)
 	if setup.Code != http.StatusCreated {
 		t.Fatalf("setup status = %d body = %s", setup.Code, setup.Body.String())
+	}
+	setupStatus := perform(router, http.MethodGet, "/api/auth/status", "", nil)
+	if setupStatus.Code != http.StatusOK ||
+		!bytes.Contains(setupStatus.Body.Bytes(), []byte(`"registrationEnabled":true`)) ||
+		!bytes.Contains(setupStatus.Body.Bytes(), []byte(`"registrationMode":"email"`)) {
+		t.Fatalf("setup auth settings status = %d body = %s", setupStatus.Code, setupStatus.Body.String())
 	}
 	adminCookie := setup.Result().Cookies()[0]
 	adminHeaders := map[string]string{"Cookie": adminCookie.Name + "=" + adminCookie.Value}

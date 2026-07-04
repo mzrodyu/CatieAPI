@@ -18,7 +18,9 @@ body {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
@@ -1341,6 +1343,8 @@ button.table-row:hover {
   min-height: 72px;
   padding: 10px 12px;
   resize: vertical;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted) 55%, transparent) transparent;
 }
 
 .channel-form-grid input:focus,
@@ -1718,6 +1722,29 @@ button.table-row:hover {
   font-size: 13px;
 }
 
+.key-editor-grid input {
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  padding: 0 12px;
+  color: var(--text);
+  color-scheme: dark;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  outline: none;
+}
+
+.key-editor-grid input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent);
+}
+
+.key-editor-grid input::placeholder {
+  color: var(--muted);
+  opacity: 0.72;
+}
+
 .key-editor-actions {
   display: flex;
   justify-content: flex-end;
@@ -2093,20 +2120,41 @@ button.table-row:hover {
   font-size: 13px;
 }
 
-.auth-form input {
+.auth-form input,
+.auth-form select {
   width: 100%;
   height: 46px;
   padding: 0 12px;
   color: var(--text);
+  color-scheme: dark;
   background: var(--group);
   border: 1px solid var(--hairline);
-  border-radius: 8px;
+  border-radius: 14px;
   outline: none;
 }
 
-.auth-form input:focus {
+.auth-form input:focus,
+.auth-form select:focus {
   border-color: var(--blue);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent);
+}
+
+.setup-options {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 18px;
+  background: var(--group);
+}
+
+.setup-options .setting {
+  padding: 0;
+  border: 0;
+}
+
+.setup-options label {
+  gap: 7px;
 }
 
 .auth-message {

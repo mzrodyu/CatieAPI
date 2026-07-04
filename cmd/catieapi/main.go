@@ -662,11 +662,14 @@ func (s *Server) authStatus(c *gin.Context) {
 
 func (s *Server) setupAdmin(c *gin.Context) {
 	var body struct {
-		Username      string `json:"username"`
-		Password      string `json:"password"`
-		DisplayName   string `json:"displayName"`
-		Email         string `json:"email"`
-		DiscordUserID string `json:"discordUserId"`
+		Username            string   `json:"username"`
+		Password            string   `json:"password"`
+		DisplayName         string   `json:"displayName"`
+		Email               string   `json:"email"`
+		DiscordUserID       string   `json:"discordUserId"`
+		RegistrationEnabled bool     `json:"registrationEnabled"`
+		RegistrationMode    string   `json:"registrationMode"`
+		DefaultBalance      *float64 `json:"defaultBalance"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		validationError(c, "请填写管理员账号和密码")
@@ -686,6 +689,15 @@ func (s *Server) setupAdmin(c *gin.Context) {
 	}
 	if body.DisplayName == "" {
 		body.DisplayName = body.Username
+	}
+	registrationMode := normalizeRegistrationMode(body.RegistrationMode)
+	defaultBalance := 0.0
+	if body.DefaultBalance != nil {
+		if *body.DefaultBalance < 0 || *body.DefaultBalance > 1_000_000_000 {
+			validationError(c, "新用户初始额度必须在 0 到 1000000000 之间")
+			return
+		}
+		defaultBalance = round4(*body.DefaultBalance)
 	}
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -722,6 +734,12 @@ func (s *Server) setupAdmin(c *gin.Context) {
 		LastLoginAt:   now(),
 	}
 	s.state.Accounts = append(s.state.Accounts, account)
+	s.state.Settings.Auth = AuthSettings{
+		Managed:             true,
+		RegistrationEnabled: body.RegistrationEnabled,
+		RegistrationMode:    registrationMode,
+		DefaultBalance:      defaultBalance,
+	}
 	s.saveStateLocked()
 	s.mu.Unlock()
 

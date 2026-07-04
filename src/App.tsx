@@ -886,6 +886,9 @@ function AuthScreen({
   const [discordUserId, setDiscordUserId] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [setupRegistrationEnabled, setSetupRegistrationEnabled] = useState(false);
+  const [setupRegistrationMode, setSetupRegistrationMode] = useState<RegistrationMode>("username");
+  const [setupDefaultBalance, setSetupDefaultBalance] = useState("0");
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const isSetup = mode === "setup";
@@ -907,7 +910,16 @@ function AuthScreen({
       const registerUsername = isEmailRegister ? usernameFromEmail(email) : username;
       const body = mode === "login"
         ? { identifier: username, password }
-        : { username: registerUsername, password, displayName, email, discordUserId: isSetup ? discordUserId : "" };
+        : {
+          username: registerUsername,
+          password,
+          displayName,
+          email,
+          discordUserId: isSetup ? discordUserId : "",
+          registrationEnabled: isSetup ? setupRegistrationEnabled : undefined,
+          registrationMode: isSetup ? setupRegistrationMode : undefined,
+          defaultBalance: isSetup ? Number(setupDefaultBalance || 0) : undefined
+        };
       const data = await fetchJson<{ session: AuthSession }>(endpoint, {
         method: "POST",
         body: JSON.stringify(body)
@@ -983,16 +995,43 @@ function AuthScreen({
                 </label>
               )}
               {isSetup && (
-                <label>
-                  <span>Discord 用户 ID（可选）</span>
-                  <input
-                    inputMode="numeric"
-                    autoComplete="off"
-                    value={discordUserId}
-                    onChange={(event) => setDiscordUserId(event.target.value)}
-                    placeholder="绑定管理员 Discord 账号"
-                  />
-                </label>
+                <>
+                  <label>
+                    <span>Discord 用户 ID（可选）</span>
+                    <input
+                      inputMode="numeric"
+                      autoComplete="off"
+                      value={discordUserId}
+                      onChange={(event) => setDiscordUserId(event.target.value)}
+                      placeholder="绑定管理员 Discord 账号"
+                    />
+                  </label>
+                  <div className="setup-options">
+                    <div className="setting">
+                      <span>开放注册</span>
+                      <button
+                        type="button"
+                        className={setupRegistrationEnabled ? "ios-switch is-on" : "ios-switch"}
+                        aria-pressed={setupRegistrationEnabled}
+                        onClick={() => setSetupRegistrationEnabled((value) => !value)}
+                      >
+                        <span />
+                      </button>
+                    </div>
+                    <label>
+                      <span>注册方式</span>
+                      <select value={setupRegistrationMode} onChange={(event) => setSetupRegistrationMode(normalizeRegistrationMode(event.target.value))}>
+                        <option value="username">账号密码</option>
+                        <option value="email">邮箱</option>
+                        <option value="discord">Discord</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>新用户初始额度</span>
+                      <input type="number" min="0" step="0.01" value={setupDefaultBalance} onChange={(event) => setSetupDefaultBalance(event.target.value)} />
+                    </label>
+                  </div>
+                </>
               )}
               <label>
                 <span>密码</span>
@@ -2504,7 +2543,9 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
           { value: "system", label: "系统" },
           { value: "auth", label: "账号注册" },
           { value: "admin", label: "管理员" },
-          { value: "discord", label: "Discord" }
+          { value: "discord", label: "Discord" },
+          { value: "maintenance", label: "维护" },
+          { value: "backup", label: "备份" }
         ].map((tab) => (
           <button key={tab.value} type="button" className={settingsTab === tab.value ? "selected" : ""} onClick={() => setSettingsTab(tab.value)}>
             {tab.label}
@@ -2519,6 +2560,13 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
           <Setting label="当前默认模型" value={defaultModel} />
           <Setting label="已配置渠道" value={`${channels.length} 个，${activeChannels} 个启用`} />
           <Setting label="可选供应商" value={`${providerOptions.length} 种`} />
+        </div>
+      </Panel>
+      )}
+
+      {settingsTab === "maintenance" && (
+      <Panel title="维护设置">
+        <div className="settings-group">
           <div className="setting">
             <span>日志保留天数</span>
             <div className="setting-value maintenance-control">
@@ -2563,6 +2611,13 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
               {saving ? "保存中" : "保存维护设置"}
             </button>
           </div>
+        </div>
+      </Panel>
+      )}
+
+      {settingsTab === "backup" && (
+      <Panel title="备份与恢复">
+        <div className="settings-group">
           <div className="setting">
             <span>
               备份与恢复
