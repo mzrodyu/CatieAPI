@@ -51,7 +51,7 @@ ADMIN_TOKEN=你的应急管理密钥
 Discord 配置会加密保存到当前持久化存储，保存后立即生效，不需要重启容器。以下环境变量仅作为首次启动或故障恢复时的可选兜底：
 
 ```text
-DISCORD_CLIENT_ID=1446547305208746115
+DISCORD_CLIENT_ID=你的Discord应用Client ID
 DISCORD_CLIENT_SECRET=你的真实client_secret
 DISCORD_REDIRECT_URI=https://你的域名/api/auth/discord/callback
 DISCORD_ALLOWED_GUILD_ID=你的服务器ID

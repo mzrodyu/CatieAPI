@@ -12,7 +12,7 @@ Authorization: Bearer <catieapi_key>
 
 ```bash
 curl http://localhost:8787/v1/chat/completions \
-  -H "Authorization: Bearer cat_live_test" \
+  -H "Authorization: Bearer cat_你的_api_key" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}]}'
 ```
@@ -28,8 +28,8 @@ curl http://localhost:8787/v1/chat/completions \
 本地种子 Key：
 
 ```text
-cat_admin_test
-cat_live_test
+cat_你的管理_key
+cat_你的_api_key
 ```
 
 ## 认证失败

@@ -151,7 +151,7 @@ curl http://localhost:8787/api/models/deepseek-v4 \
 
 ```bash
 curl http://localhost:8787/v1/chat/completions \
-  -H "Authorization: Bearer cat_live_test" \
+  -H "Authorization: Bearer cat_你的_api_key" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}]}'
 ```
@@ -160,7 +160,7 @@ curl http://localhost:8787/v1/chat/completions \
 
 ```bash
 curl http://localhost:8787/v1/chat/completions \
-  -H "Authorization: Bearer cat_live_test" \
+  -H "Authorization: Bearer cat_你的_api_key" \
   -H "Idempotency-Key: demo-001" \
   -H "Content-Type: application/json" \
   -d '{"model":"ds","messages":[{"role":"user","content":"hello"}]}'

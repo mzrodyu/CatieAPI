@@ -39,21 +39,21 @@ func seedGatewayFixtures(server *Server) {
 	defer server.mu.Unlock()
 
 	server.state.Users = []User{
-		{ID: "usr_1001", Name: "林可", Email: "lin@example.com", Role: "admin", Status: "active", Balance: 128.5, RequestsToday: 42, TotalRequests: 1380, CreatedAt: "2026-07-01T10:00:00.000Z", LastLoginAt: "2026-07-04T01:10:00.000Z", Note: "内部测试管理员"},
-		{ID: "usr_1002", Name: "Mika", Email: "mika@example.com", Role: "user", Status: "active", Balance: 36.2, RequestsToday: 18, TotalRequests: 526, CreatedAt: "2026-07-02T08:30:00.000Z", LastLoginAt: "2026-07-03T21:14:00.000Z", Note: "普通用户"},
-		{ID: "usr_1003", Name: "测试账号", Email: "trial@example.com", Role: "user", Status: "limited", Balance: 2.4, RequestsToday: 5, TotalRequests: 80, CreatedAt: "2026-07-03T12:20:00.000Z", LastLoginAt: "2026-07-03T23:48:00.000Z", Note: "额度偏低"},
+		{ID: "usr_1001", Name: "Demo Admin", Email: "demo-admin@example.test", Role: "admin", Status: "active", Balance: 128.5, RequestsToday: 42, TotalRequests: 1380, CreatedAt: "2026-07-01T10:00:00.000Z", LastLoginAt: "2026-07-04T01:10:00.000Z", Note: "内部测试管理员"},
+		{ID: "usr_1002", Name: "Demo User", Email: "demo-user@example.test", Role: "user", Status: "active", Balance: 36.2, RequestsToday: 18, TotalRequests: 526, CreatedAt: "2026-07-02T08:30:00.000Z", LastLoginAt: "2026-07-03T21:14:00.000Z", Note: "普通用户"},
+		{ID: "usr_1003", Name: "Limited User", Email: "limited-user@example.test", Role: "user", Status: "limited", Balance: 2.4, RequestsToday: 5, TotalRequests: 80, CreatedAt: "2026-07-03T12:20:00.000Z", LastLoginAt: "2026-07-03T23:48:00.000Z", Note: "额度偏低"},
 	}
 	server.state.APIKeys = []APIKey{
-		{ID: "key_1001", UserID: "usr_1001", Name: "Dashboard Key", Prefix: "cat_admin", Hash: hashSecret("cat_admin_test"), Status: "active", CreatedAt: "2026-07-01T10:30:00.000Z", LastUsedAt: "2026-07-04T01:20:00.000Z", RequestCount: 910},
-		{ID: "key_1002", UserID: "usr_1002", Name: "App Key", Prefix: "cat_live", Hash: hashSecret("cat_live_test"), Status: "active", CreatedAt: "2026-07-02T09:12:00.000Z", LastUsedAt: "2026-07-03T21:28:00.000Z", RequestCount: 526},
+		{ID: "key_1001", UserID: "usr_1001", Name: "Dashboard Key", Prefix: "cat_admin", Hash: hashSecret("cat_fixture_admin_secret"), Status: "active", CreatedAt: "2026-07-01T10:30:00.000Z", LastUsedAt: "2026-07-04T01:20:00.000Z", RequestCount: 910},
+		{ID: "key_1002", UserID: "usr_1002", Name: "App Key", Prefix: "cat_live", Hash: hashSecret("cat_fixture_live_secret"), Status: "active", CreatedAt: "2026-07-02T09:12:00.000Z", LastUsedAt: "2026-07-03T21:28:00.000Z", RequestCount: 526},
 	}
 	server.state.Channels = []Channel{
-		{ID: "chn_1001", Name: "OpenAI Compatible", Provider: "openai", BaseURL: "https://api.openai.example/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-5.6", "gpt-5.5"}},
-		{ID: "chn_1002", Name: "Backup Provider", Provider: "compatible", BaseURL: "https://gateway.example/v1", Status: "standby", Priority: 2, Weight: 20, Models: []string{"claude-fable-5", "gemini-3.1", "deepseek-v4"}},
+		{ID: "chn_1001", Name: "OpenAI Compatible", Provider: "openai", BaseURL: "https://upstream-one.example.test/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-5.6", "gpt-5.5"}},
+		{ID: "chn_1002", Name: "Backup Provider", Provider: "compatible", BaseURL: "https://upstream-two.example.test/v1", Status: "standby", Priority: 2, Weight: 20, Models: []string{"claude-fable-5", "gemini-3.1", "deepseek-v4"}},
 	}
 	server.state.Logs = []RequestLog{
-		{ID: "req_9001", UserID: stringPtr("usr_1002"), APIKeyPrefix: stringPtr("cat_live"), Model: stringPtr("gpt-5.6"), Channel: stringPtr("OpenAI Compatible"), Status: "success", Cost: 0.04, LatencyMS: 820, CreatedAt: "2026-07-04T01:22:00.000Z"},
-		{ID: "req_9002", UserID: stringPtr("usr_1003"), APIKeyPrefix: stringPtr("cat_trial"), Model: stringPtr("deepseek-v4"), Channel: stringPtr("Backup Provider"), Status: "failed", Cost: 0, LatencyMS: 1200, ErrorCode: "upstream_timeout", CreatedAt: "2026-07-04T01:25:00.000Z"},
+		{ID: "req_fixture_1", UserID: stringPtr("usr_1002"), APIKeyPrefix: stringPtr("cat_live"), Model: stringPtr("gpt-5.6"), Channel: stringPtr("OpenAI Compatible"), Status: "success", Cost: 0.04, LatencyMS: 820, CreatedAt: "2026-07-04T01:22:00.000Z"},
+		{ID: "req_fixture_2", UserID: stringPtr("usr_1003"), APIKeyPrefix: stringPtr("cat_trial"), Model: stringPtr("deepseek-v4"), Channel: stringPtr("Backup Provider"), Status: "failed", Cost: 0, LatencyMS: 1200, ErrorCode: "upstream_timeout", CreatedAt: "2026-07-04T01:25:00.000Z"},
 	}
 }
 
@@ -138,7 +138,7 @@ func TestFirstRunSetupLoginRegistrationAndRoleIsolation(t *testing.T) {
 		"password":"correct-horse-battery",
 		"displayName":"Catie",
 		"email":"catie@example.com",
-		"discordUserId":"1446547305208746115"
+		"discordUserId":"100000000000000001"
 	}`, nil)
 	if setup.Code != http.StatusCreated {
 		t.Fatalf("setup status = %d body = %s", setup.Code, setup.Body.String())
@@ -195,10 +195,10 @@ func TestFirstRunSetupLoginRegistrationAndRoleIsolation(t *testing.T) {
 	}
 
 	register := perform(router, http.MethodPost, "/api/auth/register", `{
-		"username":"mika_user",
+		"username":"demo_user",
 		"password":"another-safe-password",
-		"displayName":"Mika",
-		"email":"mika-user@example.com"
+		"displayName":"Demo User",
+		"email":"demo-user@example.test"
 	}`, nil)
 	if register.Code != http.StatusCreated {
 		t.Fatalf("register status = %d body = %s", register.Code, register.Body.String())
@@ -210,7 +210,7 @@ func TestFirstRunSetupLoginRegistrationAndRoleIsolation(t *testing.T) {
 		t.Fatalf("ordinary user reached admin route: %d body = %s", userProtected.Code, userProtected.Body.String())
 	}
 	account := perform(router, http.MethodGet, "/api/account/me", "", userHeaders)
-	if account.Code != http.StatusOK || !bytes.Contains(account.Body.Bytes(), []byte(`"name":"Mika"`)) {
+	if account.Code != http.StatusOK || !bytes.Contains(account.Body.Bytes(), []byte(`"name":"Demo User"`)) {
 		t.Fatalf("ordinary user account status = %d body = %s", account.Code, account.Body.String())
 	}
 	ownKey := perform(router, http.MethodPost, "/api/account/api-keys", `{"name":"Personal Key"}`, userHeaders)
@@ -228,6 +228,71 @@ func TestFirstRunSetupLoginRegistrationAndRoleIsolation(t *testing.T) {
 	}`, nil)
 	if blockedRegistration.Code != http.StatusForbidden {
 		t.Fatalf("disabled registration status = %d body = %s", blockedRegistration.Code, blockedRegistration.Body.String())
+	}
+}
+
+func TestDemoSeedDataIsRemovedOnLoad(t *testing.T) {
+	dataFile := filepath.Join(t.TempDir(), "state.json")
+	stored := defaultState()
+	stored.Users = []User{
+		{ID: "usr_1001", Name: "林可", Email: "lin@example.com", Role: "admin", Status: "active"},
+		{ID: "usr_real", Name: "Real User", Email: "real@example.test", Role: "user", Status: "active"},
+	}
+	stored.APIKeys = []APIKey{
+		{ID: "key_1001", UserID: "usr_1001", Name: "Dashboard Key", Prefix: "cat_admin", Hash: hashSecret("demo"), Status: "active"},
+		{ID: "key_real", UserID: "usr_real", Name: "Real Key", Prefix: "cat_real", Hash: hashSecret("real"), Status: "active"},
+	}
+	stored.Channels = []Channel{
+		{ID: "chn_1001", Name: "OpenAI Compatible", Provider: "openai", BaseURL: "https://api.openai.example/v1", Status: "healthy"},
+		{ID: "chn_real", Name: "Real Provider", Provider: "compatible", BaseURL: "https://real.example.test/v1", Status: "healthy"},
+	}
+	stored.Logs = []RequestLog{
+		{ID: "req_9001", Status: "success"},
+		{ID: "req_real", Status: "success"},
+	}
+	stored.QuotaLedger = []QuotaEntry{
+		{ID: "quota_seed", RequestID: "req_9001"},
+		{ID: "quota_real", RequestID: "req_real"},
+	}
+	stored.Settings.Discord = DiscordSettings{
+		Managed:         true,
+		Enabled:         true,
+		ClientID:        "100000000000000001",
+		RedirectURI:     "http://localhost:8787/api/auth/discord/callback",
+		AuthSuccessURL:  "https://your-domain.example/",
+		SessionTTLHours: 168,
+	}
+	content, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal stored state: %v", err)
+	}
+	if err := os.WriteFile(dataFile, content, 0644); err != nil {
+		t.Fatalf("write stored state: %v", err)
+	}
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE": "file",
+		"DATA_FILE":   dataFile,
+	})
+	server, _ := testServerRouter(t)
+
+	if len(server.state.Users) != 1 || server.state.Users[0].ID != "usr_real" {
+		t.Fatalf("users after seed cleanup = %#v", server.state.Users)
+	}
+	if len(server.state.APIKeys) != 1 || server.state.APIKeys[0].ID != "key_real" {
+		t.Fatalf("api keys after seed cleanup = %#v", server.state.APIKeys)
+	}
+	if len(server.state.Channels) != 1 || server.state.Channels[0].ID != "chn_real" {
+		t.Fatalf("channels after seed cleanup = %#v", server.state.Channels)
+	}
+	if len(server.state.Logs) != 1 || server.state.Logs[0].ID != "req_real" {
+		t.Fatalf("logs after seed cleanup = %#v", server.state.Logs)
+	}
+	if len(server.state.QuotaLedger) != 1 || server.state.QuotaLedger[0].ID != "quota_real" {
+		t.Fatalf("quota ledger after seed cleanup = %#v", server.state.QuotaLedger)
+	}
+	if server.state.Settings.Discord.Managed {
+		t.Fatalf("incomplete sample Discord settings were not cleared: %#v", server.state.Settings.Discord)
 	}
 }
 
@@ -327,7 +392,7 @@ func TestOpenAICompatibleProviderForwardsRequest(t *testing.T) {
 	}
 
 	chatBody := `{"model":"ds","messages":[{"role":"user","content":"hello"}]}`
-	chat := perform(router, http.MethodPost, "/v1/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_live_test"})
+	chat := perform(router, http.MethodPost, "/v1/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
 	if chat.Code != http.StatusOK {
 		t.Fatalf("chat status = %d body = %s", chat.Code, chat.Body.String())
 	}
@@ -386,7 +451,7 @@ func TestOpenAICompatibleProviderStreamsUpstreamResponse(t *testing.T) {
 	}
 
 	chatBody := `{"model":"ds","stream":true,"messages":[{"role":"user","content":"hello"}]}`
-	chat := perform(router, http.MethodPost, "/v1/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_live_test"})
+	chat := perform(router, http.MethodPost, "/v1/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
 	if chat.Code != http.StatusOK {
 		t.Fatalf("stream chat status = %d body = %s", chat.Code, chat.Body.String())
 	}
@@ -437,7 +502,7 @@ func TestChannelUpstreamKeyIsEncryptedAtRestAndUsable(t *testing.T) {
 	}
 
 	chatBody := `{"model":"ds","messages":[{"role":"user","content":"hello"}]}`
-	chat := perform(router, http.MethodPost, "/v1/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_live_test"})
+	chat := perform(router, http.MethodPost, "/v1/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
 	if chat.Code != http.StatusOK {
 		t.Fatalf("chat status = %d body = %s", chat.Code, chat.Body.String())
 	}
@@ -528,7 +593,7 @@ func TestDiscordOAuthRoleGateCreatesSessionForAdminRoutes(t *testing.T) {
 }
 
 func TestBoundDiscordIDRestoresLocalAdminAccount(t *testing.T) {
-	discordUserID := "1446547305208746115"
+	discordUserID := "100000000000000001"
 	discord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/oauth2/token":
@@ -592,7 +657,7 @@ func TestDiscordSettingsCanBeManagedWithoutEnvironmentVariables(t *testing.T) {
 	router := testRouter(t)
 	body := `{
 		"enabled": true,
-		"clientId": "1446547305208746115",
+		"clientId": "100000000000000001",
 		"clientSecret": "discord-secret-value",
 		"redirectUri": "https://api.example.com/api/auth/discord/callback",
 		"allowedGuildId": "123456789012345678",
@@ -628,7 +693,7 @@ func TestDiscordSettingsCanBeManagedWithoutEnvironmentVariables(t *testing.T) {
 	if start.Code != http.StatusFound {
 		t.Fatalf("persisted Discord settings were not activated: %d body = %s", start.Code, start.Body.String())
 	}
-	if !strings.Contains(start.Header().Get("Location"), "client_id=1446547305208746115") {
+	if !strings.Contains(start.Header().Get("Location"), "client_id=100000000000000001") {
 		t.Fatalf("Discord authorization URL used the wrong Client ID: %s", start.Header().Get("Location"))
 	}
 }
@@ -666,7 +731,7 @@ func TestOpenAICompatibleRoutesWorkWithoutV1Prefix(t *testing.T) {
 	server, router := testServerRouter(t)
 	seedGatewayFixtures(server)
 
-	models := perform(router, http.MethodGet, "/models", "", map[string]string{"Authorization": "Bearer cat_live_test"})
+	models := perform(router, http.MethodGet, "/models", "", map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
 	if models.Code != http.StatusOK {
 		t.Fatalf("models without v1 status = %d body = %s", models.Code, models.Body.String())
 	}
@@ -674,7 +739,7 @@ func TestOpenAICompatibleRoutesWorkWithoutV1Prefix(t *testing.T) {
 		t.Fatalf("models without v1 did not return model list: %s", models.Body.String())
 	}
 
-	model := perform(router, http.MethodGet, "/models/ds", "", map[string]string{"Authorization": "Bearer cat_live_test"})
+	model := perform(router, http.MethodGet, "/models/ds", "", map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
 	if model.Code != http.StatusOK {
 		t.Fatalf("model without v1 status = %d body = %s", model.Code, model.Body.String())
 	}
@@ -683,7 +748,7 @@ func TestOpenAICompatibleRoutesWorkWithoutV1Prefix(t *testing.T) {
 	}
 
 	chatBody := `{"model":"ds","messages":[{"role":"user","content":"hello"}]}`
-	chat := perform(router, http.MethodPost, "/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_live_test"})
+	chat := perform(router, http.MethodPost, "/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
 	if chat.Code != http.StatusOK {
 		t.Fatalf("chat without v1 status = %d body = %s", chat.Code, chat.Body.String())
 	}

@@ -18,7 +18,7 @@ GET /models
 
 ```bash
 curl http://localhost:8787/v1/models \
-  -H "Authorization: Bearer cat_live_test"
+  -H "Authorization: Bearer cat_你的_api_key"
 ```
 
 响应：
@@ -53,7 +53,7 @@ GET /models/{model}
 
 ```bash
 curl http://localhost:8787/v1/models/gpt-5.6 \
-  -H "Authorization: Bearer cat_live_test"
+  -H "Authorization: Bearer cat_你的_api_key"
 ```
 
 `model` 支持模型 ID 和别名：

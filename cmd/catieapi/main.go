@@ -2442,6 +2442,9 @@ func (s *Server) loadState() {
 		s.state.Settings = stored.Settings
 	}
 	changed := false
+	if s.migrateDemoSeedData() {
+		changed = true
+	}
 	if s.migrateModelPricing() {
 		changed = true
 	}
@@ -2472,6 +2475,113 @@ func (s *Server) applyPersistedDiscordSettings() {
 	if !settings.Enabled {
 		s.discordClientID = ""
 	}
+}
+
+func (s *Server) migrateDemoSeedData() bool {
+	changed := false
+	users := make([]User, 0, len(s.state.Users))
+	for _, user := range s.state.Users {
+		if isDemoSeedUser(user) {
+			changed = true
+			continue
+		}
+		users = append(users, user)
+	}
+	s.state.Users = users
+
+	keys := make([]APIKey, 0, len(s.state.APIKeys))
+	for _, key := range s.state.APIKeys {
+		if isDemoSeedAPIKey(key) {
+			changed = true
+			continue
+		}
+		keys = append(keys, key)
+	}
+	s.state.APIKeys = keys
+
+	channels := make([]Channel, 0, len(s.state.Channels))
+	for _, channel := range s.state.Channels {
+		if isDemoSeedChannel(channel) {
+			changed = true
+			continue
+		}
+		channels = append(channels, channel)
+	}
+	s.state.Channels = channels
+
+	logs := make([]RequestLog, 0, len(s.state.Logs))
+	for _, log := range s.state.Logs {
+		if isDemoSeedRequestID(log.ID) {
+			changed = true
+			continue
+		}
+		logs = append(logs, log)
+	}
+	s.state.Logs = logs
+
+	ledger := make([]QuotaEntry, 0, len(s.state.QuotaLedger))
+	for _, entry := range s.state.QuotaLedger {
+		if isDemoSeedRequestID(entry.RequestID) {
+			changed = true
+			continue
+		}
+		ledger = append(ledger, entry)
+	}
+	s.state.QuotaLedger = ledger
+
+	if isDemoDiscordSettings(s.state.Settings.Discord) {
+		s.state.Settings.Discord = DiscordSettings{}
+		changed = true
+	}
+	return changed
+}
+
+func isDemoSeedUser(user User) bool {
+	switch user.ID {
+	case "usr_1001":
+		return user.Name == "林可" && user.Email == "lin@example.com"
+	case "usr_1002":
+		return user.Name == "Mika" && user.Email == "mika@example.com"
+	case "usr_1003":
+		return user.Name == "测试账号" && user.Email == "trial@example.com"
+	default:
+		return false
+	}
+}
+
+func isDemoSeedAPIKey(key APIKey) bool {
+	switch key.ID {
+	case "key_1001":
+		return key.UserID == "usr_1001" && (key.Prefix == "cat_admin" || key.Prefix == "cat_sk_admin" || key.Name == "Dashboard Key")
+	case "key_1002":
+		return key.UserID == "usr_1002" && (key.Prefix == "cat_live" || key.Prefix == "cat_sk_live" || key.Name == "App Key")
+	default:
+		return false
+	}
+}
+
+func isDemoSeedChannel(channel Channel) bool {
+	switch channel.ID {
+	case "chn_1001":
+		return channel.Name == "OpenAI Compatible" && strings.Contains(channel.BaseURL, "api.openai.example")
+	case "chn_1002":
+		return channel.Name == "Backup Provider" && strings.Contains(channel.BaseURL, "gateway.example")
+	default:
+		return false
+	}
+}
+
+func isDemoSeedRequestID(id string) bool {
+	return id == "req_9001" || id == "req_9002"
+}
+
+func isDemoDiscordSettings(settings DiscordSettings) bool {
+	if !settings.Managed || settings.ClientSecret != "" {
+		return false
+	}
+	return strings.Contains(settings.RedirectURI, "localhost:8787") ||
+		strings.Contains(settings.RedirectURI, "your-domain.example") ||
+		strings.Contains(settings.AuthSuccessURL, "your-domain.example")
 }
 
 func (s *Server) migrateModelPricing() bool {
@@ -2590,6 +2700,9 @@ func (s *Server) loadPostgresState() {
 		s.state.Settings = stored.Settings
 	}
 	changed := false
+	if s.migrateDemoSeedData() {
+		changed = true
+	}
 	if s.migrateModelPricing() {
 		changed = true
 	}

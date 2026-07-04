@@ -1352,7 +1352,7 @@ function SettingsView() {
                   autoComplete="off"
                   value={discord.clientId}
                   onChange={(event) => setDiscord({ ...discord, clientId: event.target.value })}
-                  placeholder="1446547305208746115"
+                  placeholder="100000000000000001"
                 />
               </label>
               <label>

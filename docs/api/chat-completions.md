@@ -43,7 +43,7 @@ Idempotency-Key: <optional_unique_key>
 
 ```bash
 curl http://localhost:8787/v1/chat/completions \
-  -H "Authorization: Bearer cat_live_test" \
+  -H "Authorization: Bearer cat_你的_api_key" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}]}'
 ```
@@ -52,7 +52,7 @@ curl http://localhost:8787/v1/chat/completions \
 
 ```bash
 curl http://localhost:8787/chat/completions \
-  -H "Authorization: Bearer cat_live_test" \
+  -H "Authorization: Bearer cat_你的_api_key" \
   -H "Content-Type: application/json" \
   -d '{"model":"ds","messages":[{"role":"user","content":"hello"}]}'
 ```
@@ -61,7 +61,7 @@ curl http://localhost:8787/chat/completions \
 
 ```bash
 curl http://localhost:8787/v1/chat/completions \
-  -H "Authorization: Bearer cat_live_test" \
+  -H "Authorization: Bearer cat_你的_api_key" \
   -H "Content-Type: application/json" \
   -d '{"model":"f5","stream":true,"messages":[{"role":"user","content":"hello"}]}'
 ```
@@ -74,7 +74,7 @@ curl http://localhost:8787/v1/chat/completions \
 
 ```bash
 curl http://localhost:8787/v1/models \
-  -H "Authorization: Bearer cat_live_test"
+  -H "Authorization: Bearer cat_你的_api_key"
 ```
 
 返回 OpenAI compatible 的模型列表：

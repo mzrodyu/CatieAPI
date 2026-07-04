@@ -33,7 +33,7 @@ GET /v1/models/{model}
 import OpenAI from "openai";
 
 const client = new OpenAI({
-  apiKey: "cat_live_test",
+  apiKey: "cat_你的_api_key",
   baseURL: "https://shiliyuming.com"
 });
 
@@ -51,7 +51,7 @@ console.log(response.choices[0]?.message?.content);
 from openai import OpenAI
 
 client = OpenAI(
-    api_key="cat_live_test",
+    api_key="cat_你的_api_key",
     base_url="https://shiliyuming.com",
 )
 
@@ -67,7 +67,7 @@ print(response.choices[0].message.content)
 
 ```bash
 curl https://shiliyuming.com/chat/completions \
-  -H "Authorization: Bearer cat_live_test" \
+  -H "Authorization: Bearer cat_你的_api_key" \
   -H "Content-Type: application/json" \
   -d '{"model":"ds","messages":[{"role":"user","content":"hello"}]}'
 ```
