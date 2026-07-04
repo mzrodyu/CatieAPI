@@ -1839,6 +1839,8 @@ function KeyEditor({
 function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy: (value: string, label?: string) => void; onCreate: (model: ModelCreate) => Promise<void> }) {
   const recommended = models.filter((model) => model.recommended);
   const [query, setQuery] = useState("");
+  const [activeProvider, setActiveProvider] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
   const [page, setPage] = useState(1);
   const [id, setId] = useState("");
   const [name, setName] = useState("");
@@ -1846,17 +1848,29 @@ function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy:
   const [aliases, setAliases] = useState("");
   const [description, setDescription] = useState("");
   const [message, setMessage] = useState("");
-  const pageSize = 50;
+  const pageSize = 60;
+  const providerStats = useMemo(() => {
+    const stats = new Map<string, number>();
+    models.forEach((model) => {
+      const provider = modelProvider(model);
+      stats.set(provider, (stats.get(provider) || 0) + 1);
+    });
+    return Array.from(stats.entries())
+      .sort((a, b) => b[1] - a[1] || providerDisplayName(a[0]).localeCompare(providerDisplayName(b[0])))
+      .map(([provider, count]) => ({ provider, count }));
+  }, [models]);
   const filteredModels = useMemo(() => {
     const keyword = query.trim().toLowerCase();
-    if (!keyword) return models;
-    return models.filter((model) =>
-      [model.id, model.name, model.vendor, model.category, model.description, ...arrayOf(model.aliases)]
+    return models.filter((model) => {
+      if (activeProvider !== "all" && modelProvider(model) !== activeProvider) return false;
+      if (statusFilter !== "all" && model.status !== statusFilter) return false;
+      if (!keyword) return true;
+      return [model.id, model.name, model.vendor, model.category, model.description, ...arrayOf(model.aliases)]
         .join(" ")
         .toLowerCase()
-        .includes(keyword)
-    );
-  }, [models, query]);
+        .includes(keyword);
+    });
+  }, [models, query, activeProvider, statusFilter]);
   const modelPages = useMemo(() => {
     const groups = new Map<string, ModelItem[]>();
     filteredModels.forEach((model) => {
@@ -1867,7 +1881,8 @@ function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy:
     const pages: Array<Array<[string, ModelItem[]]>> = [];
     let currentPage: Array<[string, ModelItem[]]> = [];
     let currentCount = 0;
-    for (const group of groups.entries()) {
+    const sortedGroups = Array.from(groups.entries()).sort((a, b) => providerDisplayName(a[0]).localeCompare(providerDisplayName(b[0])));
+    for (const group of sortedGroups) {
       if (currentPage.length > 0 && currentCount + group[1].length > pageSize) {
         pages.push(currentPage);
         currentPage = [];
@@ -1885,7 +1900,7 @@ function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy:
 
   useEffect(() => {
     setPage(1);
-  }, [query, models.length]);
+  }, [query, activeProvider, statusFilter, models.length]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1947,7 +1962,36 @@ function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy:
       <Panel title="全部模型">
         <div className="panel-toolbar model-list-toolbar">
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索模型 ID、名称、供应商或代称" />
-          <span className="muted-inline">共 {filteredModels.length} 个模型</span>
+          <div className="model-filter-actions">
+            {[
+              { value: "all", label: "全部" },
+              { value: "available", label: "可用" },
+              { value: "disabled", label: "禁用" }
+            ].map((option) => (
+              <button key={option.value} type="button" className={statusFilter === option.value ? "selected" : ""} onClick={() => setStatusFilter(option.value)}>
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="model-provider-filter" aria-label="按供应商筛选模型">
+          <button type="button" className={activeProvider === "all" ? "selected" : ""} onClick={() => setActiveProvider("all")}>
+            <span className="provider-icon provider-icon-all" aria-hidden="true">All</span>
+            <strong>全部</strong>
+            <small>{models.length}</small>
+          </button>
+          {providerStats.map((item) => (
+            <button key={item.provider} type="button" className={activeProvider === item.provider ? "selected" : ""} onClick={() => setActiveProvider(item.provider)}>
+              <ProviderIcon provider={item.provider} />
+              <strong>{providerDisplayName(item.provider)}</strong>
+              <small>{item.count}</small>
+            </button>
+          ))}
+        </div>
+        <div className="model-list-summary">
+          <span>{activeProvider === "all" ? "全部供应商" : providerDisplayName(activeProvider)}</span>
+          <strong>{filteredModels.length}</strong>
+          <span>个模型</span>
         </div>
         {filteredModels.length > 0 ? (
           <>
@@ -1986,11 +2030,19 @@ function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy:
 }
 
 function ModelCompactRow({ model, onCopy }: { model: ModelItem; onCopy: (value: string, label?: string) => void }) {
+  const aliases = arrayOf(model.aliases).slice(0, 3);
   return (
     <article className="model-compact-row">
       <div className="model-compact-main">
         <strong>{model.name}</strong>
         <small>{model.id}</small>
+        {aliases.length > 0 && (
+          <span>
+            {aliases.map((alias) => (
+              <em key={alias}>{alias}</em>
+            ))}
+          </span>
+        )}
       </div>
       <Badge tone={model.status}>{statusLabel(model.status)}</Badge>
       <button className="icon-button" title="复制模型 ID" onClick={() => onCopy(model.id, "模型 ID 已复制")}>
@@ -2384,6 +2436,15 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
   const [settingsTab, setSettingsTab] = useState("system");
   const defaultModel = models.find((model) => model.recommended && model.status === "available")?.id || models.find((model) => model.status === "available")?.id || "未配置";
   const activeChannels = channels.filter((channel) => channel.status !== "disabled").length;
+  const settingsTabs = [
+    { value: "system", label: "系统", description: "运行概况" },
+    { value: "auth", label: "注册", description: "开放方式" },
+    { value: "admin", label: "管理员", description: "账号绑定" },
+    { value: "discord", label: "Discord", description: "登录限制" },
+    { value: "maintenance", label: "维护", description: "日志保留" },
+    { value: "backup", label: "备份", description: "导出恢复" }
+  ];
+  const activeSettingsTab = settingsTabs.find((tab) => tab.value === settingsTab) || settingsTabs[0];
 
   useEffect(() => {
     Promise.all([
@@ -2539,18 +2600,16 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
   return (
     <div className="settings-layout">
       <div className="settings-tabs">
-        {[
-          { value: "system", label: "系统" },
-          { value: "auth", label: "账号注册" },
-          { value: "admin", label: "管理员" },
-          { value: "discord", label: "Discord" },
-          { value: "maintenance", label: "维护" },
-          { value: "backup", label: "备份" }
-        ].map((tab) => (
+        {settingsTabs.map((tab) => (
           <button key={tab.value} type="button" className={settingsTab === tab.value ? "selected" : ""} onClick={() => setSettingsTab(tab.value)}>
-            {tab.label}
+            <strong>{tab.label}</strong>
+            <small>{tab.description}</small>
           </button>
         ))}
+      </div>
+      <div className="settings-tab-note">
+        <strong>{activeSettingsTab.label}</strong>
+        <span>{activeSettingsTab.description}</span>
       </div>
 
       {settingsTab === "system" && (
