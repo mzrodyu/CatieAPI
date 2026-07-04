@@ -2,7 +2,10 @@
 
 CatieAPI 是一个轻量、清爽、面向大众用户的 AI 聚合网关。它兼容 OpenAI 风格接口，但不要求用户记住复杂路径：Base URL 可以直接填写 `https://shiliyuming.com`，不用写 `https://shiliyuming.com/v1`。
 
-目标不是复刻 NewAPI 的复杂度，而是提供一个更轻、更清楚、更像 iOS 原生应用体验的模型网关。
+目标是提供一个更轻、更清楚、更像 iOS 原生应用体验的模型网关。
+
+
+<img width="2560" height="1298" alt="image" src="https://github.com/user-attachments/assets/848e3049-7c10-45f3-ba86-8e943cf920cd" />
 
 ## Features
 
@@ -145,5 +148,4 @@ curl http://localhost:8787/chat/completions \
   -d '{"model":"ds","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-<img width="2560" height="1298" alt="image" src="https://github.com/user-attachments/assets/848e3049-7c10-45f3-ba86-8e943cf920cd" />
 
