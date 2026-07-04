@@ -313,6 +313,39 @@ function providerDisplayName(provider: string) {
   return providerOptions.find((option) => option.value === provider)?.label || provider || "Custom";
 }
 
+function modelProvider(model: ModelItem) {
+  const source = `${model.vendor} ${model.id} ${model.name}`.toLowerCase();
+  if (source.includes("openai") || /\bgpt[-_/]/.test(source) || source.includes("o1-") || source.includes("o3-")) return "openai";
+  if (source.includes("anthropic") || source.includes("claude")) return "anthropic";
+  if (source.includes("google") || source.includes("gemini") || source.includes("gcli-")) return "google";
+  if (source.includes("deepseek")) return "deepseek";
+  if (source.includes("openrouter")) return "openrouter";
+  if (source.includes("groq")) return "groq";
+  if (source.includes("siliconflow")) return "siliconflow";
+  if (source.includes("moonshot") || source.includes("kimi")) return "moonshot";
+  return model.vendor && model.vendor.toLowerCase() !== "custom" ? model.vendor.toLowerCase() : "compatible";
+}
+
+function ProviderIcon({ provider }: { provider: string }) {
+  const mark = provider === "openai" ? "◎"
+    : provider === "anthropic" ? "A"
+      : provider === "google" ? "✦"
+        : provider === "deepseek" ? "D"
+          : provider === "openrouter" ? "↗"
+            : provider === "groq" ? "G"
+              : provider === "siliconflow" ? "S"
+                : provider === "moonshot" ? "M"
+                  : "◇";
+  return (
+    <span className={`provider-icon provider-icon-${provider}`} aria-hidden="true">
+      <svg viewBox="0 0 32 32" role="img">
+        <rect x="1" y="1" width="30" height="30" rx="8" />
+        <text x="16" y="21" textAnchor="middle">{mark}</text>
+      </svg>
+    </span>
+  );
+}
+
 async function copyText(value: string) {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(value);
@@ -1585,6 +1618,14 @@ function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy:
   const totalPages = Math.max(1, Math.ceil(filteredModels.length / pageSize));
   const safePage = Math.min(page, totalPages);
   const visibleModels = filteredModels.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const groupedModels = useMemo(() => {
+    const groups = new Map<string, ModelItem[]>();
+    visibleModels.forEach((model) => {
+      const provider = modelProvider(model);
+      groups.set(provider, [...(groups.get(provider) || []), model]);
+    });
+    return [...groups.entries()];
+  }, [visibleModels]);
 
   useEffect(() => {
     setPage(1);
@@ -1654,16 +1695,22 @@ function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy:
         </div>
         {filteredModels.length > 0 ? (
           <>
-            <div className="model-table">
-              <div className="model-table-head">
-                <span>模型</span>
-                <span>来源</span>
-                <span>信息</span>
-                <span>状态</span>
-                <span></span>
-              </div>
-              {visibleModels.map((model) => (
-                <ModelCompactRow key={model.id} model={model} onCopy={onCopy} />
+            <div className="model-provider-groups">
+              {groupedModels.map(([provider, providerModels]) => (
+                <section className="model-provider-group" key={provider}>
+                  <header>
+                    <ProviderIcon provider={provider} />
+                    <div>
+                      <strong>{providerDisplayName(provider)}</strong>
+                      <span>{providerModels.length} 个模型</span>
+                    </div>
+                  </header>
+                  <div className="model-compact-grid">
+                    {providerModels.map((model) => (
+                      <ModelCompactRow key={model.id} model={model} onCopy={onCopy} />
+                    ))}
+                  </div>
+                </section>
               ))}
             </div>
             {totalPages > 1 && (
@@ -1684,23 +1731,16 @@ function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy:
 
 function ModelCompactRow({ model, onCopy }: { model: ModelItem; onCopy: (value: string, label?: string) => void }) {
   return (
-    <div className="model-table-row">
-      <span>
+    <article className="model-compact-row">
+      <div className="model-compact-main">
         <strong>{model.name}</strong>
         <small>{model.id}</small>
-      </span>
-      <span>{model.vendor}</span>
-      <span>
-        <small>{model.price} · {model.context}</small>
-        {arrayOf(model.aliases).length > 0 && (
-          <small>{arrayOf(model.aliases).slice(0, 4).join(", ")}</small>
-        )}
-      </span>
+      </div>
       <Badge tone={model.status}>{statusLabel(model.status)}</Badge>
       <button className="icon-button" title="复制模型 ID" onClick={() => onCopy(model.id, "模型 ID 已复制")}>
         <Icon name="copy" />
       </button>
-    </div>
+    </article>
   );
 }
 
