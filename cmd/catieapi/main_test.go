@@ -15,6 +15,11 @@ import (
 )
 
 func testRouter(t *testing.T) *gin.Engine {
+	_, router := testServerRouter(t)
+	return router
+}
+
+func testServerRouter(t *testing.T) (*Server, *gin.Engine) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
@@ -26,7 +31,30 @@ func testRouter(t *testing.T) *gin.Engine {
 	router.Use(server.requestMiddleware())
 	router.Use(server.corsMiddleware())
 	server.registerRoutes(router)
-	return router
+	return server, router
+}
+
+func seedGatewayFixtures(server *Server) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+
+	server.state.Users = []User{
+		{ID: "usr_1001", Name: "林可", Email: "lin@example.com", Role: "admin", Status: "active", Balance: 128.5, RequestsToday: 42, TotalRequests: 1380, CreatedAt: "2026-07-01T10:00:00.000Z", LastLoginAt: "2026-07-04T01:10:00.000Z", Note: "内部测试管理员"},
+		{ID: "usr_1002", Name: "Mika", Email: "mika@example.com", Role: "user", Status: "active", Balance: 36.2, RequestsToday: 18, TotalRequests: 526, CreatedAt: "2026-07-02T08:30:00.000Z", LastLoginAt: "2026-07-03T21:14:00.000Z", Note: "普通用户"},
+		{ID: "usr_1003", Name: "测试账号", Email: "trial@example.com", Role: "user", Status: "limited", Balance: 2.4, RequestsToday: 5, TotalRequests: 80, CreatedAt: "2026-07-03T12:20:00.000Z", LastLoginAt: "2026-07-03T23:48:00.000Z", Note: "额度偏低"},
+	}
+	server.state.APIKeys = []APIKey{
+		{ID: "key_1001", UserID: "usr_1001", Name: "Dashboard Key", Prefix: "cat_admin", Hash: hashSecret("cat_admin_test"), Status: "active", CreatedAt: "2026-07-01T10:30:00.000Z", LastUsedAt: "2026-07-04T01:20:00.000Z", RequestCount: 910},
+		{ID: "key_1002", UserID: "usr_1002", Name: "App Key", Prefix: "cat_live", Hash: hashSecret("cat_live_test"), Status: "active", CreatedAt: "2026-07-02T09:12:00.000Z", LastUsedAt: "2026-07-03T21:28:00.000Z", RequestCount: 526},
+	}
+	server.state.Channels = []Channel{
+		{ID: "chn_1001", Name: "OpenAI Compatible", Provider: "openai", BaseURL: "https://api.openai.example/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-5.6", "gpt-5.5"}},
+		{ID: "chn_1002", Name: "Backup Provider", Provider: "compatible", BaseURL: "https://gateway.example/v1", Status: "standby", Priority: 2, Weight: 20, Models: []string{"claude-fable-5", "gemini-3.1", "deepseek-v4"}},
+	}
+	server.state.Logs = []RequestLog{
+		{ID: "req_9001", UserID: stringPtr("usr_1002"), APIKeyPrefix: stringPtr("cat_live"), Model: stringPtr("gpt-5.6"), Channel: stringPtr("OpenAI Compatible"), Status: "success", Cost: 0.04, LatencyMS: 820, CreatedAt: "2026-07-04T01:22:00.000Z"},
+		{ID: "req_9002", UserID: stringPtr("usr_1003"), APIKeyPrefix: stringPtr("cat_trial"), Model: stringPtr("deepseek-v4"), Channel: stringPtr("Backup Provider"), Status: "failed", Cost: 0, LatencyMS: 1200, ErrorCode: "upstream_timeout", CreatedAt: "2026-07-04T01:25:00.000Z"},
+	}
 }
 
 func withEnv(t *testing.T, values map[string]string) {
@@ -205,7 +233,8 @@ func TestFirstRunSetupLoginRegistrationAndRoleIsolation(t *testing.T) {
 
 func TestCreatedAPIKeyUsesSecretWithoutLeakingHash(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
-	router := testRouter(t)
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
 
 	created := perform(router, http.MethodPost, "/api/users/usr_1002/api-keys", `{"name":"Runtime Key"}`, nil)
 	if created.Code != http.StatusCreated {
@@ -243,7 +272,8 @@ func TestCreatedAPIKeyUsesSecretWithoutLeakingHash(t *testing.T) {
 
 func TestInvalidManagementStatusIsRejected(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
-	router := testRouter(t)
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
 
 	response := perform(router, http.MethodPatch, "/api/channels/chn_1001", `{"status":"weird"}`, nil)
 	if response.Code != http.StatusBadRequest {
@@ -281,7 +311,8 @@ func TestOpenAICompatibleProviderForwardsRequest(t *testing.T) {
 		"PROVIDER_MODE":    "compatible",
 		"UPSTREAM_API_KEY": "global-secret",
 	})
-	router := testRouter(t)
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
 
 	patchBody := `{"baseUrl":"` + upstream.URL + `/v1","upstreamApiKey":"channel-secret"}`
 	patched := perform(router, http.MethodPatch, "/api/channels/chn_1002", patchBody, nil)
@@ -345,7 +376,8 @@ func TestOpenAICompatibleProviderStreamsUpstreamResponse(t *testing.T) {
 		"PROVIDER_MODE":    "compatible",
 		"UPSTREAM_API_KEY": "upstream-secret",
 	})
-	router := testRouter(t)
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
 
 	patchBody := `{"baseUrl":"` + upstream.URL + `/v1"}`
 	patched := perform(router, http.MethodPatch, "/api/channels/chn_1002", patchBody, nil)
@@ -383,7 +415,8 @@ func TestChannelUpstreamKeyIsEncryptedAtRestAndUsable(t *testing.T) {
 		"PROVIDER_MODE": "compatible",
 		"SECRET_KEY":    "local-test-secret",
 	})
-	router := testRouter(t)
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
 
 	plainKey := "channel-encrypted-secret"
 	patchBody := `{"baseUrl":"` + upstream.URL + `/v1","upstreamApiKey":"` + plainKey + `"}`
@@ -630,7 +663,8 @@ func TestStaticSPAFallbackDoesNotCaptureAPIRoutes(t *testing.T) {
 
 func TestOpenAICompatibleRoutesWorkWithoutV1Prefix(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
-	router := testRouter(t)
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
 
 	models := perform(router, http.MethodGet, "/models", "", map[string]string{"Authorization": "Bearer cat_live_test"})
 	if models.Code != http.StatusOK {

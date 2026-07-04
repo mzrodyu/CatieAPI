@@ -50,6 +50,6 @@ DATABASE_URL=postgres://catieapi:catieapi@localhost:5432/catieapi?sslmode=disabl
 
 ## 迁移策略
 
-第一次使用空数据库时，CatieAPI 会写入默认种子数据。
+第一次使用空数据库时，CatieAPI 会写入空状态和默认模型目录。首次打开站点后，在初始化页面创建管理员账号。
 
-从文件模式切换到 Postgres 时，可以先用默认种子数据启动；如果需要迁移现有 `data/state.json`，后续可增加导入命令。
+从文件模式切换到 Postgres 时，可以先用空状态启动；如果需要迁移现有 `data/state.json`，后续可增加导入命令。

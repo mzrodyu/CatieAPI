@@ -1212,7 +1212,7 @@ func (s *Server) overview(c *gin.Context) {
 		}
 	}
 
-	successRate := 100
+	successRate := 0
 	if len(s.state.Logs) > 0 {
 		successRate = int(float64(successLogs) / float64(len(s.state.Logs)) * 100)
 	}
@@ -2442,9 +2442,6 @@ func (s *Server) loadState() {
 		s.state.Settings = stored.Settings
 	}
 	changed := false
-	if s.migrateSeedKeys() {
-		changed = true
-	}
 	if s.migrateModelPricing() {
 		changed = true
 	}
@@ -2475,28 +2472,6 @@ func (s *Server) applyPersistedDiscordSettings() {
 	if !settings.Enabled {
 		s.discordClientID = ""
 	}
-}
-
-func (s *Server) migrateSeedKeys() bool {
-	changed := false
-	for i := range s.state.APIKeys {
-		key := &s.state.APIKeys[i]
-		switch key.ID {
-		case "key_1001":
-			if key.Prefix == "cat_sk_admin" || key.Hash == hashSecret("cat_sk_admin_test") {
-				key.Prefix = "cat_admin"
-				key.Hash = hashSecret("cat_admin_test")
-				changed = true
-			}
-		case "key_1002":
-			if key.Prefix == "cat_sk_live" || key.Hash == hashSecret("cat_sk_live_test") {
-				key.Prefix = "cat_live"
-				key.Hash = hashSecret("cat_live_test")
-				changed = true
-			}
-		}
-	}
-	return changed
 }
 
 func (s *Server) migrateModelPricing() bool {
@@ -2615,9 +2590,6 @@ func (s *Server) loadPostgresState() {
 		s.state.Settings = stored.Settings
 	}
 	changed := false
-	if s.migrateSeedKeys() {
-		changed = true
-	}
 	if s.migrateModelPricing() {
 		changed = true
 	}
@@ -2646,19 +2618,9 @@ ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()
 
 func defaultState() AppState {
 	return AppState{
-		Users: []User{
-			{ID: "usr_1001", Name: "林可", Email: "lin@example.com", Role: "admin", Status: "active", Balance: 128.5, RequestsToday: 42, TotalRequests: 1380, CreatedAt: "2026-07-01T10:00:00.000Z", LastLoginAt: "2026-07-04T01:10:00.000Z", Note: "内部测试管理员"},
-			{ID: "usr_1002", Name: "Mika", Email: "mika@example.com", Role: "user", Status: "active", Balance: 36.2, RequestsToday: 18, TotalRequests: 526, CreatedAt: "2026-07-02T08:30:00.000Z", LastLoginAt: "2026-07-03T21:14:00.000Z", Note: "普通用户"},
-			{ID: "usr_1003", Name: "测试账号", Email: "trial@example.com", Role: "user", Status: "limited", Balance: 2.4, RequestsToday: 5, TotalRequests: 80, CreatedAt: "2026-07-03T12:20:00.000Z", LastLoginAt: "2026-07-03T23:48:00.000Z", Note: "额度偏低"},
-		},
-		APIKeys: []APIKey{
-			{ID: "key_1001", UserID: "usr_1001", Name: "Dashboard Key", Prefix: "cat_admin", Hash: hashSecret("cat_admin_test"), Status: "active", CreatedAt: "2026-07-01T10:30:00.000Z", LastUsedAt: "2026-07-04T01:20:00.000Z", RequestCount: 910},
-			{ID: "key_1002", UserID: "usr_1002", Name: "App Key", Prefix: "cat_live", Hash: hashSecret("cat_live_test"), Status: "active", CreatedAt: "2026-07-02T09:12:00.000Z", LastUsedAt: "2026-07-03T21:28:00.000Z", RequestCount: 526},
-		},
-		Channels: []Channel{
-			{ID: "chn_1001", Name: "OpenAI Compatible", Provider: "openai", BaseURL: "https://api.openai.example/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-5.6", "gpt-5.5"}},
-			{ID: "chn_1002", Name: "Backup Provider", Provider: "compatible", BaseURL: "https://gateway.example/v1", Status: "standby", Priority: 2, Weight: 20, Models: []string{"claude-fable-5", "gemini-3.1", "deepseek-v4"}},
-		},
+		Users:    []User{},
+		APIKeys:  []APIKey{},
+		Channels: []Channel{},
 		Models: []Model{
 			{ID: "gpt-5.6", Name: "GPT-5.6", Vendor: "OpenAI", Aliases: []string{"安全区", "gpt"}, Category: "通用", Description: "主力通用模型，适合复杂对话、工具调用和综合任务。", Price: "高", InputPricePer1K: 0.03, OutputPricePer1K: 0.06, Context: "长上下文", Status: "available", Recommended: true},
 			{ID: "gpt-5.5", Name: "GPT-5.5", Vendor: "OpenAI", Aliases: []string{"安全区", "gpt"}, Category: "通用", Description: "均衡通用模型，适合日常调用和产品默认模型。", Price: "中", InputPricePer1K: 0.01, OutputPricePer1K: 0.02, Context: "长上下文", Status: "available", Recommended: false},
@@ -2667,10 +2629,8 @@ func defaultState() AppState {
 			{ID: "deepseek-v4", Name: "DeepSeek V4", Vendor: "DeepSeek", Aliases: []string{"ds", "deepseek", "鲸鱼"}, Category: "推理", Description: "适合代码、推理和高性价比文本任务。", Price: "低", InputPricePer1K: 0.002, OutputPricePer1K: 0.004, Context: "长上下文", Status: "available", Recommended: true},
 		},
 		QuotaLedger: []QuotaEntry{},
-		Logs: []RequestLog{
-			{ID: "req_9001", UserID: stringPtr("usr_1002"), APIKeyPrefix: stringPtr("cat_live"), Model: stringPtr("gpt-5.6"), Channel: stringPtr("OpenAI Compatible"), Status: "success", Cost: 0.04, LatencyMS: 820, CreatedAt: "2026-07-04T01:22:00.000Z"},
-			{ID: "req_9002", UserID: stringPtr("usr_1003"), APIKeyPrefix: stringPtr("cat_trial"), Model: stringPtr("deepseek-v4"), Channel: stringPtr("Backup Provider"), Status: "failed", Cost: 0, LatencyMS: 1200, ErrorCode: "upstream_timeout", CreatedAt: "2026-07-04T01:25:00.000Z"},
-		},
+		Logs:        []RequestLog{},
+		Accounts:    []Account{},
 	}
 }
 
