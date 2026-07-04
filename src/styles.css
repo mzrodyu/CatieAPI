@@ -937,7 +937,12 @@ h3 {
 }
 
 .provider-icon-google svg text { fill: #4285f4; }
-.provider-icon-deepseek { color: #4d6bfe; }
+.provider-icon-deepseek,
+.provider-icon-deepseek svg,
+.provider-icon-deepseek svg path {
+  color: #4d6bfe;
+  fill: #4d6bfe;
+}
 .provider-icon-openrouter svg text { fill: #ef4444; }
 .provider-icon-groq svg text { fill: #f55036; }
 .provider-icon-moonshot svg text { fill: #16a34a; }
@@ -1300,6 +1305,12 @@ button.table-row:hover {
 
 .channel-form-wide {
   grid-column: span 2;
+}
+
+.channel-billing-note {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .channel-form-grid input,

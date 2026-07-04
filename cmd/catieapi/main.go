@@ -127,31 +127,37 @@ type PublicAPIKey struct {
 }
 
 type Channel struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Provider       string   `json:"provider"`
-	BaseURL        string   `json:"baseUrl"`
-	UpstreamAPIKey string   `json:"upstreamApiKey,omitempty"`
-	Status         string   `json:"status"`
-	Priority       int      `json:"priority"`
-	Weight         int      `json:"weight"`
-	Models         []string `json:"models"`
-	LastCheckedAt  string   `json:"lastCheckedAt,omitempty"`
-	LastError      string   `json:"lastError,omitempty"`
+	ID                string   `json:"id"`
+	Name              string   `json:"name"`
+	Provider          string   `json:"provider"`
+	BaseURL           string   `json:"baseUrl"`
+	UpstreamAPIKey    string   `json:"upstreamApiKey,omitempty"`
+	Status            string   `json:"status"`
+	Priority          int      `json:"priority"`
+	Weight            int      `json:"weight"`
+	Models            []string `json:"models"`
+	InputPricePer1K   float64  `json:"inputPricePer1K"`
+	OutputPricePer1K  float64  `json:"outputPricePer1K"`
+	PricingConfigured bool     `json:"pricingConfigured"`
+	LastCheckedAt     string   `json:"lastCheckedAt,omitempty"`
+	LastError         string   `json:"lastError,omitempty"`
 }
 
 type PublicChannel struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Provider       string   `json:"provider"`
-	BaseURL        string   `json:"baseUrl"`
-	UpstreamKeySet bool     `json:"upstreamKeySet"`
-	Status         string   `json:"status"`
-	Priority       int      `json:"priority"`
-	Weight         int      `json:"weight"`
-	Models         []string `json:"models"`
-	LastCheckedAt  string   `json:"lastCheckedAt"`
-	LastError      string   `json:"lastError"`
+	ID                string   `json:"id"`
+	Name              string   `json:"name"`
+	Provider          string   `json:"provider"`
+	BaseURL           string   `json:"baseUrl"`
+	UpstreamKeySet    bool     `json:"upstreamKeySet"`
+	Status            string   `json:"status"`
+	Priority          int      `json:"priority"`
+	Weight            int      `json:"weight"`
+	Models            []string `json:"models"`
+	InputPricePer1K   float64  `json:"inputPricePer1K"`
+	OutputPricePer1K  float64  `json:"outputPricePer1K"`
+	PricingConfigured bool     `json:"pricingConfigured"`
+	LastCheckedAt     string   `json:"lastCheckedAt"`
+	LastError         string   `json:"lastError"`
 }
 
 type Model struct {
@@ -1766,13 +1772,15 @@ func (s *Server) listChannels(c *gin.Context) {
 
 func (s *Server) createChannel(c *gin.Context) {
 	var body struct {
-		Name           string   `json:"name"`
-		Provider       string   `json:"provider"`
-		BaseURL        string   `json:"baseUrl"`
-		UpstreamAPIKey string   `json:"upstreamApiKey"`
-		Priority       int      `json:"priority"`
-		Weight         int      `json:"weight"`
-		Models         []string `json:"models"`
+		Name             string   `json:"name"`
+		Provider         string   `json:"provider"`
+		BaseURL          string   `json:"baseUrl"`
+		UpstreamAPIKey   string   `json:"upstreamApiKey"`
+		Priority         int      `json:"priority"`
+		Weight           int      `json:"weight"`
+		Models           []string `json:"models"`
+		InputPricePer1K  float64  `json:"inputPricePer1K"`
+		OutputPricePer1K float64  `json:"outputPricePer1K"`
 	}
 	_ = c.ShouldBindJSON(&body)
 	body.Name = strings.TrimSpace(body.Name)
@@ -1794,6 +1802,10 @@ func (s *Server) createChannel(c *gin.Context) {
 	if body.Weight <= 0 {
 		body.Weight = 10
 	}
+	if body.InputPricePer1K < 0 || body.OutputPricePer1K < 0 {
+		validationError(c, "Channel price must be greater than or equal to 0")
+		return
+	}
 	protectedKey := ""
 	if strings.TrimSpace(body.UpstreamAPIKey) != "" {
 		var err error
@@ -1805,15 +1817,18 @@ func (s *Server) createChannel(c *gin.Context) {
 	}
 
 	channel := Channel{
-		ID:             newID("chn"),
-		Name:           body.Name,
-		Provider:       body.Provider,
-		BaseURL:        strings.TrimRight(body.BaseURL, "/"),
-		UpstreamAPIKey: protectedKey,
-		Status:         "disabled",
-		Priority:       body.Priority,
-		Weight:         body.Weight,
-		Models:         append([]string{}, body.Models...),
+		ID:                newID("chn"),
+		Name:              body.Name,
+		Provider:          body.Provider,
+		BaseURL:           strings.TrimRight(body.BaseURL, "/"),
+		UpstreamAPIKey:    protectedKey,
+		Status:            "disabled",
+		Priority:          body.Priority,
+		Weight:            body.Weight,
+		Models:            append([]string{}, body.Models...),
+		InputPricePer1K:   round4(body.InputPricePer1K),
+		OutputPricePer1K:  round4(body.OutputPricePer1K),
+		PricingConfigured: body.InputPricePer1K > 0 || body.OutputPricePer1K > 0,
 	}
 
 	s.mu.Lock()
@@ -1884,6 +1899,26 @@ func (s *Server) updateChannel(c *gin.Context) {
 	}
 	if value, ok := patch["models"].([]interface{}); ok {
 		channel.Models = stringSlice(value)
+	}
+	pricingChanged := false
+	if value, ok := asFloat(patch["inputPricePer1K"]); ok {
+		if value < 0 {
+			validationError(c, "Input price must be greater than or equal to 0")
+			return
+		}
+		channel.InputPricePer1K = round4(value)
+		pricingChanged = true
+	}
+	if value, ok := asFloat(patch["outputPricePer1K"]); ok {
+		if value < 0 {
+			validationError(c, "Output price must be greater than or equal to 0")
+			return
+		}
+		channel.OutputPricePer1K = round4(value)
+		pricingChanged = true
+	}
+	if pricingChanged {
+		channel.PricingConfigured = channel.InputPricePer1K > 0 || channel.OutputPricePer1K > 0
 	}
 	if channel.Status != "disabled" && strings.TrimSpace(channel.BaseURL) == "" {
 		validationError(c, "Base URL is required before enabling a channel")
@@ -2357,15 +2392,15 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 		s.mu.Unlock()
 		return
 	}
-	if model.PricingConfigured && auth.User.Balance <= 0 {
-		s.openAIErrorForCallLocked(c, http.StatusPaymentRequired, "insufficient_quota", "Insufficient quota", "billing_error", nil, auth.User.ID, auth.Key.Prefix, model.ID, "")
-		s.mu.Unlock()
-		return
-	}
-
 	channel := s.primaryChannelLocked(model.ID)
 	if channel == nil {
 		s.openAIErrorForCallLocked(c, http.StatusBadRequest, "model_not_available", "No available channel for model: "+model.ID, "invalid_request_error", stringPtr("model"), auth.User.ID, auth.Key.Prefix, model.ID, "")
+		s.mu.Unlock()
+		return
+	}
+	billingModel := modelWithChannelPricing(*model, *channel)
+	if billingModel.PricingConfigured && auth.User.Balance <= 0 {
+		s.openAIErrorForCallLocked(c, http.StatusPaymentRequired, "insufficient_quota", "Insufficient quota", "billing_error", nil, auth.User.ID, auth.Key.Prefix, model.ID, channel.Name)
 		s.mu.Unlock()
 		return
 	}
@@ -2386,7 +2421,7 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 			writeOpenAIError(c, providerErr.Status, providerErr.Code, providerErr.Message, providerErr.Type, stringPtr("model"))
 			return
 		}
-		streamCost := calculateCallCost(modelCopy, nil, body.Messages, true)
+		streamCost := calculateCallCost(billingModel, nil, body.Messages, true)
 		s.recordSuccessfulCall(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, channelCopy.Name, requestID, streamCost, startedAt)
 		return
 	}
@@ -2398,7 +2433,7 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 		return
 	}
 
-	cost := calculateCallCost(modelCopy, responseBody, body.Messages, false)
+	cost := calculateCallCost(billingModel, responseBody, body.Messages, false)
 	outputBody := interface{}(responseBody)
 	if transform != nil {
 		outputBody = transform(responseBody, modelCopy)
@@ -4054,6 +4089,16 @@ func modelRates(model Model) (float64, float64) {
 	return model.InputPricePer1K, model.OutputPricePer1K
 }
 
+func modelWithChannelPricing(model Model, channel Channel) Model {
+	if !channel.PricingConfigured {
+		return model
+	}
+	model.InputPricePer1K = channel.InputPricePer1K
+	model.OutputPricePer1K = channel.OutputPricePer1K
+	model.PricingConfigured = true
+	return model
+}
+
 func completionPrompt(value interface{}) string {
 	switch prompt := value.(type) {
 	case string:
@@ -4265,17 +4310,20 @@ func publicAPIKey(key APIKey) PublicAPIKey {
 
 func publicChannel(channel Channel) PublicChannel {
 	return PublicChannel{
-		ID:             channel.ID,
-		Name:           channel.Name,
-		Provider:       channel.Provider,
-		BaseURL:        channel.BaseURL,
-		UpstreamKeySet: strings.TrimSpace(channel.UpstreamAPIKey) != "",
-		Status:         channel.Status,
-		Priority:       channel.Priority,
-		Weight:         channel.Weight,
-		Models:         append([]string{}, channel.Models...),
-		LastCheckedAt:  channel.LastCheckedAt,
-		LastError:      channel.LastError,
+		ID:                channel.ID,
+		Name:              channel.Name,
+		Provider:          channel.Provider,
+		BaseURL:           channel.BaseURL,
+		UpstreamKeySet:    strings.TrimSpace(channel.UpstreamAPIKey) != "",
+		Status:            channel.Status,
+		Priority:          channel.Priority,
+		Weight:            channel.Weight,
+		Models:            append([]string{}, channel.Models...),
+		InputPricePer1K:   channel.InputPricePer1K,
+		OutputPricePer1K:  channel.OutputPricePer1K,
+		PricingConfigured: channel.PricingConfigured,
+		LastCheckedAt:     channel.LastCheckedAt,
+		LastError:         channel.LastError,
 	}
 }
 

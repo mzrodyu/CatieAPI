@@ -883,7 +883,7 @@ func TestOpenAICompatibleProviderForwardsRequest(t *testing.T) {
 	server, router := testServerRouter(t)
 	seedGatewayFixtures(server)
 
-	patchBody := `{"baseUrl":"` + upstream.URL + `/v1","upstreamApiKey":"channel-secret"}`
+	patchBody := `{"baseUrl":"` + upstream.URL + `/v1","upstreamApiKey":"channel-secret","inputPricePer1K":1000,"outputPricePer1K":2000}`
 	patched := perform(router, http.MethodPatch, "/api/channels/chn_1002", patchBody, nil)
 	if patched.Code != http.StatusOK {
 		t.Fatalf("patch channel status = %d body = %s", patched.Code, patched.Body.String())
@@ -893,6 +893,9 @@ func TestOpenAICompatibleProviderForwardsRequest(t *testing.T) {
 	}
 	if !bytes.Contains(patched.Body.Bytes(), []byte(`"upstreamKeySet":true`)) {
 		t.Fatalf("patch response did not expose upstreamKeySet: %s", patched.Body.String())
+	}
+	if !bytes.Contains(patched.Body.Bytes(), []byte(`"pricingConfigured":true`)) {
+		t.Fatalf("patch response did not expose channel pricing: %s", patched.Body.String())
 	}
 
 	chatBody := `{"model":"ds","temperature":0.25,"tools":[{"type":"function","function":{"name":"lookup"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`
@@ -924,8 +927,8 @@ func TestOpenAICompatibleProviderForwardsRequest(t *testing.T) {
 	if ledger.Code != http.StatusOK {
 		t.Fatalf("quota ledger status = %d body = %s", ledger.Code, ledger.Body.String())
 	}
-	if !bytes.Contains(ledger.Body.Bytes(), []byte(`"amount":-0.0001`)) {
-		t.Fatalf("usage-based minimum cost was not recorded: %s", ledger.Body.String())
+	if !bytes.Contains(ledger.Body.Bytes(), []byte(`"amount":-3`)) {
+		t.Fatalf("channel usage price was not recorded: %s", ledger.Body.String())
 	}
 }
 

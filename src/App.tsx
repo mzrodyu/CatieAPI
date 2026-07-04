@@ -43,6 +43,9 @@ type Channel = {
   priority: number;
   weight: number;
   models: string[];
+  inputPricePer1K: number;
+  outputPricePer1K: number;
+  pricingConfigured: boolean;
   lastCheckedAt: string;
   lastError: string;
 };
@@ -1691,17 +1694,31 @@ function ModelsView({ models, onCopy, onCreate }: { models: ModelItem[]; onCopy:
         .includes(keyword)
     );
   }, [models, query]);
-  const totalPages = Math.max(1, Math.ceil(filteredModels.length / pageSize));
-  const safePage = Math.min(page, totalPages);
-  const visibleModels = filteredModels.slice((safePage - 1) * pageSize, safePage * pageSize);
-  const groupedModels = useMemo(() => {
+  const modelPages = useMemo(() => {
     const groups = new Map<string, ModelItem[]>();
-    visibleModels.forEach((model) => {
+    filteredModels.forEach((model) => {
       const provider = modelProvider(model);
       groups.set(provider, [...(groups.get(provider) || []), model]);
     });
-    return [...groups.entries()];
-  }, [visibleModels]);
+
+    const pages: Array<Array<[string, ModelItem[]]>> = [];
+    let currentPage: Array<[string, ModelItem[]]> = [];
+    let currentCount = 0;
+    for (const group of groups.entries()) {
+      if (currentPage.length > 0 && currentCount + group[1].length > pageSize) {
+        pages.push(currentPage);
+        currentPage = [];
+        currentCount = 0;
+      }
+      currentPage.push(group);
+      currentCount += group[1].length;
+    }
+    if (currentPage.length > 0) pages.push(currentPage);
+    return pages;
+  }, [filteredModels]);
+  const totalPages = Math.max(1, modelPages.length);
+  const safePage = Math.min(page, totalPages);
+  const groupedModels = modelPages[safePage - 1] || [];
 
   useEffect(() => {
     setPage(1);
@@ -1900,6 +1917,8 @@ function ChannelEditor({
   const [provider, setProvider] = useState(channel.provider);
   const [baseUrl, setBaseUrl] = useState(channel.baseUrl);
   const [models, setModels] = useState(arrayOf(channel.models).join(", "));
+  const [inputPrice, setInputPrice] = useState(String(channel.inputPricePer1K || 0));
+  const [outputPrice, setOutputPrice] = useState(String(channel.outputPricePer1K || 0));
   const [upstreamApiKey, setUpstreamApiKey] = useState("");
   const [busy, setBusy] = useState("");
 
@@ -1908,14 +1927,18 @@ function ChannelEditor({
     setProvider(channel.provider);
     setBaseUrl(channel.baseUrl);
     setModels(arrayOf(channel.models).join(", "));
+    setInputPrice(String(channel.inputPricePer1K || 0));
+    setOutputPrice(String(channel.outputPricePer1K || 0));
     setUpstreamApiKey("");
-  }, [channel.id, channel.name, channel.provider, channel.baseUrl, channel.models]);
+  }, [channel.id, channel.name, channel.provider, channel.baseUrl, channel.models, channel.inputPricePer1K, channel.outputPricePer1K]);
 
   async function save() {
     const patch: ChannelPatch = {
       name: name.trim() || channel.name,
       provider,
       baseUrl,
+      inputPricePer1K: Number(inputPrice) || 0,
+      outputPricePer1K: Number(outputPrice) || 0,
       models: models
         .split(",")
         .map((model) => model.trim())
@@ -1999,6 +2022,15 @@ function ChannelEditor({
           <span>上游 Key</span>
           <input type="password" value={upstreamApiKey} onChange={(event) => setUpstreamApiKey(event.target.value)} placeholder="留空表示不修改" autoComplete="new-password" />
         </label>
+        <label>
+          <span>输入单价 / 1K Token</span>
+          <input type="number" min="0" step="0.0001" value={inputPrice} onChange={(event) => setInputPrice(event.target.value)} />
+        </label>
+        <label>
+          <span>输出单价 / 1K Token</span>
+          <input type="number" min="0" step="0.0001" value={outputPrice} onChange={(event) => setOutputPrice(event.target.value)} />
+        </label>
+        <span className="channel-billing-note">渠道价格优先；均为 0 时使用模型价格，模型也未定价则不扣费。</span>
       </div>
 
       <div className="channel-card-actions">
