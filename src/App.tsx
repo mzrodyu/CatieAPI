@@ -60,6 +60,12 @@ type ModelCreate = {
   context: string;
 };
 
+type ChannelSyncResult = {
+  channel: Channel;
+  models: string[];
+  addedModels: ModelItem[];
+};
+
 type ModelItem = {
   id: string;
   name: string;
@@ -392,6 +398,22 @@ function App() {
     window.setTimeout(() => setToast(""), 1800);
   }
 
+  async function syncChannelModels(id: string) {
+    const data = await fetchJson<ChannelSyncResult>(`/api/channels/${id}/sync-models`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    setChannels((current) => current.map((channel) => (channel.id === id ? data.channel : channel)));
+    if (data.addedModels.length > 0) {
+      setModels((current) => {
+        const seen = new Set(current.map((model) => model.id.toLowerCase()));
+        return [...current, ...data.addedModels.filter((model) => !seen.has(model.id.toLowerCase()))];
+      });
+    }
+    setToast(data.models.length ? `已拉取 ${data.models.length} 个模型` : "上游没有返回模型");
+    window.setTimeout(() => setToast(""), 2200);
+  }
+
   async function createChannel() {
     const data = await fetchJson<{ channel: Channel }>("/api/channels", {
       method: "POST",
@@ -591,7 +613,7 @@ function App() {
         )}
         {active === "keys" && <KeysView selectedUser={selectedUser} onCopy={copyAndToast} onCreateKey={createAPIKeyForUser} />}
         {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} />}
-        {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} />}
+        {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onSyncModels={syncChannelModels} />}
         {active === "logs" && <LogsView logs={logs} />}
         {active === "settings" && <SettingsView models={models} channels={channels} />}
       </main>
@@ -1112,9 +1134,19 @@ function UsersView({
   onCreateKey: (id: string) => void;
   onOpenRegistration: () => void;
 }) {
+  const pageSize = 25;
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(users.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pagedUsers = users.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+  useEffect(() => {
+    setPage(1);
+  }, [query]);
+
   return (
     <section className="users-layout">
-      <Panel title="用户列表">
+      <Panel title="用户管理">
         <div className="panel-toolbar">
           <div className="search-box">
             <Icon name="search" />
@@ -1124,6 +1156,12 @@ function UsersView({
             <Icon name="plus" />
           </button>
         </div>
+        <div className="user-summary-strip">
+          <span><strong>{users.length}</strong> 匹配用户</span>
+          <span><strong>{users.filter((user) => user.status === "active").length}</strong> 正常</span>
+          <span><strong>{users.filter((user) => user.status === "disabled").length}</strong> 禁用</span>
+          <span><strong>{users.reduce((sum, user) => sum + user.requestsToday, 0)}</strong> 今日请求</span>
+        </div>
         <div className="table">
           <div className="table-head users-table">
             <span>用户</span>
@@ -1131,11 +1169,11 @@ function UsersView({
             <span>余额</span>
             <span>今日</span>
           </div>
-          {users.map((user) => (
-            <button className="table-row users-table" key={user.id} onClick={() => onSelect(user.id)}>
+          {pagedUsers.map((user) => (
+            <button className={selectedUser?.user.id === user.id ? "table-row users-table selected" : "table-row users-table"} key={user.id} onClick={() => onSelect(user.id)}>
               <span>
                 <strong>{user.name}</strong>
-                <small>{user.email}</small>
+                <small>{user.id} · {user.email || "未绑定邮箱"}</small>
               </span>
               <Badge tone={user.status}>{statusLabel(user.status)}</Badge>
               <span>{user.balance.toFixed(2)}</span>
@@ -1144,6 +1182,13 @@ function UsersView({
           ))}
           {users.length === 0 && <Empty text="暂无用户" />}
         </div>
+        {users.length > pageSize && (
+          <div className="pagination-bar">
+            <button className="secondary-button" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button>
+            <span>{safePage} / {totalPages}</span>
+            <button className="secondary-button" disabled={safePage >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>下一页</button>
+          </div>
+        )}
       </Panel>
 
       <Panel title="用户详情">
@@ -1363,11 +1408,13 @@ function ModelCard({ model, featured = false, onCopy }: { model: ModelItem; feat
 function ChannelsView({
   channels,
   onUpdate,
-  onCreate
+  onCreate,
+  onSyncModels
 }: {
   channels: Channel[];
-  onUpdate: (id: string, patch: ChannelPatch) => void;
+  onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
   onCreate: () => void;
+  onSyncModels: (id: string) => Promise<void>;
 }) {
   return (
     <Panel title="渠道管理">
@@ -1377,16 +1424,9 @@ function ChannelsView({
           新增渠道
         </button>
       </div>
-      <div className="table">
-        <div className="table-head channels-table">
-          <span>渠道</span>
-          <span>供应商</span>
-          <span>优先级</span>
-          <span>权重</span>
-          <span>运行状态</span>
-        </div>
+      <div className="channels-stack">
         {channels.map((channel) => (
-          <ChannelEditor key={channel.id} channel={channel} onUpdate={onUpdate} />
+          <ChannelEditor key={channel.id} channel={channel} onUpdate={onUpdate} onSyncModels={onSyncModels} />
         ))}
         {channels.length === 0 && <Empty text="暂无渠道，先在后端添加渠道接口或导入配置" />}
       </div>
@@ -1394,23 +1434,29 @@ function ChannelsView({
   );
 }
 
-function ChannelEditor({ channel, onUpdate }: { channel: Channel; onUpdate: (id: string, patch: ChannelPatch) => void }) {
+function ChannelEditor({
+  channel,
+  onUpdate,
+  onSyncModels
+}: {
+  channel: Channel;
+  onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
+  onSyncModels: (id: string) => Promise<void>;
+}) {
   const [provider, setProvider] = useState(channel.provider);
   const [baseUrl, setBaseUrl] = useState(channel.baseUrl);
   const [models, setModels] = useState(channel.models.join(", "));
   const [upstreamApiKey, setUpstreamApiKey] = useState("");
-  const [providerOpen, setProviderOpen] = useState(false);
-  const selectedProvider = providerOptions.find((option) => option.value === provider) || providerOptions[0];
+  const [busy, setBusy] = useState("");
 
   useEffect(() => {
     setProvider(channel.provider);
     setBaseUrl(channel.baseUrl);
     setModels(channel.models.join(", "));
     setUpstreamApiKey("");
-    setProviderOpen(false);
   }, [channel.id, channel.provider, channel.baseUrl, channel.models]);
 
-  function save() {
+  async function save() {
     const patch: ChannelPatch = {
       provider,
       baseUrl,
@@ -1422,65 +1468,73 @@ function ChannelEditor({ channel, onUpdate }: { channel: Channel; onUpdate: (id:
     if (upstreamApiKey.trim()) {
       patch.upstreamApiKey = upstreamApiKey.trim();
     }
-    onUpdate(channel.id, patch);
+    setBusy("save");
+    try {
+      await onUpdate(channel.id, patch);
+      setUpstreamApiKey("");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function syncModels() {
+    setBusy("sync");
+    try {
+      await save();
+      await onSyncModels(channel.id);
+    } finally {
+      setBusy("");
+    }
   }
 
   return (
-    <div className="table-row channels-table channel-editor">
-      <span>
-        <strong>{channel.name}</strong>
-        <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://provider.example/v1" />
-      </span>
-      <span>
-        <div className="provider-picker">
-          <button type="button" className="provider-picker-trigger" aria-haspopup="listbox" aria-expanded={providerOpen} onClick={() => setProviderOpen((open) => !open)}>
-            <span>{selectedProvider.label}</span>
-            <i aria-hidden="true" />
-          </button>
-          {providerOpen && (
-            <div className="provider-picker-menu" role="listbox" aria-label="选择供应商">
-              {providerOptions.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={provider === option.value ? "selected" : ""}
-                  role="option"
-                  aria-selected={provider === option.value}
-                  onClick={() => {
-                    setProvider(option.value);
-                    setProviderOpen(false);
-                  }}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          )}
+    <div className="channel-card">
+      <div className="channel-card-head">
+        <div>
+          <strong>{channel.name}</strong>
+          <span>{channel.baseUrl || "未配置上游地址"}</span>
         </div>
-      </span>
-      <span>{channel.priority}</span>
-      <span>
-        <input value={models} onChange={(event) => setModels(event.target.value)} placeholder="模型 ID，多个用逗号分隔" />
-      </span>
-      <span className="channel-actions">
-        <input
-          type="password"
-          value={upstreamApiKey}
-          onChange={(event) => setUpstreamApiKey(event.target.value)}
-          placeholder="上游 Key"
-          autoComplete="new-password"
-        />
-        <button className="secondary-button" onClick={save}>
-          保存
+        <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
+      </div>
+
+      <div className="provider-chip-grid" role="radiogroup" aria-label="供应商">
+        {providerOptions.map((option) => (
+          <button key={option.value} type="button" className={provider === option.value ? "selected" : ""} onClick={() => setProvider(option.value)}>
+            {option.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="channel-form-grid">
+        <label className="channel-form-wide">
+          <span>Base URL</span>
+          <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://provider.example/v1" />
+        </label>
+        <label>
+          <span>优先级</span>
+          <input value={channel.priority} readOnly />
+        </label>
+        <label className="channel-form-wide">
+          <span>模型</span>
+          <textarea value={models} onChange={(event) => setModels(event.target.value)} placeholder="先拉取上游模型，也可以手动补充，多个用逗号分隔" />
+        </label>
+        <label>
+          <span>上游 Key</span>
+          <input type="password" value={upstreamApiKey} onChange={(event) => setUpstreamApiKey(event.target.value)} placeholder="留空表示不修改" autoComplete="new-password" />
+        </label>
+      </div>
+
+      <div className="channel-card-actions">
+        <button className="secondary-button" onClick={syncModels} disabled={busy !== ""}>
+          {busy === "sync" ? "拉取中" : "拉取模型"}
         </button>
-        <button
-          className="status-button"
-          onClick={() => onUpdate(channel.id, { status: channel.status === "disabled" ? "healthy" : "disabled" })}
-          title={channel.status === "disabled" ? "启用渠道" : "停用渠道"}
-        >
-          <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
+        <button className="secondary-button" onClick={save} disabled={busy !== ""}>
+          {busy === "save" ? "保存中" : "保存"}
         </button>
-      </span>
+        <button className="status-button" onClick={() => onUpdate(channel.id, { status: channel.status === "disabled" ? "healthy" : "disabled" })}>
+          <Badge tone={channel.status}>{channel.status === "disabled" ? "启用" : "禁用"}</Badge>
+        </button>
+      </div>
     </div>
   );
 }

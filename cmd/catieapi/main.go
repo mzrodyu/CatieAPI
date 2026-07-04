@@ -378,6 +378,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.GET("/channels", s.listChannels)
 	admin.POST("/channels", s.createChannel)
 	admin.PATCH("/channels/:id", s.updateChannel)
+	admin.POST("/channels/:id/sync-models", s.syncChannelModels)
 	admin.GET("/models", s.listModels)
 	admin.POST("/models", s.createModel)
 	admin.PATCH("/models/:id", s.updateModel)
@@ -1616,6 +1617,66 @@ func (s *Server) updateChannel(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"channel": publicChannel(*channel)})
 }
 
+func (s *Server) syncChannelModels(c *gin.Context) {
+	s.mu.Lock()
+	channel := s.findChannel(c.Param("id"))
+	if channel == nil {
+		s.mu.Unlock()
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
+		return
+	}
+	channelCopy := *channel
+	upstreamKey, err := s.revealSecret(channelCopy.UpstreamAPIKey)
+	if err != nil {
+		s.mu.Unlock()
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": err.Error()}})
+		return
+	}
+	if strings.TrimSpace(upstreamKey) == "" {
+		upstreamKey = s.upstreamAPIKey
+	}
+	s.mu.Unlock()
+
+	modelIDs, err := s.fetchUpstreamModelIDs(channelCopy, upstreamKey)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": err.Error()}})
+		return
+	}
+	if len(modelIDs) == 0 {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "上游未返回可用模型"}})
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	channel = s.findChannel(channelCopy.ID)
+	if channel == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
+		return
+	}
+	channel.Models = mergeStrings(channel.Models, modelIDs)
+	added := []Model{}
+	for _, id := range modelIDs {
+		if s.findModel(id) != nil {
+			continue
+		}
+		model := Model{
+			ID:          id,
+			Name:        id,
+			Vendor:      providerLabel(channel.Provider),
+			Category:    "通用",
+			Description: "从上游模型列表拉取",
+			Price:       "自定义",
+			Context:     "未配置上下文",
+			Status:      "available",
+		}
+		s.state.Models = append(s.state.Models, model)
+		added = append(added, model)
+	}
+	s.saveStateLocked()
+	c.JSON(http.StatusOK, gin.H{"channel": publicChannel(*channel), "models": channel.Models, "addedModels": added})
+}
+
 func (s *Server) listModels(c *gin.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2035,6 +2096,57 @@ func (s *Server) callOpenAICompatible(call GatewayCall) (gin.H, *ProviderError) 
 		body["model"] = call.Model.ID
 	}
 	return body, nil
+}
+
+func (s *Server) fetchUpstreamModelIDs(channel Channel, upstreamKey string) ([]string, error) {
+	if strings.TrimSpace(channel.BaseURL) == "" {
+		return nil, fmt.Errorf("请先填写渠道 Base URL")
+	}
+	request, err := http.NewRequest(http.MethodGet, joinURL(channel.BaseURL, "models"), nil)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(upstreamKey) != "" {
+		request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(upstreamKey))
+	}
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	content, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		message := strings.TrimSpace(string(content))
+		if message == "" {
+			message = response.Status
+		}
+		return nil, fmt.Errorf("上游模型列表请求失败: %s", message)
+	}
+
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		Models []string `json:"models"`
+	}
+	if err := json.Unmarshal(content, &payload); err != nil {
+		return nil, fmt.Errorf("上游模型列表不是有效 JSON")
+	}
+	ids := []string{}
+	for _, item := range payload.Data {
+		if strings.TrimSpace(item.ID) != "" {
+			ids = append(ids, strings.TrimSpace(item.ID))
+		}
+	}
+	for _, id := range payload.Models {
+		if strings.TrimSpace(id) != "" {
+			ids = append(ids, strings.TrimSpace(id))
+		}
+	}
+	return mergeStrings(nil, ids), nil
 }
 
 func (s *Server) streamOpenAICompatible(c *gin.Context, call GatewayCall) *ProviderError {
@@ -2459,6 +2571,49 @@ func cleanAliases(values []string) []string {
 		aliases = append(aliases, alias)
 	}
 	return aliases
+}
+
+func mergeStrings(current []string, next []string) []string {
+	seen := map[string]bool{}
+	merged := []string{}
+	for _, values := range [][]string{current, next} {
+		for _, value := range values {
+			item := strings.TrimSpace(value)
+			if item == "" {
+				continue
+			}
+			key := strings.ToLower(item)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			merged = append(merged, item)
+		}
+	}
+	return merged
+}
+
+func providerLabel(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "openai":
+		return "OpenAI"
+	case "anthropic":
+		return "Anthropic"
+	case "google":
+		return "Google"
+	case "deepseek":
+		return "DeepSeek"
+	case "openrouter":
+		return "OpenRouter"
+	case "groq":
+		return "Groq"
+	case "siliconflow":
+		return "SiliconFlow"
+	case "moonshot":
+		return "Moonshot"
+	default:
+		return "Custom"
+	}
 }
 
 func normalizeRegistrationMode(value string) string {

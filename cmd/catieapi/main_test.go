@@ -434,6 +434,48 @@ func TestCreateChannelDefaultsToDisabled(t *testing.T) {
 	}
 }
 
+func TestSyncChannelModelsPullsFromUpstream(t *testing.T) {
+	var upstreamAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamAuth = r.Header.Get("Authorization")
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"provider-model-a"},{"id":"provider-model-b"}]}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	_, router := testServerRouter(t)
+
+	created := perform(router, http.MethodPost, "/api/channels", `{"name":"Upstream","baseUrl":"`+upstream.URL+`/v1","upstreamApiKey":"sync-secret"}`, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create channel status = %d body = %s", created.Code, created.Body.String())
+	}
+	var payload struct {
+		Channel PublicChannel `json:"channel"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode channel: %v", err)
+	}
+
+	synced := perform(router, http.MethodPost, "/api/channels/"+payload.Channel.ID+"/sync-models", `{}`, nil)
+	if synced.Code != http.StatusOK {
+		t.Fatalf("sync models status = %d body = %s", synced.Code, synced.Body.String())
+	}
+	if upstreamAuth != "Bearer sync-secret" {
+		t.Fatalf("upstream auth = %s", upstreamAuth)
+	}
+	if !bytes.Contains(synced.Body.Bytes(), []byte(`provider-model-a`)) || !bytes.Contains(synced.Body.Bytes(), []byte(`provider-model-b`)) {
+		t.Fatalf("sync models response missing upstream ids: %s", synced.Body.String())
+	}
+	models := perform(router, http.MethodGet, "/api/models", "", nil)
+	if !bytes.Contains(models.Body.Bytes(), []byte(`"id":"provider-model-a"`)) {
+		t.Fatalf("synced model was not created: %s", models.Body.String())
+	}
+}
+
 func TestOpenAICompatibleProviderForwardsRequest(t *testing.T) {
 	var upstreamModel string
 	var upstreamPath string
