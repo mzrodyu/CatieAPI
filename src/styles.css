@@ -255,6 +255,7 @@ h3 {
 
 .primary-button,
 .secondary-button,
+.danger-button,
 .icon-button,
 .theme-toggle {
   display: inline-flex;
@@ -281,6 +282,14 @@ h3 {
   font-weight: 650;
 }
 
+.danger-button {
+  padding: 0 16px;
+  color: #d70015;
+  background: color-mix(in srgb, var(--red) 12%, var(--surface-solid));
+  border: 1px solid color-mix(in srgb, var(--red) 28%, var(--hairline));
+  font-weight: 700;
+}
+
 .icon-button {
   width: 38px;
   color: var(--text);
@@ -298,6 +307,7 @@ h3 {
 
 .primary-button:disabled,
 .secondary-button:disabled,
+.danger-button:disabled,
 .icon-button:disabled,
 .theme-toggle:disabled {
   cursor: not-allowed;
@@ -650,7 +660,7 @@ h3 {
 
 .users-layout {
   display: grid;
-  grid-template-columns: minmax(720px, 1.25fr) minmax(380px, 0.55fr);
+  grid-template-columns: minmax(680px, 1.25fr) minmax(350px, 0.55fr);
   gap: 18px;
   align-items: start;
   max-width: 1320px;
@@ -713,6 +723,68 @@ h3 {
   display: block;
   color: var(--text);
   font-size: 20px;
+}
+
+.user-filter-row {
+  display: flex;
+  gap: 4px;
+  width: fit-content;
+  margin-bottom: 12px;
+  padding: 3px;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+}
+
+.user-filter-row button {
+  min-height: 30px;
+  padding: 0 13px;
+  color: var(--muted);
+  background: transparent;
+  border-radius: 999px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.user-filter-row button.selected {
+  color: var(--text);
+  background: var(--surface-solid);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+
+.mobile-bulk-select {
+  display: none;
+  margin-bottom: 12px;
+}
+
+.bulk-action-bar {
+  display: grid;
+  grid-template-columns: auto 100px minmax(160px, 1fr) auto auto auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--blue) 8%, var(--surface-solid));
+  border: 1px solid color-mix(in srgb, var(--blue) 25%, var(--hairline));
+  border-radius: 12px;
+}
+
+.bulk-action-bar input,
+.auth-default-balance input {
+  min-width: 0;
+  height: 38px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--surface-solid);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  outline: none;
+}
+
+.bulk-action-bar input:focus,
+.auth-default-balance input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent);
 }
 
 .pagination-bar {
@@ -968,7 +1040,15 @@ button.table-row:hover {
 }
 
 .users-table {
-  grid-template-columns: minmax(170px, 1fr) 72px 68px 52px;
+  grid-template-columns: 22px minmax(170px, 1fr) 72px 68px 52px;
+}
+
+.users-table > input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--blue);
+  cursor: pointer;
 }
 
 .channels-table {
@@ -1375,6 +1455,17 @@ button.table-row:hover {
 
 .setting-value strong {
   color: var(--text);
+}
+
+.setting > span small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.auth-default-balance input {
+  width: 130px;
 }
 
 .ios-switch {
@@ -1928,6 +2019,12 @@ button.table-row:hover {
   line-height: 1.5;
 }
 
+@media (max-width: 1280px) {
+  .users-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 980px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -1994,6 +2091,10 @@ button.table-row:hover {
   .user-summary-strip,
   .channel-form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .bulk-action-bar {
+    grid-template-columns: auto 100px minmax(160px, 1fr);
   }
 
   .channel-form-wide {
@@ -2108,6 +2209,33 @@ button.table-row:hover {
     overflow-x: auto;
     padding-bottom: 2px;
     scroll-snap-type: x mandatory;
+  }
+
+  .bulk-action-bar {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .bulk-action-bar strong,
+  .bulk-action-bar input[aria-label="调整原因"] {
+    grid-column: 1 / -1;
+  }
+
+  .user-filter-row {
+    width: 100%;
+    overflow-x: auto;
+  }
+
+  .user-filter-row button {
+    flex: 1 0 auto;
+  }
+
+  .auth-default-balance {
+    width: 100%;
+  }
+
+  .auth-default-balance input {
+    flex: 1;
+    width: auto;
   }
 
   .quick-action {
@@ -2292,6 +2420,19 @@ button.table-row:hover {
 
   .table-row span:nth-child(n + 3) {
     display: none;
+  }
+
+  .users-table.table-row {
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+  }
+
+  .users-table.table-row > :nth-child(3) {
+    display: inline-flex;
+  }
+
+  .mobile-bulk-select {
+    display: inline-flex;
+    width: 100%;
   }
 
   .channel-editor.channels-table {

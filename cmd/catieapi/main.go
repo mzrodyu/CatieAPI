@@ -46,9 +46,10 @@ type AppSettings struct {
 }
 
 type AuthSettings struct {
-	Managed             bool   `json:"managed,omitempty"`
-	RegistrationEnabled bool   `json:"registrationEnabled"`
-	RegistrationMode    string `json:"registrationMode,omitempty"`
+	Managed             bool    `json:"managed,omitempty"`
+	RegistrationEnabled bool    `json:"registrationEnabled"`
+	RegistrationMode    string  `json:"registrationMode,omitempty"`
+	DefaultBalance      float64 `json:"defaultBalance"`
 }
 
 type Account struct {
@@ -319,7 +320,7 @@ func NewServer() *Server {
 		databaseURL:           env("DATABASE_URL", ""),
 		staticDir:             env("STATIC_DIR", "dist"),
 		persistence:           persistence,
-		corsOrigin:            env("CORS_ORIGIN", "*"),
+		corsOrigin:            normalizeCORSOriginConfig(env("CORS_ORIGIN", "*")),
 		adminToken:            env("ADMIN_TOKEN", ""),
 		secretKey:             deriveSecretKey(env("SECRET_KEY", "")),
 		requestLimitPerMinute: envInt("REQUEST_LIMIT_PER_MINUTE", 60),
@@ -373,6 +374,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.GET("/users", s.listUsers)
 	admin.GET("/users/:id", s.getUser)
 	admin.PATCH("/users/:id", s.updateUser)
+	admin.POST("/users/bulk", s.bulkUpdateUsers)
 	admin.POST("/users/:id/api-keys", s.createAPIKey)
 	admin.PATCH("/api-keys/:id", s.updateAPIKey)
 	admin.GET("/channels", s.listChannels)
@@ -419,9 +421,13 @@ func (s *Server) requestMiddleware() gin.HandlerFunc {
 
 func (s *Server) corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", s.corsOrigin)
-		if s.corsOrigin != "*" {
+		allowedOrigin := matchCORSOrigin(s.corsOrigin, c.GetHeader("Origin"))
+		if allowedOrigin != "" {
+			c.Header("Access-Control-Allow-Origin", allowedOrigin)
+		}
+		if allowedOrigin != "" && allowedOrigin != "*" {
 			c.Header("Access-Control-Allow-Credentials", "true")
+			c.Header("Vary", "Origin")
 		}
 		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, X-Request-ID")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
@@ -431,6 +437,48 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func normalizeCORSOriginConfig(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.Contains(strings.ToLower(value), "your-domain.example") {
+		return "*"
+	}
+	seen := map[string]bool{}
+	origins := []string{}
+	for _, item := range strings.Split(value, ",") {
+		origin := strings.TrimRight(strings.TrimSpace(item), "/")
+		if origin == "" {
+			continue
+		}
+		if origin == "*" {
+			return "*"
+		}
+		if !seen[origin] {
+			seen[origin] = true
+			origins = append(origins, origin)
+		}
+	}
+	if len(origins) == 0 {
+		return "*"
+	}
+	return strings.Join(origins, ",")
+}
+
+func matchCORSOrigin(config string, requestOrigin string) string {
+	if config == "*" {
+		return "*"
+	}
+	requestOrigin = strings.TrimRight(strings.TrimSpace(requestOrigin), "/")
+	if requestOrigin == "" {
+		return ""
+	}
+	for _, allowed := range strings.Split(config, ",") {
+		if requestOrigin == allowed {
+			return requestOrigin
+		}
+	}
+	return ""
 }
 
 func (s *Server) adminMiddleware() gin.HandlerFunc {
@@ -732,6 +780,7 @@ func (s *Server) registerAccount(c *gin.Context) {
 		Email:       body.Email,
 		Role:        "user",
 		Status:      "active",
+		Balance:     s.defaultRegistrationBalanceLocked(),
 		CreatedAt:   now(),
 		LastLoginAt: now(),
 	}
@@ -747,6 +796,7 @@ func (s *Server) registerAccount(c *gin.Context) {
 		LastLoginAt:  now(),
 	}
 	s.state.Users = append(s.state.Users, user)
+	s.appendInitialQuotaLocked(&user)
 	s.state.Accounts = append(s.state.Accounts, account)
 	s.saveStateLocked()
 	s.mu.Unlock()
@@ -762,13 +812,15 @@ func (s *Server) getAuthSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"auth": gin.H{
 		"registrationEnabled": s.registrationEnabledLocked(),
 		"registrationMode":    s.registrationModeLocked(),
+		"defaultBalance":      s.defaultRegistrationBalanceLocked(),
 	}})
 }
 
 func (s *Server) updateAuthSettings(c *gin.Context) {
 	var body struct {
-		RegistrationEnabled bool    `json:"registrationEnabled"`
-		RegistrationMode    *string `json:"registrationMode"`
+		RegistrationEnabled bool     `json:"registrationEnabled"`
+		RegistrationMode    *string  `json:"registrationMode"`
+		DefaultBalance      *float64 `json:"defaultBalance"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		validationError(c, "无效的认证设置")
@@ -780,9 +832,26 @@ func (s *Server) updateAuthSettings(c *gin.Context) {
 	if body.RegistrationMode != nil {
 		registrationMode = normalizeRegistrationMode(*body.RegistrationMode)
 	}
-	s.state.Settings.Auth = AuthSettings{Managed: true, RegistrationEnabled: body.RegistrationEnabled, RegistrationMode: registrationMode}
+	defaultBalance := s.defaultRegistrationBalanceLocked()
+	if body.DefaultBalance != nil {
+		if *body.DefaultBalance < 0 || *body.DefaultBalance > 1_000_000_000 {
+			validationError(c, "新用户初始额度必须在 0 到 1000000000 之间")
+			return
+		}
+		defaultBalance = round4(*body.DefaultBalance)
+	}
+	s.state.Settings.Auth = AuthSettings{
+		Managed:             true,
+		RegistrationEnabled: body.RegistrationEnabled,
+		RegistrationMode:    registrationMode,
+		DefaultBalance:      defaultBalance,
+	}
 	s.saveStateLocked()
-	c.JSON(http.StatusOK, gin.H{"auth": gin.H{"registrationEnabled": body.RegistrationEnabled, "registrationMode": registrationMode}})
+	c.JSON(http.StatusOK, gin.H{"auth": gin.H{
+		"registrationEnabled": body.RegistrationEnabled,
+		"registrationMode":    registrationMode,
+		"defaultBalance":      defaultBalance,
+	}})
 }
 
 func (s *Server) getDiscordSettings(c *gin.Context) {
@@ -1072,9 +1141,11 @@ func (s *Server) discordCallback(c *gin.Context) {
 			Name:        displayName,
 			Role:        "user",
 			Status:      "active",
+			Balance:     s.defaultRegistrationBalanceLocked(),
 			CreatedAt:   now(),
 			LastLoginAt: now(),
 		})
+		s.appendInitialQuotaLocked(s.findUser(userID))
 		s.state.Accounts = append(s.state.Accounts, account)
 		s.saveStateLocked()
 		s.mu.Unlock()
@@ -1385,14 +1456,24 @@ func (s *Server) updateUser(c *gin.Context) {
 			validationError(c, "Invalid user status")
 			return
 		}
+		if value != "active" && !s.hasActiveAdminAfterBulkLocked(map[string]struct{}{user.ID: {}}, "set_status", value) {
+			validationError(c, "至少需要保留一个启用的管理员")
+			return
+		}
 		user.Status = value
+		s.syncAccountAccessLocked(user)
 	}
 	if value, ok := patch["role"].(string); ok {
 		if !allowedString(value, "admin", "user") {
 			validationError(c, "Invalid user role")
 			return
 		}
+		if value == "user" && !s.hasActiveAdminAfterBulkLocked(map[string]struct{}{user.ID: {}}, "set_role", value) {
+			validationError(c, "至少需要保留一个启用的管理员")
+			return
+		}
 		user.Role = value
+		s.syncAccountAccessLocked(user)
 	}
 	if value, ok := patch["note"].(string); ok {
 		user.Note = value
@@ -1407,6 +1488,140 @@ func (s *Server) updateUser(c *gin.Context) {
 
 	s.saveStateLocked()
 	c.JSON(http.StatusOK, gin.H{"user": user})
+}
+
+func (s *Server) bulkUpdateUsers(c *gin.Context) {
+	var body struct {
+		UserIDs []string `json:"userIds"`
+		Action  string   `json:"action"`
+		Value   string   `json:"value"`
+		Amount  float64  `json:"amount"`
+		Reason  string   `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		validationError(c, "无效的批量操作")
+		return
+	}
+	if len(body.UserIDs) == 0 {
+		validationError(c, "请至少选择一个用户")
+		return
+	}
+	if len(body.UserIDs) > 5000 {
+		validationError(c, "单次最多处理 5000 个用户")
+		return
+	}
+
+	ids := make(map[string]struct{}, len(body.UserIDs))
+	for _, id := range body.UserIDs {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			ids[id] = struct{}{}
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	matched := make([]*User, 0, len(ids))
+	for i := range s.state.Users {
+		if _, ok := ids[s.state.Users[i].ID]; ok {
+			matched = append(matched, &s.state.Users[i])
+		}
+	}
+	if len(matched) != len(ids) {
+		validationError(c, "部分用户不存在，请刷新列表后重试")
+		return
+	}
+
+	switch body.Action {
+	case "set_status":
+		if !allowedString(body.Value, "active", "disabled", "limited", "overdue") {
+			validationError(c, "无效的用户状态")
+			return
+		}
+		if body.Value != "active" && !s.hasActiveAdminAfterBulkLocked(ids, body.Action, body.Value) {
+			validationError(c, "至少需要保留一个启用的管理员")
+			return
+		}
+	case "set_role":
+		if !allowedString(body.Value, "admin", "user") {
+			validationError(c, "无效的用户角色")
+			return
+		}
+		if body.Value == "user" && !s.hasActiveAdminAfterBulkLocked(ids, body.Action, body.Value) {
+			validationError(c, "至少需要保留一个启用的管理员")
+			return
+		}
+	case "adjust_balance":
+		if body.Amount == 0 || body.Amount < -1_000_000_000 || body.Amount > 1_000_000_000 {
+			validationError(c, "额度调整值必须非零，且在允许范围内")
+			return
+		}
+		for _, user := range matched {
+			if round4(user.Balance+body.Amount) < 0 {
+				validationError(c, "批量扣减会使部分用户额度小于 0")
+				return
+			}
+		}
+	default:
+		validationError(c, "不支持的批量操作")
+		return
+	}
+
+	reason := strings.TrimSpace(body.Reason)
+	if reason == "" {
+		reason = "管理员批量调整"
+	}
+	updated := make([]User, 0, len(matched))
+	for _, user := range matched {
+		switch body.Action {
+		case "set_status":
+			user.Status = body.Value
+			s.syncAccountAccessLocked(user)
+		case "set_role":
+			user.Role = body.Value
+			s.syncAccountAccessLocked(user)
+		case "adjust_balance":
+			user.Balance = round4(user.Balance + body.Amount)
+			s.state.QuotaLedger = append(s.state.QuotaLedger, QuotaEntry{
+				ID:        newID("quota"),
+				UserID:    user.ID,
+				Amount:    round4(body.Amount),
+				Reason:    reason,
+				CreatedAt: now(),
+			})
+		}
+		updated = append(updated, *user)
+	}
+	s.saveStateLocked()
+	c.JSON(http.StatusOK, gin.H{"users": updated, "updated": len(updated)})
+}
+
+func (s *Server) hasActiveAdminAfterBulkLocked(ids map[string]struct{}, action string, value string) bool {
+	for i := range s.state.Users {
+		user := s.state.Users[i]
+		if _, selected := ids[user.ID]; selected {
+			if action == "set_status" {
+				user.Status = value
+			}
+			if action == "set_role" {
+				user.Role = value
+			}
+		}
+		if user.Role == "admin" && user.Status == "active" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) syncAccountAccessLocked(user *User) {
+	for i := range s.state.Accounts {
+		if s.state.Accounts[i].UserID == user.ID {
+			s.state.Accounts[i].Role = user.Role
+			s.state.Accounts[i].Status = user.Status
+		}
+	}
 }
 
 func (s *Server) createAPIKey(c *gin.Context) {
@@ -1536,7 +1751,7 @@ func (s *Server) createChannel(c *gin.Context) {
 		Status:         "disabled",
 		Priority:       body.Priority,
 		Weight:         body.Weight,
-		Models:         body.Models,
+		Models:         append([]string{}, body.Models...),
 	}
 
 	s.mu.Lock()
@@ -1680,7 +1895,13 @@ func (s *Server) syncChannelModels(c *gin.Context) {
 func (s *Server) listModels(c *gin.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c.JSON(http.StatusOK, gin.H{"models": s.state.Models})
+	models := append([]Model{}, s.state.Models...)
+	for i := range models {
+		if models[i].Aliases == nil {
+			models[i].Aliases = []string{}
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"models": models})
 }
 
 func (s *Server) createModel(c *gin.Context) {
@@ -2863,6 +3084,23 @@ func (s *Server) registrationModeLocked() string {
 	return normalizeRegistrationMode(s.state.Settings.Auth.RegistrationMode)
 }
 
+func (s *Server) defaultRegistrationBalanceLocked() float64 {
+	return round4(s.state.Settings.Auth.DefaultBalance)
+}
+
+func (s *Server) appendInitialQuotaLocked(user *User) {
+	if user == nil || user.Balance <= 0 {
+		return
+	}
+	s.state.QuotaLedger = append(s.state.QuotaLedger, QuotaEntry{
+		ID:        newID("quota"),
+		UserID:    user.ID,
+		Amount:    user.Balance,
+		Reason:    "新用户初始额度",
+		CreatedAt: now(),
+	})
+}
+
 func (s *Server) findUserByAPIKeyLocked(authHeader string) *AuthContext {
 	token := bearerToken(authHeader)
 	if token == "" {
@@ -2980,6 +3218,9 @@ func (s *Server) loadState() {
 		changed = true
 	}
 	if s.migrateModelPricing() {
+		changed = true
+	}
+	if s.normalizeStateCollections() {
 		changed = true
 	}
 	if changed {
@@ -3175,6 +3416,23 @@ func (s *Server) migrateModelPricing() bool {
 	return changed
 }
 
+func (s *Server) normalizeStateCollections() bool {
+	changed := false
+	for i := range s.state.Channels {
+		if s.state.Channels[i].Models == nil {
+			s.state.Channels[i].Models = []string{}
+			changed = true
+		}
+	}
+	for i := range s.state.Models {
+		if s.state.Models[i].Aliases == nil {
+			s.state.Models[i].Aliases = []string{}
+			changed = true
+		}
+	}
+	return changed
+}
+
 func (s *Server) saveStateLocked() {
 	if s.persistence == "postgres" {
 		s.savePostgresStateLocked()
@@ -3281,6 +3539,9 @@ func (s *Server) loadPostgresState() {
 		changed = true
 	}
 	if s.migrateModelPricing() {
+		changed = true
+	}
+	if s.normalizeStateCollections() {
 		changed = true
 	}
 	if changed {

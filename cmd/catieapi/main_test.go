@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -123,6 +124,130 @@ func TestAdminTokenProtectsManagementRoutes(t *testing.T) {
 	allowed := perform(router, http.MethodGet, "/api/users", "", map[string]string{"Authorization": "Bearer admin-secret"})
 	if allowed.Code != http.StatusOK {
 		t.Fatalf("users with admin token status = %d body = %s", allowed.Code, allowed.Body.String())
+	}
+}
+
+func TestCORSAllowsConfiguredOriginsAndIgnoresPlaceholder(t *testing.T) {
+	withEnv(t, map[string]string{
+		"PERSISTENCE": "memory",
+		"CORS_ORIGIN": "https://console.example, https://bot.hanbaoyu.ggff.net/",
+	})
+	_, router := testServerRouter(t)
+
+	allowed := perform(router, http.MethodOptions, "/models", "", map[string]string{
+		"Origin":                         "https://bot.hanbaoyu.ggff.net",
+		"Access-Control-Request-Method":  http.MethodGet,
+		"Access-Control-Request-Headers": "authorization",
+	})
+	if allowed.Code != http.StatusNoContent {
+		t.Fatalf("allowed preflight status = %d", allowed.Code)
+	}
+	if origin := allowed.Header().Get("Access-Control-Allow-Origin"); origin != "https://bot.hanbaoyu.ggff.net" {
+		t.Fatalf("allowed origin = %q", origin)
+	}
+	if allowed.Header().Get("Access-Control-Allow-Credentials") != "true" {
+		t.Fatal("configured origin did not allow credentials")
+	}
+
+	blocked := perform(router, http.MethodOptions, "/models", "", map[string]string{
+		"Origin":                        "https://unknown.example",
+		"Access-Control-Request-Method": http.MethodGet,
+	})
+	if origin := blocked.Header().Get("Access-Control-Allow-Origin"); origin != "" {
+		t.Fatalf("unexpected allowed origin = %q", origin)
+	}
+
+	if normalized := normalizeCORSOriginConfig("https://your-domain.example"); normalized != "*" {
+		t.Fatalf("placeholder CORS origin normalized to %q", normalized)
+	}
+}
+
+func TestRegistrationDefaultBalanceAndBulkUserActions(t *testing.T) {
+	withEnv(t, map[string]string{
+		"PERSISTENCE": "memory",
+	})
+	server, router := testServerRouter(t)
+	server.mu.Lock()
+	server.state.Accounts = []Account{{ID: "acct_admin", UserID: "usr_admin", Username: "admin", Role: "admin", Status: "active"}}
+	server.state.Users = []User{
+		{ID: "usr_admin", Name: "Admin", Role: "admin", Status: "active"},
+		{ID: "usr_existing", Name: "Existing", Role: "user", Status: "active", Balance: 4},
+	}
+	server.mu.Unlock()
+
+	settings := perform(router, http.MethodPatch, "/api/settings/auth", `{
+		"registrationEnabled":true,
+		"registrationMode":"username",
+		"defaultBalance":25
+	}`, nil)
+	if settings.Code != http.StatusOK || !bytes.Contains(settings.Body.Bytes(), []byte(`"defaultBalance":25`)) {
+		t.Fatalf("auth settings status = %d body = %s", settings.Code, settings.Body.String())
+	}
+
+	register := perform(router, http.MethodPost, "/api/auth/register", `{
+		"username":"automatic_quota",
+		"password":"automatic-quota-password",
+		"displayName":"Automatic Quota"
+	}`, nil)
+	if register.Code != http.StatusCreated {
+		t.Fatalf("registration status = %d body = %s", register.Code, register.Body.String())
+	}
+
+	server.mu.Lock()
+	var registered *User
+	for i := range server.state.Users {
+		if server.state.Users[i].Name == "Automatic Quota" {
+			registered = &server.state.Users[i]
+			break
+		}
+	}
+	if registered == nil || registered.Balance != 25 {
+		t.Fatalf("registered user balance = %#v", registered)
+	}
+	registeredID := registered.ID
+	if len(server.state.QuotaLedger) != 1 || server.state.QuotaLedger[0].Amount != 25 {
+		t.Fatalf("initial quota ledger = %#v", server.state.QuotaLedger)
+	}
+	server.mu.Unlock()
+
+	bulk := perform(router, http.MethodPost, "/api/users/bulk", fmt.Sprintf(`{
+		"userIds":["usr_existing",%q],
+		"action":"adjust_balance",
+		"amount":6,
+		"reason":"测试活动"
+	}`, registeredID), nil)
+	if bulk.Code != http.StatusOK || !bytes.Contains(bulk.Body.Bytes(), []byte(`"updated":2`)) {
+		t.Fatalf("bulk quota status = %d body = %s", bulk.Code, bulk.Body.String())
+	}
+
+	atomicFailure := perform(router, http.MethodPost, "/api/users/bulk", fmt.Sprintf(`{
+		"userIds":["usr_existing",%q],
+		"action":"adjust_balance",
+		"amount":-20
+	}`, registeredID), nil)
+	if atomicFailure.Code != http.StatusBadRequest {
+		t.Fatalf("bulk negative balance status = %d body = %s", atomicFailure.Code, atomicFailure.Body.String())
+	}
+	adminLockout := perform(router, http.MethodPost, "/api/users/bulk", `{
+		"userIds":["usr_admin"],
+		"action":"set_status",
+		"value":"disabled"
+	}`, nil)
+	if adminLockout.Code != http.StatusBadRequest {
+		t.Fatalf("bulk admin lockout status = %d body = %s", adminLockout.Code, adminLockout.Body.String())
+	}
+	singleAdminLockout := perform(router, http.MethodPatch, "/api/users/usr_admin", `{"status":"disabled"}`, nil)
+	if singleAdminLockout.Code != http.StatusBadRequest {
+		t.Fatalf("single admin lockout status = %d body = %s", singleAdminLockout.Code, singleAdminLockout.Body.String())
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.findUser("usr_existing").Balance != 10 || server.findUser(registeredID).Balance != 31 {
+		t.Fatalf("bulk balances existing=%v registered=%v", server.findUser("usr_existing").Balance, server.findUser(registeredID).Balance)
+	}
+	if len(server.state.QuotaLedger) != 3 {
+		t.Fatalf("quota ledger entries = %d", len(server.state.QuotaLedger))
 	}
 }
 
@@ -309,7 +434,7 @@ func TestDemoSeedDataIsRemovedOnLoad(t *testing.T) {
 		"PERSISTENCE": "file",
 		"DATA_FILE":   dataFile,
 	})
-	server, _ := testServerRouter(t)
+	server, router := testServerRouter(t)
 
 	if len(server.state.Users) != 1 || server.state.Users[0].ID != "usr_real" {
 		t.Fatalf("users after seed cleanup = %#v", server.state.Users)
@@ -320,8 +445,14 @@ func TestDemoSeedDataIsRemovedOnLoad(t *testing.T) {
 	if len(server.state.Channels) != 1 || server.state.Channels[0].ID != "chn_real" {
 		t.Fatalf("channels after seed cleanup = %#v", server.state.Channels)
 	}
+	if server.state.Channels[0].Models == nil {
+		t.Fatal("legacy null channel models were not normalized")
+	}
 	if len(server.state.Models) != 1 || server.state.Models[0].ID != "real-model" {
 		t.Fatalf("models after seed cleanup = %#v", server.state.Models)
+	}
+	if server.state.Models[0].Aliases == nil {
+		t.Fatal("legacy null model aliases were not normalized")
 	}
 	if len(server.state.Logs) != 1 || server.state.Logs[0].ID != "req_real" {
 		t.Fatalf("logs after seed cleanup = %#v", server.state.Logs)
@@ -331,6 +462,10 @@ func TestDemoSeedDataIsRemovedOnLoad(t *testing.T) {
 	}
 	if server.state.Settings.Discord.Managed {
 		t.Fatalf("incomplete sample Discord settings were not cleared: %#v", server.state.Settings.Discord)
+	}
+	modelsResponse := perform(router, http.MethodGet, "/api/models", "", nil)
+	if modelsResponse.Code != http.StatusOK || !bytes.Contains(modelsResponse.Body.Bytes(), []byte(`"aliases":[]`)) {
+		t.Fatalf("normalized models response = %d body = %s", modelsResponse.Code, modelsResponse.Body.String())
 	}
 }
 

@@ -26,7 +26,7 @@ STATIC_DIR=/app/dist
 PERSISTENCE=postgres
 DATABASE_URL=postgres://数据库用户名:数据库密码@数据库地址:5432/数据库名?sslmode=disable
 SECRET_KEY=你的随机加密密钥
-CORS_ORIGIN=https://你的域名
+CORS_ORIGIN=*
 ```
 
 变量说明：
@@ -38,7 +38,7 @@ CORS_ORIGIN=https://你的域名
 | `PERSISTENCE` | 持久化方式。生产建议 `postgres`。 |
 | `DATABASE_URL` | Postgres 连接地址。注意容器里不要写 `localhost`，要写 1Panel 提供的数据库主机或服务名。 |
 | `SECRET_KEY` | 用来加密保存渠道上游 Key。上线后不要随意更换。 |
-| `CORS_ORIGIN` | 前端访问域名，例如 `https://api.example.com` 或你的站点域名。 |
+| `CORS_ORIGIN` | 允许浏览器跨域调用 API 的来源。公开网关可用 `*`；限制来源时用逗号分隔，例如 `https://app.example.com,https://bot.example.com`。不要填写 API 自己的域名，除非调用页面也运行在该域名。 |
 
 首次打开站点会进入初始化页面。直接创建管理员账号和密码，登录后即可在“设置”中配置 Discord、开放注册等选项。
 

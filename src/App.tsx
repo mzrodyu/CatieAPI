@@ -133,6 +133,7 @@ type RegistrationMode = "username" | "email" | "discord";
 type AuthSettings = {
   registrationEnabled: boolean;
   registrationMode: RegistrationMode;
+  defaultBalance: number;
 };
 
 type AccountProfile = {
@@ -143,6 +144,26 @@ type AccountProfile = {
   discordUserId: string;
   role: "admin" | "user";
 };
+
+function arrayOf<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function normalizeChannel(channel: Channel): Channel {
+  return { ...channel, models: arrayOf(channel.models) };
+}
+
+function normalizeModel(model: ModelItem): ModelItem {
+  return { ...model, aliases: arrayOf(model.aliases) };
+}
+
+function normalizeUserDetail(detail: UserDetail): UserDetail {
+  return {
+    ...detail,
+    apiKeys: arrayOf(detail.apiKeys),
+    logs: arrayOf(detail.logs)
+  };
+}
 
 class ApiError extends Error {
   status: number;
@@ -344,16 +365,20 @@ function App() {
       fetchJson<{ models: ModelItem[] }>("/api/models"),
       fetchJson<{ logs: RequestLog[] }>("/api/logs")
     ]);
+    const nextUsers = arrayOf(usersData.users);
+    const nextChannels = arrayOf(channelsData.channels).map(normalizeChannel);
+    const nextModels = arrayOf(modelsData.models).map(normalizeModel);
+    const nextLogs = arrayOf(logsData.logs);
     setOverview(overviewData);
-    setUsers(usersData.users);
-    setChannels(channelsData.channels);
-    setModels(modelsData.models);
-    setLogs(logsData.logs);
+    setUsers(nextUsers);
+    setChannels(nextChannels);
+    setModels(nextModels);
+    setLogs(nextLogs);
     setSelectedUserId((current) => {
-      if (current && usersData.users.some((user) => user.id === current)) return current;
-      return usersData.users[0]?.id || "";
+      if (current && nextUsers.some((user) => user.id === current)) return current;
+      return nextUsers[0]?.id || "";
     });
-    if (usersData.users.length === 0) {
+    if (nextUsers.length === 0) {
       setSelectedUser(null);
     }
     setConsoleReady(true);
@@ -361,7 +386,7 @@ function App() {
 
   async function loadUser(id: string) {
     const data = await fetchJson<UserDetail>(`/api/users/${id}`);
-    setSelectedUser(data);
+    setSelectedUser(normalizeUserDetail(data));
   }
 
   async function updateUser(id: string, patch: Partial<User>) {
@@ -372,6 +397,26 @@ function App() {
     setUsers((current) => current.map((user) => (user.id === id ? data.user : user)));
     setSelectedUser((current) => (current?.user.id === id ? { ...current, user: data.user } : current));
     setToast("已更新用户");
+    window.setTimeout(() => setToast(""), 1800);
+  }
+
+  async function bulkUpdateUsers(
+    userIds: string[],
+    action: "set_status" | "set_role" | "adjust_balance",
+    options: { value?: string; amount?: number; reason?: string } = {}
+  ) {
+    const data = await fetchJson<{ users: User[]; updated: number }>("/api/users/bulk", {
+      method: "POST",
+      body: JSON.stringify({ userIds, action, ...options })
+    });
+    const updated = new Map(arrayOf(data.users).map((user) => [user.id, user]));
+    setUsers((current) => current.map((user) => updated.get(user.id) || user));
+    setSelectedUser((current) => {
+      if (!current) return current;
+      const user = updated.get(current.user.id);
+      return user ? { ...current, user } : current;
+    });
+    setToast(`已处理 ${data.updated} 个用户`);
     window.setTimeout(() => setToast(""), 1800);
   }
 
@@ -393,7 +438,7 @@ function App() {
       method: "PATCH",
       body: JSON.stringify(patch)
     });
-    setChannels((current) => current.map((channel) => (channel.id === id ? data.channel : channel)));
+    setChannels((current) => current.map((channel) => (channel.id === id ? normalizeChannel(data.channel) : channel)));
     setToast("渠道已更新");
     window.setTimeout(() => setToast(""), 1800);
   }
@@ -403,14 +448,17 @@ function App() {
       method: "POST",
       body: JSON.stringify({})
     });
-    setChannels((current) => current.map((channel) => (channel.id === id ? data.channel : channel)));
-    if (data.addedModels.length > 0) {
+    const syncedChannel = normalizeChannel(data.channel);
+    const addedModels = arrayOf(data.addedModels).map(normalizeModel);
+    const syncedModels = arrayOf(data.models);
+    setChannels((current) => current.map((channel) => (channel.id === id ? syncedChannel : channel)));
+    if (addedModels.length > 0) {
       setModels((current) => {
         const seen = new Set(current.map((model) => model.id.toLowerCase()));
-        return [...current, ...data.addedModels.filter((model) => !seen.has(model.id.toLowerCase()))];
+        return [...current, ...addedModels.filter((model) => !seen.has(model.id.toLowerCase()))];
       });
     }
-    setToast(data.models.length ? `已拉取 ${data.models.length} 个模型` : "上游没有返回模型");
+    setToast(syncedModels.length ? `已拉取 ${syncedModels.length} 个模型` : "上游没有返回模型");
     window.setTimeout(() => setToast(""), 2200);
   }
 
@@ -419,7 +467,7 @@ function App() {
       method: "POST",
       body: JSON.stringify({})
     });
-    setChannels((current) => [...current, data.channel]);
+    setChannels((current) => [...current, normalizeChannel(data.channel)]);
     setActive("channels");
     setToast("已创建禁用的新渠道，请补充上游地址后启用");
     window.setTimeout(() => setToast(""), 2400);
@@ -430,7 +478,7 @@ function App() {
       method: "POST",
       body: JSON.stringify(model)
     });
-    setModels((current) => [...current, data.model]);
+    setModels((current) => [...current, normalizeModel(data.model)]);
     setToast("模型已添加");
     window.setTimeout(() => setToast(""), 1800);
   }
@@ -603,6 +651,7 @@ function App() {
             onQuery={setQuery}
             onSelect={setSelectedUserId}
             onUpdate={updateUser}
+            onBulkUpdate={bulkUpdateUsers}
             onCreateKey={createAPIKeyForUser}
             onOpenRegistration={() => {
               setActive("settings");
@@ -823,8 +872,8 @@ function AccountHome({
         fetchJson<{ user: User; apiKeys: ApiKey[]; session: AuthSession }>("/api/account/me"),
         fetchJson<{ models: ModelItem[] }>("/api/catalog/models")
       ]);
-      setData(account);
-      setModels(catalog.models);
+      setData({ ...account, apiKeys: arrayOf(account.apiKeys) });
+      setModels(arrayOf(catalog.models).map(normalizeModel));
     } catch {
       openLogin();
     }
@@ -888,13 +937,13 @@ function AccountHome({
           {newSecret && <code className="one-time-secret">{newSecret}</code>}
           {message && <p className="account-message">{message}</p>}
           <div className="account-key-list">
-            {data?.apiKeys.map((key) => (
+            {data?.apiKeys?.map((key) => (
               <div key={key.id}>
                 <span><strong>{key.name}</strong><small>{key.prefix}...</small></span>
                 <Badge tone={key.status}>{statusLabel(key.status)}</Badge>
               </div>
             ))}
-            {data?.apiKeys.length === 0 && <div className="empty">还没有 API 密钥</div>}
+            {arrayOf(data?.apiKeys).length === 0 && <div className="empty">还没有 API 密钥</div>}
           </div>
         </section>
 
@@ -1122,6 +1171,7 @@ function UsersView({
   onQuery,
   onSelect,
   onUpdate,
+  onBulkUpdate,
   onCreateKey,
   onOpenRegistration
 }: {
@@ -1131,18 +1181,69 @@ function UsersView({
   onQuery: (value: string) => void;
   onSelect: (id: string) => void;
   onUpdate: (id: string, patch: Partial<User>) => void;
+  onBulkUpdate: (
+    ids: string[],
+    action: "set_status" | "set_role" | "adjust_balance",
+    options?: { value?: string; amount?: number; reason?: string }
+  ) => Promise<void>;
   onCreateKey: (id: string) => void;
   onOpenRegistration: () => void;
 }) {
   const pageSize = 25;
   const [page, setPage] = useState(1);
-  const totalPages = Math.max(1, Math.ceil(users.length / pageSize));
+  const [statusFilter, setStatusFilter] = useState<"all" | User["status"]>("all");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkAmount, setBulkAmount] = useState("10");
+  const [bulkReason, setBulkReason] = useState("");
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const visibleUsers = statusFilter === "all" ? users : users.filter((user) => user.status === statusFilter);
+  const bulkSelectableUsers = visibleUsers.filter((user) => user.role !== "admin");
+  const totalPages = Math.max(1, Math.ceil(visibleUsers.length / pageSize));
   const safePage = Math.min(page, totalPages);
-  const pagedUsers = users.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const pagedUsers = visibleUsers.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const allVisibleSelected = bulkSelectableUsers.length > 0 && bulkSelectableUsers.every((user) => selectedIds.has(user.id));
 
   useEffect(() => {
     setPage(1);
-  }, [query]);
+  }, [query, statusFilter]);
+
+  useEffect(() => {
+    const available = new Set(users.map((user) => user.id));
+    setSelectedIds((current) => new Set([...current].filter((id) => available.has(id))));
+  }, [users]);
+
+  function toggleUser(id: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAllVisible() {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (allVisibleSelected) bulkSelectableUsers.forEach((user) => next.delete(user.id));
+      else bulkSelectableUsers.forEach((user) => next.add(user.id));
+      return next;
+    });
+  }
+
+  async function runBulk(
+    action: "set_status" | "adjust_balance",
+    options: { value?: string; amount?: number; reason?: string }
+  ) {
+    if (selectedIds.size === 0) return;
+    setBulkBusy(true);
+    try {
+      await onBulkUpdate([...selectedIds], action, options);
+      setSelectedIds(new Set());
+      setBulkReason("");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
 
   return (
     <section className="users-layout">
@@ -1162,15 +1263,85 @@ function UsersView({
           <span><strong>{users.filter((user) => user.status === "disabled").length}</strong> 禁用</span>
           <span><strong>{users.reduce((sum, user) => sum + user.requestsToday, 0)}</strong> 今日请求</span>
         </div>
+        <div className="user-filter-row" role="group" aria-label="用户状态筛选">
+          {[
+            { value: "all", label: "全部" },
+            { value: "active", label: "正常" },
+            { value: "limited", label: "受限" },
+            { value: "disabled", label: "禁用" }
+          ].map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              className={statusFilter === item.value ? "selected" : ""}
+              onClick={() => setStatusFilter(item.value as typeof statusFilter)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <button type="button" className="secondary-button mobile-bulk-select" onClick={toggleAllVisible}>
+          {allVisibleSelected ? "取消全选" : `全选结果（${bulkSelectableUsers.length}）`}
+        </button>
+        {selectedIds.size > 0 && (
+          <div className="bulk-action-bar">
+            <strong>已选 {selectedIds.size} 人</strong>
+            <input
+              type="number"
+              step="0.01"
+              value={bulkAmount}
+              onChange={(event) => setBulkAmount(event.target.value)}
+              aria-label="额度调整值"
+            />
+            <input
+              value={bulkReason}
+              onChange={(event) => setBulkReason(event.target.value)}
+              placeholder="原因，例如：活动赠送"
+              aria-label="调整原因"
+            />
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={bulkBusy || !Number(bulkAmount)}
+              onClick={() => runBulk("adjust_balance", { amount: Number(bulkAmount), reason: bulkReason })}
+            >
+              调整额度
+            </button>
+            <button type="button" className="secondary-button" disabled={bulkBusy} onClick={() => runBulk("set_status", { value: "active" })}>
+              启用
+            </button>
+            <button type="button" className="danger-button" disabled={bulkBusy} onClick={() => runBulk("set_status", { value: "disabled" })}>
+              禁用
+            </button>
+          </div>
+        )}
         <div className="table">
           <div className="table-head users-table">
+            <input type="checkbox" checked={allVisibleSelected} onChange={toggleAllVisible} aria-label="选择当前筛选结果" />
             <span>用户</span>
             <span>状态</span>
             <span>余额</span>
             <span>今日</span>
           </div>
           {pagedUsers.map((user) => (
-            <button className={selectedUser?.user.id === user.id ? "table-row users-table selected" : "table-row users-table"} key={user.id} onClick={() => onSelect(user.id)}>
+            <div
+              className={selectedUser?.user.id === user.id ? "table-row users-table selected" : "table-row users-table"}
+              key={user.id}
+              role="button"
+              tabIndex={0}
+              onClick={() => onSelect(user.id)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") onSelect(user.id);
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={selectedIds.has(user.id)}
+                disabled={user.role === "admin"}
+                onChange={() => toggleUser(user.id)}
+                onClick={(event) => event.stopPropagation()}
+                aria-label={user.role === "admin" ? `${user.name} 是管理员，不参与批量操作` : `选择 ${user.name}`}
+              />
               <span>
                 <strong>{user.name}</strong>
                 <small>{user.id} · {user.email || "未绑定邮箱"}</small>
@@ -1178,11 +1349,11 @@ function UsersView({
               <Badge tone={user.status}>{statusLabel(user.status)}</Badge>
               <span>{user.balance.toFixed(2)}</span>
               <span>{user.requestsToday}</span>
-            </button>
+            </div>
           ))}
-          {users.length === 0 && <Empty text="暂无用户" />}
+          {visibleUsers.length === 0 && <Empty text="暂无匹配用户" />}
         </div>
-        {users.length > pageSize && (
+        {visibleUsers.length > pageSize && (
           <div className="pagination-bar">
             <button className="secondary-button" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button>
             <span>{safePage} / {totalPages}</span>
@@ -1220,13 +1391,14 @@ function UsersView({
               </button>
               <button
                 className="secondary-button"
+                disabled={selectedUser.user.role === "admin"}
                 onClick={() =>
                   onUpdate(selectedUser.user.id, {
                     status: selectedUser.user.status === "disabled" ? "active" : "disabled"
                   })
                 }
               >
-                {selectedUser.user.status === "disabled" ? "解封" : "禁用"}
+                {selectedUser.user.role === "admin" ? "管理员保护" : selectedUser.user.status === "disabled" ? "解封" : "禁用"}
               </button>
             </div>
 
@@ -1387,7 +1559,7 @@ function ModelCard({ model, featured = false, onCopy }: { model: ModelItem; feat
       </div>
       <p>{model.description}</p>
       <div className="alias-row">
-        {model.aliases.map((alias) => (
+        {arrayOf(model.aliases).map((alias) => (
           <span key={alias}>{alias}</span>
         ))}
       </div>
@@ -1445,14 +1617,14 @@ function ChannelEditor({
 }) {
   const [provider, setProvider] = useState(channel.provider);
   const [baseUrl, setBaseUrl] = useState(channel.baseUrl);
-  const [models, setModels] = useState(channel.models.join(", "));
+  const [models, setModels] = useState(arrayOf(channel.models).join(", "));
   const [upstreamApiKey, setUpstreamApiKey] = useState("");
   const [busy, setBusy] = useState("");
 
   useEffect(() => {
     setProvider(channel.provider);
     setBaseUrl(channel.baseUrl);
-    setModels(channel.models.join(", "));
+    setModels(arrayOf(channel.models).join(", "));
     setUpstreamApiKey("");
   }, [channel.id, channel.provider, channel.baseUrl, channel.models]);
 
@@ -1571,6 +1743,7 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
   const [discord, setDiscord] = useState<DiscordSettings | null>(null);
   const [registrationEnabled, setRegistrationEnabled] = useState<boolean | null>(null);
   const [registrationMode, setRegistrationMode] = useState<RegistrationMode>("username");
+  const [defaultBalance, setDefaultBalance] = useState("0");
   const [account, setAccount] = useState<AccountProfile | null>(null);
   const [accountUsername, setAccountUsername] = useState("");
   const [accountDisplayName, setAccountDisplayName] = useState("");
@@ -1595,6 +1768,7 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
         setDiscord(withBrowserDiscordDefaults(discordData.discord));
         setRegistrationEnabled(authData.auth.registrationEnabled);
         setRegistrationMode(normalizeRegistrationMode(authData.auth.registrationMode));
+        setDefaultBalance(String(authData.auth.defaultBalance || 0));
         setAccount(accountData.account);
         setAccountUsername(accountData.account?.username || "");
         setAccountDisplayName(accountData.user.name || "");
@@ -1604,15 +1778,16 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
       .catch(() => setMessage("Discord 配置加载失败"));
   }, []);
 
-  async function saveAuthSettings(nextEnabled = registrationEnabled, nextMode = registrationMode) {
+  async function saveAuthSettings(nextEnabled = registrationEnabled, nextMode = registrationMode, nextDefaultBalance = Number(defaultBalance)) {
     if (nextEnabled === null) return;
     try {
       const data = await fetchJson<{ auth: AuthSettings }>("/api/settings/auth", {
         method: "PATCH",
-        body: JSON.stringify({ registrationEnabled: nextEnabled, registrationMode: nextMode })
+        body: JSON.stringify({ registrationEnabled: nextEnabled, registrationMode: nextMode, defaultBalance: nextDefaultBalance })
       });
       setRegistrationEnabled(data.auth.registrationEnabled);
       setRegistrationMode(normalizeRegistrationMode(data.auth.registrationMode));
+      setDefaultBalance(String(data.auth.defaultBalance || 0));
       setMessage(data.auth.registrationEnabled ? "注册设置已保存" : "已关闭用户注册");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "注册设置保存失败");
@@ -1730,6 +1905,29 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
                   {option.label}
                 </button>
               ))}
+            </div>
+          </div>
+          <div className="setting">
+            <span>
+              新用户初始额度
+              <small>注册完成后自动发放，仅影响之后的新用户</small>
+            </span>
+            <div className="setting-value auth-default-balance">
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={defaultBalance}
+                onChange={(event) => setDefaultBalance(event.target.value)}
+                aria-label="新用户初始额度"
+              />
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => saveAuthSettings(registrationEnabled, registrationMode, Number(defaultBalance))}
+              >
+                保存
+              </button>
             </div>
           </div>
         </div>
