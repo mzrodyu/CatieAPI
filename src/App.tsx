@@ -105,8 +105,16 @@ type AuthStatus = {
   initialized: boolean;
   authenticated: boolean;
   registrationEnabled: boolean;
+  registrationMode: RegistrationMode;
   discordEnabled: boolean;
   session: AuthSession | null;
+};
+
+type RegistrationMode = "username" | "email" | "discord";
+
+type AuthSettings = {
+  registrationEnabled: boolean;
+  registrationMode: RegistrationMode;
 };
 
 type AccountProfile = {
@@ -269,6 +277,17 @@ function withBrowserDiscordDefaults(settings: DiscordSettings): DiscordSettings 
     authSuccessUrl: settings.authSuccessUrl && !settings.authSuccessUrl.includes("localhost") ? settings.authSuccessUrl : defaultAuthSuccessUrl(),
     sessionTtlHours: settings.sessionTtlHours || 168
   };
+}
+
+function normalizeRegistrationMode(value?: string): RegistrationMode {
+  if (value === "email" || value === "discord") return value;
+  return "username";
+}
+
+function usernameFromEmail(email: string) {
+  const local = email.split("@")[0] || "user";
+  const safe = local.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[-_]+|[-_]+$/g, "");
+  return (safe.length >= 3 ? safe : "user").slice(0, 24);
 }
 
 function App() {
@@ -587,8 +606,12 @@ function AuthScreen({
   const [submitting, setSubmitting] = useState(false);
   const isSetup = mode === "setup";
   const isRegister = mode === "register";
+  const registrationMode = normalizeRegistrationMode(status?.registrationMode);
+  const isEmailRegister = isRegister && registrationMode === "email";
+  const isDiscordRegister = isRegister && registrationMode === "discord";
 
   async function submit() {
+    if (isDiscordRegister) return;
     if ((isSetup || isRegister) && password !== confirmPassword) {
       setMessage("两次输入的密码不一致");
       return;
@@ -597,9 +620,10 @@ function AuthScreen({
     setMessage("");
     try {
       const endpoint = isSetup ? "/api/auth/setup" : isRegister ? "/api/auth/register" : "/api/auth/login";
+      const registerUsername = isEmailRegister ? usernameFromEmail(email) : username;
       const body = mode === "login"
         ? { identifier: username, password }
-        : { username, password, displayName, email, discordUserId: isSetup ? discordUserId : "" };
+        : { username: registerUsername, password, displayName, email, discordUserId: isSetup ? discordUserId : "" };
       const data = await fetchJson<{ session: AuthSession }>(endpoint, {
         method: "POST",
         body: JSON.stringify(body)
@@ -639,67 +663,83 @@ function AuthScreen({
             submit();
           }}
         >
-          {mode !== "login" && (
-            <label>
-              <span>显示名称</span>
-              <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} autoComplete="name" placeholder="Catie" />
-            </label>
+          {isDiscordRegister ? (
+            <div className="auth-discord-register">
+              <strong>使用 Discord 创建账号</strong>
+              <span>继续后会按站点设置校验服务器和身份组。</span>
+              {status?.discordEnabled ? (
+                <a className="discord-login-button" href="/api/auth/discord/start">继续使用 Discord</a>
+              ) : (
+                <div className="auth-message">管理员还没有启用 Discord 登录</div>
+              )}
+            </div>
+          ) : (
+            <>
+              {mode !== "login" && (
+                <label>
+                  <span>显示名称</span>
+                  <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} autoComplete="name" placeholder="Catie" />
+                </label>
+              )}
+              {!isEmailRegister && (
+                <label>
+                  <span>{mode === "login" ? "账号或邮箱" : "账号"}</span>
+                  <input
+                    value={username}
+                    onChange={(event) => setUsername(event.target.value)}
+                    autoComplete="username"
+                    placeholder={mode === "login" ? "输入账号或邮箱" : "3-32 位字母、数字、_ 或 -"}
+                  />
+                </label>
+              )}
+              {(isSetup || isEmailRegister) && (
+                <label>
+                  <span>{isEmailRegister ? "邮箱" : "邮箱（可选）"}</span>
+                  <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" placeholder="name@example.com" />
+                </label>
+              )}
+              {isSetup && (
+                <label>
+                  <span>Discord 用户 ID（可选）</span>
+                  <input
+                    inputMode="numeric"
+                    autoComplete="off"
+                    value={discordUserId}
+                    onChange={(event) => setDiscordUserId(event.target.value)}
+                    placeholder="绑定管理员 Discord 账号"
+                  />
+                </label>
+              )}
+              <label>
+                <span>密码</span>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  autoComplete={mode === "login" ? "current-password" : "new-password"}
+                  placeholder="至少 8 个字符"
+                />
+              </label>
+              {mode !== "login" && (
+                <label>
+                  <span>确认密码</span>
+                  <input
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(event) => setConfirmPassword(event.target.value)}
+                    autoComplete="new-password"
+                    placeholder="再次输入密码"
+                  />
+                </label>
+              )}
+              <div className="auth-message" role="status">{message}</div>
+              <button className="primary-button auth-submit" type="submit" disabled={submitting}>
+                {submitting ? "请稍候" : isSetup ? "创建管理员" : isRegister ? "注册" : "登录"}
+              </button>
+            </>
           )}
-          <label>
-            <span>{mode === "login" ? "账号或邮箱" : "账号"}</span>
-            <input
-              value={username}
-              onChange={(event) => setUsername(event.target.value)}
-              autoComplete="username"
-              placeholder={mode === "login" ? "输入账号或邮箱" : "3-32 位字母、数字、_ 或 -"}
-            />
-          </label>
-          {mode !== "login" && (
-            <label>
-              <span>邮箱（可选）</span>
-              <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" placeholder="name@example.com" />
-            </label>
-          )}
-          {isSetup && (
-            <label>
-              <span>Discord 用户 ID（可选）</span>
-              <input
-                inputMode="numeric"
-                autoComplete="off"
-                value={discordUserId}
-                onChange={(event) => setDiscordUserId(event.target.value)}
-                placeholder="绑定管理员 Discord 账号"
-              />
-            </label>
-          )}
-          <label>
-            <span>密码</span>
-            <input
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
-              placeholder="至少 8 个字符"
-            />
-          </label>
-          {mode !== "login" && (
-            <label>
-              <span>确认密码</span>
-              <input
-                type="password"
-                value={confirmPassword}
-                onChange={(event) => setConfirmPassword(event.target.value)}
-                autoComplete="new-password"
-                placeholder="再次输入密码"
-              />
-            </label>
-          )}
-          <div className="auth-message" role="status">{message}</div>
-          <button className="primary-button auth-submit" type="submit" disabled={submitting}>
-            {submitting ? "请稍候" : isSetup ? "创建管理员" : isRegister ? "注册" : "登录"}
-          </button>
 
-          {!isSetup && status?.discordEnabled && (
+          {!isSetup && !isDiscordRegister && status?.discordEnabled && (
             <a className="discord-login-button" href="/api/auth/discord/start">使用 Discord 登录</a>
           )}
           {!isSetup && (
@@ -1383,6 +1423,7 @@ function LogsView({ logs }: { logs: RequestLog[] }) {
 function SettingsView({ models, channels }: { models: ModelItem[]; channels: Channel[] }) {
   const [discord, setDiscord] = useState<DiscordSettings | null>(null);
   const [registrationEnabled, setRegistrationEnabled] = useState<boolean | null>(null);
+  const [registrationMode, setRegistrationMode] = useState<RegistrationMode>("username");
   const [account, setAccount] = useState<AccountProfile | null>(null);
   const [accountUsername, setAccountUsername] = useState("");
   const [accountDisplayName, setAccountDisplayName] = useState("");
@@ -1399,12 +1440,13 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
   useEffect(() => {
     Promise.all([
       fetchJson<{ discord: DiscordSettings }>("/api/settings/discord"),
-      fetchJson<{ auth: { registrationEnabled: boolean } }>("/api/settings/auth"),
+      fetchJson<{ auth: AuthSettings }>("/api/settings/auth"),
       fetchJson<{ account: AccountProfile; user: User }>("/api/account/me")
     ])
       .then(([discordData, authData, accountData]) => {
         setDiscord(withBrowserDiscordDefaults(discordData.discord));
         setRegistrationEnabled(authData.auth.registrationEnabled);
+        setRegistrationMode(normalizeRegistrationMode(authData.auth.registrationMode));
         setAccount(accountData.account);
         setAccountUsername(accountData.account?.username || "");
         setAccountDisplayName(accountData.user.name || "");
@@ -1414,19 +1456,24 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
       .catch(() => setMessage("Discord 配置加载失败"));
   }, []);
 
-  async function toggleRegistration() {
-    if (registrationEnabled === null) return;
-    const next = !registrationEnabled;
+  async function saveAuthSettings(nextEnabled = registrationEnabled, nextMode = registrationMode) {
+    if (nextEnabled === null) return;
     try {
-      const data = await fetchJson<{ auth: { registrationEnabled: boolean } }>("/api/settings/auth", {
+      const data = await fetchJson<{ auth: AuthSettings }>("/api/settings/auth", {
         method: "PATCH",
-        body: JSON.stringify({ registrationEnabled: next })
+        body: JSON.stringify({ registrationEnabled: nextEnabled, registrationMode: nextMode })
       });
       setRegistrationEnabled(data.auth.registrationEnabled);
-      setMessage(data.auth.registrationEnabled ? "已开放用户注册" : "已关闭用户注册");
+      setRegistrationMode(normalizeRegistrationMode(data.auth.registrationMode));
+      setMessage(data.auth.registrationEnabled ? "注册设置已保存" : "已关闭用户注册");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "注册设置保存失败");
     }
+  }
+
+  async function toggleRegistration() {
+    if (registrationEnabled === null) return;
+    saveAuthSettings(!registrationEnabled, registrationMode);
   }
 
   async function saveDiscordSettings() {
@@ -1500,6 +1547,25 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
               >
                 <span />
               </button>
+            </div>
+          </div>
+          <div className="setting">
+            <span>注册方式</span>
+            <div className="registration-mode-control" role="group" aria-label="注册方式">
+              {[
+                { value: "username", label: "账号密码" },
+                { value: "email", label: "邮箱" },
+                { value: "discord", label: "Discord" }
+              ].map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={registrationMode === option.value ? "selected" : ""}
+                  onClick={() => saveAuthSettings(registrationEnabled ?? true, option.value as RegistrationMode)}
+                >
+                  {option.label}
+                </button>
+              ))}
             </div>
           </div>
         </div>

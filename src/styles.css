@@ -976,6 +976,33 @@ button.table-row:hover {
   padding: 0 14px;
 }
 
+.registration-mode-control {
+  display: inline-grid;
+  grid-auto-flow: column;
+  gap: 3px;
+  padding: 3px;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+}
+
+.registration-mode-control button {
+  min-width: 74px;
+  height: 30px;
+  padding: 0 10px;
+  color: var(--muted);
+  background: transparent;
+  border-radius: 999px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.registration-mode-control button.selected {
+  color: var(--text);
+  background: var(--surface-solid);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+
 .settings-layout {
   display: grid;
   gap: 18px;
@@ -1278,6 +1305,21 @@ button.table-row:hover {
   border-radius: 999px;
   font-weight: 700;
   text-decoration: none;
+}
+
+.auth-discord-register {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+}
+
+.auth-discord-register span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .auth-switch {
@@ -1880,6 +1922,19 @@ button.table-row:hover {
 
   .metrics-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .setting {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .registration-mode-control {
+    width: 100%;
+  }
+
+  .registration-mode-control button {
+    min-width: 0;
   }
 
   .hero-strip {

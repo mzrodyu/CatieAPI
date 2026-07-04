@@ -218,6 +218,30 @@ func TestFirstRunSetupLoginRegistrationAndRoleIsolation(t *testing.T) {
 		t.Fatalf("ordinary user key creation status = %d body = %s", ownKey.Code, ownKey.Body.String())
 	}
 
+	emailMode := perform(router, http.MethodPatch, "/api/settings/auth", `{"registrationEnabled":true,"registrationMode":"email"}`, adminHeaders)
+	if emailMode.Code != http.StatusOK || !bytes.Contains(emailMode.Body.Bytes(), []byte(`"registrationMode":"email"`)) {
+		t.Fatalf("email registration mode status = %d body = %s", emailMode.Code, emailMode.Body.String())
+	}
+	emailRegister := perform(router, http.MethodPost, "/api/auth/register", `{
+		"password":"mail-register-password",
+		"displayName":"Mail User",
+		"email":"mail-user@example.test"
+	}`, nil)
+	if emailRegister.Code != http.StatusCreated || !bytes.Contains(emailRegister.Body.Bytes(), []byte(`"username":"mail-user"`)) {
+		t.Fatalf("email registration status = %d body = %s", emailRegister.Code, emailRegister.Body.String())
+	}
+	discordMode := perform(router, http.MethodPatch, "/api/settings/auth", `{"registrationEnabled":true,"registrationMode":"discord"}`, adminHeaders)
+	if discordMode.Code != http.StatusOK || !bytes.Contains(discordMode.Body.Bytes(), []byte(`"registrationMode":"discord"`)) {
+		t.Fatalf("discord registration mode status = %d body = %s", discordMode.Code, discordMode.Body.String())
+	}
+	passwordInDiscordMode := perform(router, http.MethodPost, "/api/auth/register", `{
+		"username":"password_user",
+		"password":"another-safe-password"
+	}`, nil)
+	if passwordInDiscordMode.Code != http.StatusForbidden {
+		t.Fatalf("password registration in discord mode status = %d body = %s", passwordInDiscordMode.Code, passwordInDiscordMode.Body.String())
+	}
+
 	disableRegistration := perform(router, http.MethodPatch, "/api/settings/auth", `{"registrationEnabled":false}`, adminHeaders)
 	if disableRegistration.Code != http.StatusOK {
 		t.Fatalf("disable registration status = %d body = %s", disableRegistration.Code, disableRegistration.Body.String())

@@ -46,8 +46,9 @@ type AppSettings struct {
 }
 
 type AuthSettings struct {
-	Managed             bool `json:"managed,omitempty"`
-	RegistrationEnabled bool `json:"registrationEnabled"`
+	Managed             bool   `json:"managed,omitempty"`
+	RegistrationEnabled bool   `json:"registrationEnabled"`
+	RegistrationMode    string `json:"registrationMode,omitempty"`
 }
 
 type Account struct {
@@ -524,6 +525,7 @@ func (s *Server) authStatus(c *gin.Context) {
 	s.mu.Lock()
 	initialized := len(s.state.Accounts) > 0
 	registrationEnabled := s.registrationEnabledLocked()
+	registrationMode := s.registrationModeLocked()
 	discordEnabled := s.discordLoginEnabledLocked()
 	s.mu.Unlock()
 
@@ -531,6 +533,7 @@ func (s *Server) authStatus(c *gin.Context) {
 		"initialized":         initialized,
 		"authenticated":       authenticated,
 		"registrationEnabled": registrationEnabled,
+		"registrationMode":    registrationMode,
 		"discordEnabled":      discordEnabled,
 		"session":             nullableSession(authenticated, session),
 	})
@@ -671,6 +674,30 @@ func (s *Server) registerAccount(c *gin.Context) {
 	body.Username = strings.TrimSpace(body.Username)
 	body.DisplayName = strings.TrimSpace(body.DisplayName)
 	body.Email = strings.TrimSpace(body.Email)
+	s.mu.Lock()
+	initialized := len(s.state.Accounts) > 0
+	registrationEnabled := s.registrationEnabledLocked()
+	registrationMode := s.registrationModeLocked()
+	s.mu.Unlock()
+	if !initialized {
+		c.JSON(http.StatusPreconditionRequired, gin.H{"error": gin.H{"message": "请先初始化站点管理员"}})
+		return
+	}
+	if !registrationEnabled {
+		c.JSON(http.StatusForbidden, gin.H{"error": gin.H{"message": "当前站点未开放注册"}})
+		return
+	}
+	if registrationMode == "email" && body.Username == "" {
+		body.Username = usernameFromEmail(body.Email)
+	}
+	if registrationMode == "discord" {
+		c.JSON(http.StatusForbidden, gin.H{"error": gin.H{"message": "当前站点只允许 Discord 注册"}})
+		return
+	}
+	if registrationMode == "email" && body.Email == "" {
+		validationError(c, "邮箱注册需要填写邮箱")
+		return
+	}
 	if message := validateAccountInput(body.Username, body.Password, body.Email); message != "" {
 		validationError(c, message)
 		return
@@ -685,11 +712,6 @@ func (s *Server) registerAccount(c *gin.Context) {
 	}
 
 	s.mu.Lock()
-	if len(s.state.Accounts) == 0 {
-		s.mu.Unlock()
-		c.JSON(http.StatusPreconditionRequired, gin.H{"error": gin.H{"message": "请先初始化站点管理员"}})
-		return
-	}
 	if !s.registrationEnabledLocked() {
 		s.mu.Unlock()
 		c.JSON(http.StatusForbidden, gin.H{"error": gin.H{"message": "当前站点未开放注册"}})
@@ -735,12 +757,16 @@ func (s *Server) registerAccount(c *gin.Context) {
 func (s *Server) getAuthSettings(c *gin.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c.JSON(http.StatusOK, gin.H{"auth": gin.H{"registrationEnabled": s.registrationEnabledLocked()}})
+	c.JSON(http.StatusOK, gin.H{"auth": gin.H{
+		"registrationEnabled": s.registrationEnabledLocked(),
+		"registrationMode":    s.registrationModeLocked(),
+	}})
 }
 
 func (s *Server) updateAuthSettings(c *gin.Context) {
 	var body struct {
-		RegistrationEnabled bool `json:"registrationEnabled"`
+		RegistrationEnabled bool    `json:"registrationEnabled"`
+		RegistrationMode    *string `json:"registrationMode"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		validationError(c, "无效的认证设置")
@@ -748,9 +774,13 @@ func (s *Server) updateAuthSettings(c *gin.Context) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.state.Settings.Auth = AuthSettings{Managed: true, RegistrationEnabled: body.RegistrationEnabled}
+	registrationMode := s.registrationModeLocked()
+	if body.RegistrationMode != nil {
+		registrationMode = normalizeRegistrationMode(*body.RegistrationMode)
+	}
+	s.state.Settings.Auth = AuthSettings{Managed: true, RegistrationEnabled: body.RegistrationEnabled, RegistrationMode: registrationMode}
 	s.saveStateLocked()
-	c.JSON(http.StatusOK, gin.H{"auth": gin.H{"registrationEnabled": body.RegistrationEnabled}})
+	c.JSON(http.StatusOK, gin.H{"auth": gin.H{"registrationEnabled": body.RegistrationEnabled, "registrationMode": registrationMode}})
 }
 
 func (s *Server) getDiscordSettings(c *gin.Context) {
@@ -1012,6 +1042,47 @@ func (s *Server) discordCallback(c *gin.Context) {
 		}
 		roleID = config.AllowedRoleID
 	}
+
+	s.mu.Lock()
+	canRegisterWithDiscord := len(s.state.Accounts) > 0 && s.registrationEnabledLocked() && s.registrationModeLocked() == "discord"
+	if canRegisterWithDiscord {
+		displayName := user.GlobalName
+		if displayName == "" {
+			displayName = user.Username
+		}
+		if displayName == "" {
+			displayName = "Discord User"
+		}
+		username := uniqueUsernameLocked(s, usernameFromDiscord(user), user.ID)
+		userID := newID("usr")
+		account := Account{
+			ID:            newID("acct"),
+			UserID:        userID,
+			Username:      username,
+			DiscordUserID: user.ID,
+			Role:          "user",
+			Status:        "active",
+			CreatedAt:     now(),
+			LastLoginAt:   now(),
+		}
+		s.state.Users = append(s.state.Users, User{
+			ID:          userID,
+			Name:        displayName,
+			Role:        "user",
+			Status:      "active",
+			CreatedAt:   now(),
+			LastLoginAt: now(),
+		})
+		s.state.Accounts = append(s.state.Accounts, account)
+		s.saveStateLocked()
+		s.mu.Unlock()
+
+		session := s.createAccountSession(account, displayName, "discord")
+		s.setSessionCookie(c, session)
+		c.Redirect(http.StatusFound, config.AuthSuccessURL)
+		return
+	}
+	s.mu.Unlock()
 
 	session := s.createSession(user, config.AllowedGuildID, roleID, config.SessionTTL)
 	s.setSessionCookie(c, session)
@@ -2286,6 +2357,58 @@ func validateUsername(username string) string {
 	return ""
 }
 
+func normalizeRegistrationMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "email":
+		return "email"
+	case "discord":
+		return "discord"
+	default:
+		return "username"
+	}
+}
+
+func usernameFromEmail(email string) string {
+	local := email
+	if index := strings.Index(email, "@"); index > 0 {
+		local = email[:index]
+	}
+	return sanitizeUsername(local, "user")
+}
+
+func usernameFromDiscord(user *DiscordUser) string {
+	base := user.Username
+	if base == "" {
+		base = user.GlobalName
+	}
+	if base == "" {
+		base = "discord"
+	}
+	return sanitizeUsername(base, "discord")
+}
+
+func sanitizeUsername(value string, fallback string) string {
+	var builder strings.Builder
+	for _, character := range strings.ToLower(strings.TrimSpace(value)) {
+		valid := character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' ||
+			character == '_' || character == '-'
+		if valid {
+			builder.WriteRune(character)
+		} else if character == '.' || character == ' ' {
+			builder.WriteRune('-')
+		}
+	}
+	result := strings.Trim(builder.String(), "-_")
+	if len(result) < 3 {
+		result = fallback
+	}
+	if len(result) > 24 {
+		result = result[:24]
+	}
+	return result
+}
+
 func invalidLogin(c *gin.Context) {
 	c.JSON(http.StatusUnauthorized, gin.H{
 		"error": gin.H{
@@ -2451,11 +2574,34 @@ func (s *Server) findAccountByDiscordIDLocked(discordUserID string) *Account {
 	return nil
 }
 
+func uniqueUsernameLocked(s *Server, base string, fallback string) string {
+	username := sanitizeUsername(base, fallback)
+	for index := 0; index < 1000; index++ {
+		candidate := username
+		if index > 0 {
+			suffix := "-" + strconv.Itoa(index+1)
+			trimmed := username
+			if len(trimmed)+len(suffix) > 32 {
+				trimmed = trimmed[:32-len(suffix)]
+			}
+			candidate = trimmed + suffix
+		}
+		if s.findAccountByIdentifierLocked(candidate) == nil {
+			return candidate
+		}
+	}
+	return sanitizeUsername(fallback, "user") + "-" + randomHex(4)
+}
+
 func (s *Server) registrationEnabledLocked() bool {
 	if !s.state.Settings.Auth.Managed {
 		return true
 	}
 	return s.state.Settings.Auth.RegistrationEnabled
+}
+
+func (s *Server) registrationModeLocked() string {
+	return normalizeRegistrationMode(s.state.Settings.Auth.RegistrationMode)
 }
 
 func (s *Server) findUserByAPIKeyLocked(authHeader string) *AuthContext {
