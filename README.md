@@ -144,3 +144,6 @@ curl http://localhost:8787/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"ds","messages":[{"role":"user","content":"hello"}]}'
 ```
+
+<img width="2560" height="1298" alt="image" src="https://github.com/user-attachments/assets/848e3049-7c10-45f3-ba86-8e943cf920cd" />
+
