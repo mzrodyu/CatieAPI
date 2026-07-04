@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/mail"
 	"net/url"
@@ -1401,22 +1402,32 @@ func (s *Server) overview(c *gin.Context) {
 	totalBalance := 0.0
 	requestsToday := 0
 	successLogs := 0
+	timezoneOffset, err := strconv.Atoi(c.DefaultQuery("timezoneOffset", "0"))
+	if err != nil || timezoneOffset < -840 || timezoneOffset > 840 {
+		timezoneOffset = 0
+	}
+	clientLocation := time.FixedZone("dashboard", -timezoneOffset*60)
+	clientToday := time.Now().In(clientLocation).Format("2006-01-02")
 	for _, user := range s.state.Users {
 		if user.Status == "active" {
 			activeUsers++
 		}
 		totalBalance += user.Balance
-		requestsToday += user.RequestsToday
 	}
 	for _, log := range s.state.Logs {
+		createdAt, err := time.Parse(time.RFC3339Nano, log.CreatedAt)
+		if err != nil || createdAt.In(clientLocation).Format("2006-01-02") != clientToday {
+			continue
+		}
+		requestsToday++
 		if log.Status == "success" {
 			successLogs++
 		}
 	}
 
 	successRate := 0
-	if len(s.state.Logs) > 0 {
-		successRate = int(float64(successLogs) / float64(len(s.state.Logs)) * 100)
+	if requestsToday > 0 {
+		successRate = int(math.Round(float64(successLogs) / float64(requestsToday) * 100))
 	}
 
 	c.JSON(http.StatusOK, gin.H{

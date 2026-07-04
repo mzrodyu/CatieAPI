@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -127,6 +128,42 @@ func TestAdminTokenProtectsManagementRoutes(t *testing.T) {
 	allowed := perform(router, http.MethodGet, "/api/users", "", map[string]string{"Authorization": "Bearer admin-secret"})
 	if allowed.Code != http.StatusOK {
 		t.Fatalf("users with admin token status = %d body = %s", allowed.Code, allowed.Body.String())
+	}
+}
+
+func TestOverviewUsesClientLocalDayForSuccessRate(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	clientLocation := time.FixedZone("test-client", 8*60*60)
+	now := time.Now().In(clientLocation)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, clientLocation)
+	yesterday := today.AddDate(0, 0, -1)
+
+	server.mu.Lock()
+	server.state.Logs = []RequestLog{
+		{ID: "success-1", Status: "success", CreatedAt: today.Add(-time.Hour).UTC().Format(time.RFC3339Nano)},
+		{ID: "success-2", Status: "success", CreatedAt: today.Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)},
+		{ID: "failed-1", Status: "failed", CreatedAt: today.Add(-3 * time.Hour).UTC().Format(time.RFC3339Nano)},
+		{ID: "old-success", Status: "success", CreatedAt: yesterday.UTC().Format(time.RFC3339Nano)},
+	}
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodGet, "/api/overview?timezoneOffset=-480", "", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("overview status = %d body = %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		RequestsToday int `json:"requestsToday"`
+		SuccessRate   int `json:"successRate"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode overview: %v", err)
+	}
+	if result.RequestsToday != 3 {
+		t.Fatalf("requestsToday = %d, want 3", result.RequestsToday)
+	}
+	if result.SuccessRate != 67 {
+		t.Fatalf("successRate = %d, want 67", result.SuccessRate)
 	}
 }
 

@@ -433,8 +433,9 @@ function App() {
   }, [query, users]);
 
   async function loadAll() {
+    const timezoneOffset = new Date().getTimezoneOffset();
     const [overviewData, usersData, channelsData, modelsData, logsData] = await Promise.all([
-      fetchJson<Overview>("/api/overview"),
+      fetchJson<Overview>(`/api/overview?timezoneOffset=${timezoneOffset}`),
       fetchJson<{ users: User[] }>("/api/users"),
       fetchJson<{ channels: Channel[] }>("/api/channels"),
       fetchJson<{ models: ModelItem[] }>("/api/models"),
