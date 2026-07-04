@@ -1677,6 +1677,66 @@ button.table-row:hover {
   gap: 10px;
 }
 
+.balance-adjuster {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+}
+
+.balance-adjuster-title,
+.balance-adjuster-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.balance-adjuster-title {
+  justify-content: space-between;
+}
+
+.balance-adjuster-title span,
+.balance-adjuster-actions span,
+.balance-adjuster-fields label > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.balance-adjuster-fields {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.balance-adjuster-fields label {
+  display: grid;
+  gap: 6px;
+}
+
+.balance-adjuster-fields input {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--surface-solid);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  outline: none;
+}
+
+.balance-adjuster-fields input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent);
+}
+
+.balance-adjuster-actions span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .empty {
   display: grid;
   place-items: center;
@@ -2458,6 +2518,10 @@ button.table-row:hover {
   .bulk-action-bar strong,
   .bulk-action-bar input[aria-label="调整原因"] {
     grid-column: 1 / -1;
+  }
+
+  .balance-adjuster-fields {
+    grid-template-columns: 1fr;
   }
 
   .user-filter-row {

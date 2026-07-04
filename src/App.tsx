@@ -1333,6 +1333,10 @@ function UsersView({
   const [bulkAmount, setBulkAmount] = useState("10");
   const [bulkReason, setBulkReason] = useState("");
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [balanceAmount, setBalanceAmount] = useState("10");
+  const [balanceReason, setBalanceReason] = useState("");
+  const [balanceMessage, setBalanceMessage] = useState("");
+  const [balanceBusy, setBalanceBusy] = useState(false);
   const visibleUsers = statusFilter === "all" ? users : users.filter((user) => user.status === statusFilter);
   const bulkSelectableUsers = visibleUsers.filter((user) => user.role !== "admin");
   const totalPages = Math.max(1, Math.ceil(visibleUsers.length / pageSize));
@@ -1348,6 +1352,12 @@ function UsersView({
     const available = new Set(users.map((user) => user.id));
     setSelectedIds((current) => new Set([...current].filter((id) => available.has(id))));
   }, [users]);
+
+  useEffect(() => {
+    setBalanceAmount("10");
+    setBalanceReason("");
+    setBalanceMessage("");
+  }, [selectedUser?.user.id]);
 
   function toggleUser(id: string) {
     setSelectedIds((current) => {
@@ -1379,6 +1389,29 @@ function UsersView({
       setBulkReason("");
     } finally {
       setBulkBusy(false);
+    }
+  }
+
+  async function adjustSelectedBalance(direction: 1 | -1) {
+    if (!selectedUser) return;
+    const amount = Math.abs(Number(balanceAmount));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setBalanceMessage("请输入大于 0 的金额");
+      return;
+    }
+    setBalanceBusy(true);
+    setBalanceMessage("");
+    try {
+      await onBulkUpdate([selectedUser.user.id], "adjust_balance", {
+        amount: Number((amount * direction).toFixed(4)),
+        reason: balanceReason.trim() || (direction > 0 ? "管理员增加额度" : "管理员扣减额度")
+      });
+      setBalanceMessage(direction > 0 ? "额度已增加" : "额度已扣减");
+      setBalanceReason("");
+    } catch (error) {
+      setBalanceMessage(error instanceof Error ? error.message : "额度调整失败");
+    } finally {
+      setBalanceBusy(false);
     }
   }
 
@@ -1519,10 +1552,43 @@ function UsersView({
               <Setting label="API 调用" value={selectedUser.user.status === "disabled" ? "关闭" : "允许"} switchOn={selectedUser.user.status !== "disabled"} />
             </div>
 
+            <div className="balance-adjuster">
+              <div className="balance-adjuster-title">
+                <strong>调整余额</strong>
+                <span>当前 {selectedUser.user.balance.toFixed(2)}</span>
+              </div>
+              <div className="balance-adjuster-fields">
+                <label>
+                  <span>金额</span>
+                  <input
+                    type="number"
+                    min="0.0001"
+                    step="0.01"
+                    value={balanceAmount}
+                    onChange={(event) => setBalanceAmount(event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>备注</span>
+                  <input
+                    value={balanceReason}
+                    onChange={(event) => setBalanceReason(event.target.value)}
+                    placeholder="可选，会记录到流水"
+                  />
+                </label>
+              </div>
+              <div className="balance-adjuster-actions">
+                <button className="secondary-button" disabled={balanceBusy} onClick={() => adjustSelectedBalance(1)}>
+                  增加
+                </button>
+                <button className="danger-button" disabled={balanceBusy} onClick={() => adjustSelectedBalance(-1)}>
+                  扣减
+                </button>
+                <span role="status">{balanceMessage}</span>
+              </div>
+            </div>
+
             <div className="action-row">
-              <button className="secondary-button" onClick={() => onUpdate(selectedUser.user.id, { balance: Number((selectedUser.user.balance + 10).toFixed(2)) })}>
-                额度 +10
-              </button>
               <button className="secondary-button" onClick={() => onCreateKey(selectedUser.user.id)}>
                 创建 Key
               </button>
