@@ -26,7 +26,7 @@ docs/
     errors.md
   user-guide/
     api-keys.md
-    usage-and-billing.md
+    usage-and-quota.md
     logs.md
   admin-guide/
     users.md
@@ -314,6 +314,6 @@ PR 或提交检查项：
 优先级 P2：
 
 - `docs/api/models.md`
-- `docs/user-guide/usage-and-billing.md`
+- `docs/user-guide/usage-and-quota.md`
 - `docs/admin-guide/models-and-pricing.md`
 - `docs/deployment/production.md`
