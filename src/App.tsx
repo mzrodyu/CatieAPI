@@ -273,6 +273,20 @@ function formatDate(value: string) {
   }).format(date);
 }
 
+function formatFullDate(value: string) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  }).format(date);
+}
+
 function statusLabel(status: string) {
   const labels: Record<string, string> = {
     active: "正常",
@@ -2053,8 +2067,82 @@ function ChannelEditor({
 }
 
 function LogsView({ logs }: { logs: RequestLog[] }) {
+  const [items, setItems] = useState(logs);
+  const [total, setTotal] = useState(logs.length);
+  const [page, setPage] = useState(1);
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState<"all" | "success" | "failed">("all");
+  const [selected, setSelected] = useState<RequestLog | null>(null);
+  const [loading, setLoading] = useState(false);
+  const pageSize = 25;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  useEffect(() => {
+    setPage(1);
+  }, [query, status]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setLoading(true);
+      try {
+        const params = new URLSearchParams({
+          page: String(page),
+          pageSize: String(pageSize),
+          status,
+          q: query.trim()
+        });
+        const data = await fetchJson<{ logs: RequestLog[]; total: number }>(`/api/logs?${params}`, {
+          signal: controller.signal
+        });
+        const nextLogs = arrayOf(data.logs);
+        setItems(nextLogs);
+        setTotal(data.total || 0);
+        setSelected((current) => nextLogs.find((log) => log.id === current?.id) || null);
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          setItems([]);
+          setTotal(0);
+        }
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    }, query ? 250 : 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [page, query, status]);
+
   return (
     <Panel title="调用日志">
+      <div className="logs-toolbar">
+        <div className="search-box">
+          <Icon name="search" />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索请求 ID、用户、Key、模型、渠道或错误码" />
+        </div>
+        <div className="log-status-filter" role="group" aria-label="日志状态筛选">
+          {[
+            { value: "all", label: "全部" },
+            { value: "success", label: "成功" },
+            { value: "failed", label: "失败" }
+          ].map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={status === option.value ? "selected" : ""}
+              onClick={() => setStatus(option.value as typeof status)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <span className="muted-inline">{loading ? "加载中" : `共 ${total} 条`}</span>
+      </div>
       <div className="table">
         <div className="table-head logs-table">
           <span>请求</span>
@@ -2063,20 +2151,64 @@ function LogsView({ logs }: { logs: RequestLog[] }) {
           <span>消耗</span>
           <span>状态</span>
         </div>
-        {logs.map((log) => (
-          <div className="table-row logs-table" key={log.id}>
-            <span>
-              <strong>{log.id}</strong>
-              <small>{formatDate(log.createdAt)} · {log.latencyMs}ms</small>
-            </span>
-            <span>{logModelText(log)}</span>
-            <span>{logChannelText(log)}</span>
-            <span>{log.cost.toFixed(2)}</span>
-            <Badge tone={log.status}>{statusLabel(log.status)}</Badge>
+        {items.map((log) => (
+          <div className="log-entry" key={log.id}>
+            <div
+              className={selected?.id === log.id ? "table-row logs-table selected" : "table-row logs-table"}
+              role="button"
+              tabIndex={0}
+              onClick={() => setSelected((current) => current?.id === log.id ? null : log)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") setSelected((current) => current?.id === log.id ? null : log);
+              }}
+            >
+              <span>
+                <strong>{log.id}</strong>
+                <small>{formatDate(log.createdAt)} · {log.latencyMs}ms</small>
+              </span>
+              <span>{logModelText(log)}</span>
+              <span>{logChannelText(log)}</span>
+              <span>{log.cost.toFixed(4)}</span>
+              <Badge tone={log.status}>{statusLabel(log.status)}</Badge>
+            </div>
+            {selected?.id === log.id && <LogDetail log={log} />}
           </div>
         ))}
+        {!loading && items.length === 0 && <Empty text={query || status !== "all" ? "没有匹配的日志" : "暂无调用日志"} />}
       </div>
+      {totalPages > 1 && (
+        <div className="pagination-bar">
+          <button className="secondary-button" disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button>
+          <span>{page} / {totalPages}</span>
+          <button className="secondary-button" disabled={page >= totalPages || loading} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>下一页</button>
+        </div>
+      )}
     </Panel>
+  );
+}
+
+function LogDetail({ log }: { log: RequestLog }) {
+  const details = [
+    ["请求 ID", log.id],
+    ["状态", statusLabel(log.status)],
+    ["时间", formatFullDate(log.createdAt)],
+    ["用户 ID", log.userId || "未识别"],
+    ["API Key", log.apiKeyPrefix ? `${log.apiKeyPrefix}***` : "未识别"],
+    ["模型", log.model || "未提供"],
+    ["渠道", log.channel || "未选择"],
+    ["响应耗时", `${log.latencyMs} ms`],
+    ["扣费", log.cost.toFixed(4)],
+    ["错误码", log.errorCode || "无"]
+  ];
+  return (
+    <div className="log-detail">
+      {details.map(([label, value]) => (
+        <div key={label}>
+          <span>{label}</span>
+          <strong title={value}>{value}</strong>
+        </div>
+      ))}
+    </div>
   );
 }
 

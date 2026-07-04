@@ -202,6 +202,44 @@ func TestCORSAllowsConfiguredOriginsAndIgnoresPlaceholder(t *testing.T) {
 	}
 }
 
+func TestLogsSupportServerSidePaginationAndFilters(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+
+	firstPage := perform(router, http.MethodGet, "/api/logs?page=1&pageSize=1", "", nil)
+	if firstPage.Code != http.StatusOK {
+		t.Fatalf("logs status = %d body = %s", firstPage.Code, firstPage.Body.String())
+	}
+	var pageResult struct {
+		Logs     []RequestLog `json:"logs"`
+		Total    int          `json:"total"`
+		Page     int          `json:"page"`
+		PageSize int          `json:"pageSize"`
+	}
+	if err := json.Unmarshal(firstPage.Body.Bytes(), &pageResult); err != nil {
+		t.Fatalf("decode logs page: %v", err)
+	}
+	if len(pageResult.Logs) != 1 || pageResult.Total != 2 || pageResult.Page != 1 || pageResult.PageSize != 1 {
+		t.Fatalf("unexpected logs page: %#v", pageResult)
+	}
+
+	failed := perform(router, http.MethodGet, "/api/logs?status=failed&q=timeout", "", nil)
+	if failed.Code != http.StatusOK {
+		t.Fatalf("filtered logs status = %d body = %s", failed.Code, failed.Body.String())
+	}
+	var filtered struct {
+		Logs  []RequestLog `json:"logs"`
+		Total int          `json:"total"`
+	}
+	if err := json.Unmarshal(failed.Body.Bytes(), &filtered); err != nil {
+		t.Fatalf("decode filtered logs: %v", err)
+	}
+	if filtered.Total != 1 || len(filtered.Logs) != 1 || filtered.Logs[0].ErrorCode != "upstream_timeout" {
+		t.Fatalf("unexpected filtered logs: %#v", filtered)
+	}
+}
+
 func TestRegistrationDefaultBalanceAndBulkUserActions(t *testing.T) {
 	withEnv(t, map[string]string{
 		"PERSISTENCE": "memory",

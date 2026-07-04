@@ -2248,11 +2248,47 @@ func (s *Server) listLogs(c *gin.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	logs := append([]RequestLog{}, s.state.Logs...)
+	status := strings.TrimSpace(c.Query("status"))
+	query := strings.ToLower(strings.TrimSpace(c.Query("q")))
+	logs := make([]RequestLog, 0, len(s.state.Logs))
+	for _, log := range s.state.Logs {
+		if status != "" && status != "all" && log.Status != status {
+			continue
+		}
+		searchable := strings.ToLower(strings.Join([]string{
+			log.ID,
+			stringValue(log.UserID),
+			stringValue(log.APIKeyPrefix),
+			stringValue(log.Model),
+			stringValue(log.Channel),
+			log.Status,
+			log.ErrorCode,
+		}, " "))
+		if query != "" && !strings.Contains(searchable, query) {
+			continue
+		}
+		logs = append(logs, log)
+	}
 	sort.Slice(logs, func(i, j int) bool {
 		return logs[i].CreatedAt > logs[j].CreatedAt
 	})
-	c.JSON(http.StatusOK, gin.H{"logs": logs})
+	total := len(logs)
+	page := queryInt(c, "page", 1, 1, 1_000_000)
+	pageSize := queryInt(c, "pageSize", 25, 1, 100)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"logs":     logs[start:end],
+		"total":    total,
+		"page":     page,
+		"pageSize": pageSize,
+	})
 }
 
 func (s *Server) quotaLedger(c *gin.Context) {
@@ -4344,6 +4380,24 @@ func allowedString(value string, allowed ...string) bool {
 		}
 	}
 	return false
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func queryInt(c *gin.Context, name string, fallback int, minimum int, maximum int) int {
+	value, err := strconv.Atoi(c.Query(name))
+	if err != nil || value < minimum {
+		return fallback
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
 }
 
 func nullableString(ok bool, value string) interface{} {
