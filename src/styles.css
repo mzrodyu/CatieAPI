@@ -642,6 +642,17 @@ h3 {
   white-space: nowrap;
 }
 
+.overview-channel-row > div {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.overview-channel-row > .badge {
+  flex: 0 0 auto;
+  min-width: 54px;
+  overflow: visible;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;

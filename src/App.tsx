@@ -322,8 +322,8 @@ function logChannelText(log: RequestLog) {
 function channelModelSummary(models: string[]) {
   const list = arrayOf(models);
   if (list.length === 0) return "未绑定模型";
-  const visible = list.slice(0, 3).join(", ");
-  return list.length > 3 ? `${visible} 等 ${list.length} 个模型` : visible;
+  const visible = list.slice(0, 2).join(", ");
+  return list.length > 2 ? `${visible} · 其余 ${list.length - 2} 个` : visible;
 }
 
 function providerDisplayName(provider: string) {
@@ -1250,7 +1250,7 @@ function OverviewView({
         <Panel title="渠道状态">
           {channels.length ? (
             channels.map((channel) => (
-              <div className="list-row" key={channel.id}>
+              <div className="list-row overview-channel-row" key={channel.id}>
                 <div>
                   <strong>{channel.name}</strong>
                   <span title={arrayOf(channel.models).join(", ")}>{channelModelSummary(channel.models)}</span>
