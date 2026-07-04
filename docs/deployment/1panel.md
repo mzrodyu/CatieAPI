@@ -31,6 +31,19 @@ CORS_ORIGIN=https://your-domain.example
 AUTH_SUCCESS_URL=https://your-domain.example/
 ```
 
+变量说明：
+
+| 变量 | 作用 |
+| --- | --- |
+| `PORT` | CatieAPI 容器内监听端口，默认 `8787`。 |
+| `STATIC_DIR` | 前端静态文件目录，容器镜像内固定用 `/app/dist`。 |
+| `PERSISTENCE` | 持久化方式。生产建议 `postgres`。 |
+| `DATABASE_URL` | Postgres 连接地址。注意容器里不要写 `localhost`，要写 1Panel 提供的数据库主机或服务名。 |
+| `ADMIN_TOKEN` | 管理接口备用令牌。没有 Discord session 时，可用 `Authorization: Bearer <ADMIN_TOKEN>` 访问后台接口。 |
+| `SECRET_KEY` | 用来加密保存渠道上游 Key。上线后不要随意更换。 |
+| `CORS_ORIGIN` | 前端访问域名，例如 `https://api.example.com` 或你的站点域名。 |
+| `AUTH_SUCCESS_URL` | Discord 登录成功后跳转的前端地址。 |
+
 如果使用 Discord 登录：
 
 ```text
@@ -42,6 +55,17 @@ DISCORD_ALLOWED_ROLE_ID=<role_id>
 SESSION_TTL_HOURS=168
 ```
 
+Discord 变量说明：
+
+| 变量 | 作用 |
+| --- | --- |
+| `DISCORD_CLIENT_ID` | Discord Developer Portal 里的 OAuth2 Client ID。 |
+| `DISCORD_CLIENT_SECRET` | Discord OAuth2 Client Secret。不要公开。 |
+| `DISCORD_REDIRECT_URI` | Discord 回调地址，必须和 Developer Portal 中配置的 Redirect 完全一致。 |
+| `DISCORD_ALLOWED_GUILD_ID` | 允许登录的 Discord 服务器 ID。为空则不限制服务器。 |
+| `DISCORD_ALLOWED_ROLE_ID` | 允许登录的身份组 ID。设置它时必须同时设置服务器 ID。 |
+| `SESSION_TTL_HOURS` | 登录 session 有效时间，单位小时。 |
+
 如果接真实上游：
 
 ```text
@@ -49,6 +73,14 @@ PROVIDER_MODE=compatible
 UPSTREAM_API_KEY=<fallback_provider_key>
 UPSTREAM_TIMEOUT_SECONDS=60
 ```
+
+上游变量说明：
+
+| 变量 | 作用 |
+| --- | --- |
+| `PROVIDER_MODE` | 上游模式。`mock` 为本地模拟，`compatible` 为转发到 OpenAI-compatible 上游。 |
+| `UPSTREAM_API_KEY` | 全局兜底上游 Key。更推荐在后台渠道里配置渠道级 Key。 |
+| `UPSTREAM_TIMEOUT_SECONDS` | 请求上游的超时时间，单位秒。 |
 
 渠道级上游 Key 仍建议在后台渠道管理里配置；全局 `UPSTREAM_API_KEY` 只作为兜底。
 
