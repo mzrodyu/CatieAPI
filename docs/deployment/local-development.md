@@ -81,7 +81,7 @@ curl http://localhost:8787/api/users
 
 ```bash
 curl http://localhost:8787/api/users \
-  -H "Authorization: Bearer <admin_token>"
+  -H "Authorization: Bearer 你的管理密钥"
 ```
 
 ### 用户详情
