@@ -1255,6 +1255,36 @@ button.table-row:hover {
   gap: 18px;
 }
 
+.settings-tabs {
+  display: flex;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px;
+  overflow-x: auto;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+}
+
+.settings-tabs button {
+  flex: 0 0 auto;
+  min-width: 84px;
+  height: 34px;
+  padding: 0 14px;
+  color: var(--muted);
+  background: transparent;
+  border-radius: 999px;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.settings-tabs button.selected {
+  color: var(--text);
+  background: var(--surface-solid);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+
 .discord-settings {
   display: grid;
   gap: 18px;

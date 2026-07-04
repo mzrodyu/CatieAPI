@@ -1581,6 +1581,7 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
   const [clientSecret, setClientSecret] = useState("");
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
+  const [settingsTab, setSettingsTab] = useState("system");
   const defaultModel = models.find((model) => model.recommended && model.status === "available")?.id || models.find((model) => model.status === "available")?.id || "未配置";
   const activeChannels = channels.filter((channel) => channel.status !== "disabled").length;
 
@@ -1670,6 +1671,20 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
 
   return (
     <div className="settings-layout">
+      <div className="settings-tabs">
+        {[
+          { value: "system", label: "系统" },
+          { value: "auth", label: "账号注册" },
+          { value: "admin", label: "管理员" },
+          { value: "discord", label: "Discord" }
+        ].map((tab) => (
+          <button key={tab.value} type="button" className={settingsTab === tab.value ? "selected" : ""} onClick={() => setSettingsTab(tab.value)}>
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {settingsTab === "system" && (
       <Panel title="系统设置">
         <div className="settings-group">
           <Setting label="接口兼容" value="OpenAI API" />
@@ -1678,7 +1693,9 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
           <Setting label="可选供应商" value={`${providerOptions.length} 种`} />
         </div>
       </Panel>
+      )}
 
+      {settingsTab === "auth" && (
       <Panel title="账号与注册">
         <div className="settings-group">
           <div className="setting">
@@ -1717,7 +1734,9 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
           </div>
         </div>
       </Panel>
+      )}
 
+      {settingsTab === "admin" && (
       <Panel title="管理员账号">
         <form
           className="discord-settings"
@@ -1776,7 +1795,9 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
           </div>
         </form>
       </Panel>
+      )}
 
+      {settingsTab === "discord" && (
       <Panel title="Discord 登录">
         {!discord ? (
           <div className="empty">正在读取配置</div>
@@ -1883,6 +1904,7 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
           </form>
         )}
       </Panel>
+      )}
     </div>
   );
 }
