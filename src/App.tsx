@@ -81,10 +81,10 @@ type ModelItem = {
 
 type RequestLog = {
   id: string;
-  userId: string;
-  apiKeyPrefix: string;
-  model: string;
-  channel: string;
+  userId: string | null;
+  apiKeyPrefix: string | null;
+  model: string | null;
+  channel: string | null;
   status: "success" | "failed";
   cost: number;
   latencyMs: number;
@@ -279,6 +279,23 @@ function statusLabel(status: string) {
     failed: "失败"
   };
   return labels[status] || status;
+}
+
+function logTitle(log: RequestLog) {
+  if (log.model) return log.model;
+  if (log.errorCode === "invalid_api_key") return "密钥无效";
+  if (log.errorCode === "model_not_available") return "模型不可用";
+  if (log.errorCode === "insufficient_quota") return "额度不足";
+  if (log.errorCode === "rate_limit_exceeded") return "请求过快";
+  return log.errorCode || "请求失败";
+}
+
+function logModelText(log: RequestLog) {
+  return log.model || (log.errorCode ? `错误：${log.errorCode}` : "-");
+}
+
+function logChannelText(log: RequestLog) {
+  return log.channel || (log.apiKeyPrefix ? `Key ${log.apiKeyPrefix}` : "-");
 }
 
 async function copyText(value: string) {
@@ -662,7 +679,7 @@ function App() {
             }}
           />
         )}
-        {active === "keys" && <KeysView selectedUser={selectedUser} onCopy={copyAndToast} onCreateKey={createAPIKeyForUser} />}
+        {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} />}
         {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} />}
         {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onSyncModels={syncChannelModels} />}
         {active === "logs" && <LogsView logs={logs} />}
@@ -1140,8 +1157,8 @@ function OverviewView({
             logs.slice(0, 4).map((log) => (
               <div className="list-row" key={log.id}>
                 <div>
-                  <strong>{log.model || "未知模型"}</strong>
-                  <span>{log.id} · {formatDate(log.createdAt)}</span>
+                  <strong>{logTitle(log)}</strong>
+                  <span>{log.id} · {log.errorCode || formatDate(log.createdAt)}</span>
                 </div>
                 <Badge tone={log.status}>{statusLabel(log.status)}</Badge>
               </div>
@@ -1453,11 +1470,9 @@ function UsersView({
 
 function KeysView({
   selectedUser,
-  onCopy,
   onCreateKey
 }: {
   selectedUser: UserDetail | null;
-  onCopy: (value: string, label?: string) => void;
   onCreateKey: (id: string) => void;
 }) {
   return (
@@ -1465,7 +1480,7 @@ function KeysView({
       {selectedUser ? (
         <>
           <div className="panel-toolbar">
-            <span className="muted-inline">{selectedUser.user.name}</span>
+            <span className="muted-inline">{selectedUser.user.name} · 完整 Key 只在创建时显示，丢失请重新创建</span>
             <button className="primary-button" onClick={() => onCreateKey(selectedUser.user.id)}>
               创建 Key
             </button>
@@ -1475,11 +1490,9 @@ function KeysView({
               <div className="list-row" key={key.id}>
                 <div>
                   <strong>{key.name}</strong>
-                  <span>{key.prefix}*** · 最后使用 {formatDate(key.lastUsedAt)}</span>
+                  <span>{key.prefix}*** · 仅用于识别，不是完整密钥 · 最后使用 {formatDate(key.lastUsedAt)}</span>
                 </div>
-                <button className="icon-button" title="复制前缀" onClick={() => onCopy(key.prefix, "Key 前缀已复制")}>
-                  <Icon name="copy" />
-                </button>
+                <Badge tone={key.status}>{statusLabel(key.status)}</Badge>
               </div>
             ))
           ) : (
@@ -1755,8 +1768,8 @@ function LogsView({ logs }: { logs: RequestLog[] }) {
               <strong>{log.id}</strong>
               <small>{formatDate(log.createdAt)} · {log.latencyMs}ms</small>
             </span>
-            <span>{log.model}</span>
-            <span>{log.channel}</span>
+            <span>{logModelText(log)}</span>
+            <span>{logChannelText(log)}</span>
             <span>{log.cost.toFixed(2)}</span>
             <Badge tone={log.status}>{statusLabel(log.status)}</Badge>
           </div>

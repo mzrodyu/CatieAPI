@@ -2218,22 +2218,22 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 
 	auth := s.findUserByAPIKeyLocked(apiTokenFromRequest(c))
 	if auth == nil {
-		s.openAIErrorLocked(c, http.StatusUnauthorized, "invalid_api_key", "Invalid CatieAPI key", "invalid_request_error", nil)
+		s.openAIErrorForCallLocked(c, http.StatusUnauthorized, "invalid_api_key", "Invalid CatieAPI key", "invalid_request_error", nil, "", "", body.Model, "")
 		s.mu.Unlock()
 		return
 	}
 	if auth.User.Status == "limited" {
-		s.openAIErrorLocked(c, http.StatusPaymentRequired, "insufficient_quota", "Insufficient quota", "billing_error", nil)
+		s.openAIErrorForCallLocked(c, http.StatusPaymentRequired, "insufficient_quota", "Insufficient quota", "billing_error", nil, auth.User.ID, auth.Key.Prefix, body.Model, "")
 		s.mu.Unlock()
 		return
 	}
 	if !s.checkRateLimitLocked(auth.Key) {
-		s.openAIErrorLocked(c, http.StatusTooManyRequests, "rate_limit_exceeded", "Rate limit exceeded", "rate_limit_error", nil)
+		s.openAIErrorForCallLocked(c, http.StatusTooManyRequests, "rate_limit_exceeded", "Rate limit exceeded", "rate_limit_error", nil, auth.User.ID, auth.Key.Prefix, body.Model, "")
 		s.mu.Unlock()
 		return
 	}
 	if body.Messages == nil {
-		s.openAIErrorLocked(c, http.StatusBadRequest, "invalid_messages", "messages must be an array", "invalid_request_error", stringPtr("messages"))
+		s.openAIErrorForCallLocked(c, http.StatusBadRequest, "invalid_messages", "messages must be an array", "invalid_request_error", stringPtr("messages"), auth.User.ID, auth.Key.Prefix, body.Model, "")
 		s.mu.Unlock()
 		return
 	}
@@ -2244,19 +2244,19 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 		if name == "" {
 			name = "<model>"
 		}
-		s.openAIErrorLocked(c, http.StatusBadRequest, "model_not_available", "No available model: "+name, "invalid_request_error", stringPtr("model"))
+		s.openAIErrorForCallLocked(c, http.StatusBadRequest, "model_not_available", "No available model: "+name, "invalid_request_error", stringPtr("model"), auth.User.ID, auth.Key.Prefix, body.Model, "")
 		s.mu.Unlock()
 		return
 	}
 	if model.PricingConfigured && auth.User.Balance <= 0 {
-		s.openAIErrorLocked(c, http.StatusPaymentRequired, "insufficient_quota", "Insufficient quota", "billing_error", nil)
+		s.openAIErrorForCallLocked(c, http.StatusPaymentRequired, "insufficient_quota", "Insufficient quota", "billing_error", nil, auth.User.ID, auth.Key.Prefix, model.ID, "")
 		s.mu.Unlock()
 		return
 	}
 
 	channel := s.primaryChannelLocked(model.ID)
 	if channel == nil {
-		s.openAIErrorLocked(c, http.StatusBadRequest, "model_not_available", "No available channel for model: "+model.ID, "invalid_request_error", stringPtr("model"))
+		s.openAIErrorForCallLocked(c, http.StatusBadRequest, "model_not_available", "No available channel for model: "+model.ID, "invalid_request_error", stringPtr("model"), auth.User.ID, auth.Key.Prefix, model.ID, "")
 		s.mu.Unlock()
 		return
 	}
@@ -2621,6 +2621,41 @@ func (s *Server) openAIErrorLocked(c *gin.Context, status int, code string, mess
 		ErrorCode: code,
 		CreatedAt: now(),
 	})
+	s.saveStateLocked()
+
+	c.JSON(status, gin.H{
+		"error": gin.H{
+			"message": message,
+			"type":    errorType,
+			"param":   param,
+			"code":    code,
+		},
+	})
+}
+
+func (s *Server) openAIErrorForCallLocked(c *gin.Context, status int, code string, message string, errorType string, param *string, userID string, keyPrefix string, modelID string, channelName string) {
+	requestID := requestIDFromContext(c)
+	log := RequestLog{
+		ID:        requestID,
+		Status:    "failed",
+		Cost:      0,
+		LatencyMS: 0,
+		ErrorCode: code,
+		CreatedAt: now(),
+	}
+	if userID != "" {
+		log.UserID = &userID
+	}
+	if keyPrefix != "" {
+		log.APIKeyPrefix = &keyPrefix
+	}
+	if modelID != "" {
+		log.Model = &modelID
+	}
+	if channelName != "" {
+		log.Channel = &channelName
+	}
+	s.state.Logs = append(s.state.Logs, log)
 	s.saveStateLocked()
 
 	c.JSON(status, gin.H{

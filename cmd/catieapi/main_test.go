@@ -539,6 +539,27 @@ func TestXAPIKeyHeaderIsAccepted(t *testing.T) {
 	}
 }
 
+func TestInvalidAPIKeyLogKeepsRequestedModel(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+
+	body := `{"model":"gcli-gemini-2.5-pro","messages":[{"role":"user","content":"hello"}]}`
+	response := perform(router, http.MethodPost, "/v1/chat/completions", body, map[string]string{"Authorization": "Bearer cat_wrong"})
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid key status = %d body = %s", response.Code, response.Body.String())
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	last := server.state.Logs[len(server.state.Logs)-1]
+	if last.ErrorCode != "invalid_api_key" {
+		t.Fatalf("invalid key log error = %#v", last)
+	}
+	if last.Model == nil || *last.Model != "gcli-gemini-2.5-pro" {
+		t.Fatalf("invalid key log did not keep requested model: %#v", last)
+	}
+}
+
 func TestLegacyCompletionsEndpointUsesChatFlow(t *testing.T) {
 	var upstreamPayload map[string]interface{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
