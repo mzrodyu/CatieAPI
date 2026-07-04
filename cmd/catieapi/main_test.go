@@ -581,6 +581,61 @@ func TestLegacyCompletionsEndpointUsesChatFlow(t *testing.T) {
 	}
 }
 
+func TestResponsesEndpointUsesChatFlow(t *testing.T) {
+	var upstreamPayload map[string]interface{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamPayload); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_response","object":"chat.completion","model":"deepseek-v4","choices":[{"index":0,"message":{"role":"assistant","content":"response ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "compatible",
+		"UPSTREAM_API_KEY": "upstream-secret",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.findChannel("chn_1002").BaseURL = upstream.URL + "/v1"
+	server.mu.Unlock()
+
+	body := `{"model":"ds","instructions":"be concise","input":"hello"}`
+	response := perform(router, http.MethodPost, "/v1/responses", body, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("responses status = %d body = %s", response.Code, response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"object":"response"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"output_text":"response ok"`)) {
+		t.Fatalf("responses body was not response-shaped: %s", response.Body.String())
+	}
+	messages, ok := upstreamPayload["messages"].([]interface{})
+	if !ok || len(messages) != 2 {
+		t.Fatalf("responses input was not converted to system/user messages: %#v", upstreamPayload["messages"])
+	}
+	if upstreamPayload["input"] != nil || upstreamPayload["instructions"] != nil {
+		t.Fatalf("responses-only fields leaked to chat upstream: %#v", upstreamPayload)
+	}
+}
+
+func TestEmbeddingsEndpointReturnsClearUnsupportedError(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	_, router := testServerRouter(t)
+
+	response := perform(router, http.MethodPost, "/v1/embeddings", `{"model":"embedding","input":"hello"}`, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if response.Code != http.StatusNotImplemented {
+		t.Fatalf("embeddings status = %d body = %s", response.Code, response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`unsupported_endpoint`)) {
+		t.Fatalf("embeddings error was not clear: %s", response.Body.String())
+	}
+}
+
 func TestUnpricedModelAllowsZeroBalance(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)

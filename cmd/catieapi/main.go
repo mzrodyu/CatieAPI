@@ -417,10 +417,14 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	router.GET("/v1/models/:id", s.openAIModel)
 	router.POST("/v1/chat/completions", s.chatCompletions)
 	router.POST("/v1/completions", s.completions)
+	router.POST("/v1/responses", s.responses)
+	router.POST("/v1/embeddings", s.embeddings)
 	router.GET("/models", s.openAIModels)
 	router.GET("/models/:id", s.openAIModel)
 	router.POST("/chat/completions", s.chatCompletions)
 	router.POST("/completions", s.completions)
+	router.POST("/responses", s.responses)
+	router.POST("/embeddings", s.embeddings)
 
 	router.NoRoute(func(c *gin.Context) {
 		if s.serveStatic(c) {
@@ -2145,6 +2149,42 @@ func (s *Server) completions(c *gin.Context) {
 	s.handleChatCompletion(c, body, startedAt, idempotencyKey)
 }
 
+func (s *Server) responses(c *gin.Context) {
+	startedAt := time.Now()
+	idempotencyKey := c.GetHeader("Idempotency-Key")
+
+	var payload map[string]interface{}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		s.openAIError(c, http.StatusBadRequest, "invalid_json", "Invalid JSON body: "+err.Error(), "invalid_request_error", nil)
+		return
+	}
+
+	model, _ := payload["model"].(string)
+	stream, _ := payload["stream"].(bool)
+	if stream {
+		s.openAIError(c, http.StatusNotImplemented, "unsupported_stream", "Responses streaming is not enabled yet. Use /v1/chat/completions for streaming calls.", "invalid_request_error", stringPtr("stream"))
+		return
+	}
+	messages := responseInputMessages(payload)
+	if len(messages) == 0 {
+		s.openAIError(c, http.StatusBadRequest, "invalid_input", "input is required", "invalid_request_error", stringPtr("input"))
+		return
+	}
+	delete(payload, "input")
+	delete(payload, "instructions")
+	body := ChatRequest{
+		Model:    model,
+		Stream:   stream,
+		Messages: messages,
+		Payload:  payload,
+	}
+	s.handleChatCompletionWithTransform(c, body, startedAt, idempotencyKey, responseFromChatCompletion)
+}
+
+func (s *Server) embeddings(c *gin.Context) {
+	s.openAIError(c, http.StatusNotImplemented, "unsupported_endpoint", "Embeddings are not enabled yet. Configure a text-embedding model before exposing this endpoint.", "invalid_request_error", nil)
+}
+
 func (s *Server) chatCompletions(c *gin.Context) {
 	startedAt := time.Now()
 	idempotencyKey := c.GetHeader("Idempotency-Key")
@@ -2170,6 +2210,10 @@ func (s *Server) chatCompletions(c *gin.Context) {
 }
 
 func (s *Server) handleChatCompletion(c *gin.Context, body ChatRequest, startedAt time.Time, idempotencyKey string) {
+	s.handleChatCompletionWithTransform(c, body, startedAt, idempotencyKey, nil)
+}
+
+func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequest, startedAt time.Time, idempotencyKey string, transform func(gin.H, Model) gin.H) {
 	s.mu.Lock()
 
 	auth := s.findUserByAPIKeyLocked(apiTokenFromRequest(c))
@@ -2246,13 +2290,17 @@ func (s *Server) handleChatCompletion(c *gin.Context, body ChatRequest, startedA
 	}
 
 	cost := calculateCallCost(modelCopy, responseBody, body.Messages, false)
+	outputBody := interface{}(responseBody)
+	if transform != nil {
+		outputBody = transform(responseBody, modelCopy)
+	}
 	s.mu.Lock()
 	s.recordSuccessfulCallLocked(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, channelCopy.Name, requestID, cost, startedAt)
 	if idempotencyKey != "" {
-		s.idempotencyCache[idempotencyKey] = CachedResponse{Status: http.StatusOK, Body: responseBody, CreatedAt: now()}
+		s.idempotencyCache[idempotencyKey] = CachedResponse{Status: http.StatusOK, Body: outputBody, CreatedAt: now()}
 	}
 	s.mu.Unlock()
-	c.JSON(http.StatusOK, responseBody)
+	c.JSON(http.StatusOK, outputBody)
 }
 
 func (s *Server) recordSuccessfulCall(userID string, keyID string, keyPrefix string, modelID string, channelName string, requestID string, cost float64, startedAt time.Time) {
@@ -3881,6 +3929,107 @@ func completionPrompt(value interface{}) string {
 		encoded, _ := json.Marshal(prompt)
 		return string(encoded)
 	}
+}
+
+func responseInputMessages(payload map[string]interface{}) []ChatMessage {
+	messages := []ChatMessage{}
+	if instructions := completionPrompt(payload["instructions"]); strings.TrimSpace(instructions) != "" {
+		messages = append(messages, ChatMessage{Role: "system", Content: instructions})
+	}
+	input, ok := payload["input"]
+	if !ok {
+		if rawMessages, exists := payload["messages"]; exists {
+			input = rawMessages
+		}
+	}
+	switch value := input.(type) {
+	case string:
+		if strings.TrimSpace(value) != "" {
+			messages = append(messages, ChatMessage{Role: "user", Content: value})
+		}
+	case []interface{}:
+		for _, item := range value {
+			if message, ok := responseInputMessage(item); ok {
+				messages = append(messages, message)
+			}
+		}
+	default:
+		if text := completionPrompt(value); strings.TrimSpace(text) != "" {
+			messages = append(messages, ChatMessage{Role: "user", Content: text})
+		}
+	}
+	return messages
+}
+
+func responseInputMessage(value interface{}) (ChatMessage, bool) {
+	item, ok := value.(map[string]interface{})
+	if !ok {
+		text := completionPrompt(value)
+		return ChatMessage{Role: "user", Content: text}, strings.TrimSpace(text) != ""
+	}
+	role, _ := item["role"].(string)
+	if role == "" {
+		role = "user"
+	}
+	content, exists := item["content"]
+	if !exists {
+		content = item["input_text"]
+	}
+	if content == nil {
+		return ChatMessage{}, false
+	}
+	return ChatMessage{Role: role, Content: content}, true
+}
+
+func responseFromChatCompletion(chat gin.H, model Model) gin.H {
+	text := assistantTextFromChatCompletion(chat)
+	id, _ := chat["id"].(string)
+	if id == "" {
+		id = newID("resp")
+	}
+	usage := chat["usage"]
+	return gin.H{
+		"id":                  id,
+		"object":              "response",
+		"created_at":          unixNow(),
+		"model":               model.ID,
+		"status":              "completed",
+		"output_text":         text,
+		"parallel_tool_calls": true,
+		"output": []gin.H{
+			{
+				"id":      newID("msg"),
+				"type":    "message",
+				"status":  "completed",
+				"role":    "assistant",
+				"content": []gin.H{{"type": "output_text", "text": text}},
+			},
+		},
+		"usage": usage,
+	}
+}
+
+func assistantTextFromChatCompletion(chat gin.H) string {
+	choices, ok := chat["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		if typedChoices, ok := chat["choices"].([]gin.H); ok && len(typedChoices) > 0 {
+			return assistantTextFromChoice(typedChoices[0])
+		}
+		return ""
+	}
+	choice, ok := choices[0].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	return assistantTextFromChoice(choice)
+}
+
+func assistantTextFromChoice(choice map[string]interface{}) string {
+	message, ok := choice["message"].(map[string]interface{})
+	if !ok {
+		return completionPrompt(choice["text"])
+	}
+	return completionPrompt(message["content"])
 }
 
 func joinURL(base string, path string) string {
