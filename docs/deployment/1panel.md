@@ -6,6 +6,12 @@ CatieAPI 推荐在 1Panel 的容器或运行环境里配置环境变量，不需
 
 镜像会同时包含 Go API 和前端 `dist`，一个端口即可运行完整应用。
 
+镜像：
+
+```text
+ghcr.io/mzrodyu/catieapi:latest
+```
+
 端口：
 
 ```text
@@ -45,6 +51,17 @@ UPSTREAM_TIMEOUT_SECONDS=60
 ```
 
 渠道级上游 Key 仍建议在后台渠道管理里配置；全局 `UPSTREAM_API_KEY` 只作为兜底。
+
+## GHCR 镜像
+
+推送到 `main` 后，GitHub Actions 会自动构建并发布镜像：
+
+```text
+ghcr.io/mzrodyu/catieapi:latest
+ghcr.io/mzrodyu/catieapi:sha-<commit>
+```
+
+如果 1Panel 拉取失败，检查 GitHub 仓库的 Package 可见性。公开项目建议把 package 设置为 Public，这样 1Panel 不需要额外登录 GHCR。
 
 ## 反向代理
 
