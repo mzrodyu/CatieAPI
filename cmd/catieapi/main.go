@@ -42,8 +42,16 @@ type AppState struct {
 }
 
 type AppSettings struct {
-	Discord DiscordSettings `json:"discord,omitempty"`
-	Auth    AuthSettings    `json:"auth,omitempty"`
+	Discord     DiscordSettings     `json:"discord,omitempty"`
+	Auth        AuthSettings        `json:"auth,omitempty"`
+	Maintenance MaintenanceSettings `json:"maintenance,omitempty"`
+}
+
+type MaintenanceSettings struct {
+	Managed          bool `json:"managed,omitempty"`
+	LogRetentionDays int  `json:"logRetentionDays"`
+	MaxLogs          int  `json:"maxLogs"`
+	MaxQuotaEntries  int  `json:"maxQuotaEntries"`
 }
 
 type AuthSettings struct {
@@ -377,6 +385,11 @@ func NewServer() *Server {
 	}
 	s.initStorage()
 	s.loadState()
+	s.mu.Lock()
+	if s.pruneOperationalHistoryLocked() {
+		s.saveStateLocked()
+	}
+	s.mu.Unlock()
 	s.applyPersistedDiscordSettings()
 	return s
 }
@@ -426,6 +439,8 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.PATCH("/settings/discord", s.updateDiscordSettings)
 	admin.GET("/settings/auth", s.getAuthSettings)
 	admin.PATCH("/settings/auth", s.updateAuthSettings)
+	admin.GET("/settings/maintenance", s.getMaintenanceSettings)
+	admin.PATCH("/settings/maintenance", s.updateMaintenanceSettings)
 
 	router.GET("/v1/models", s.openAIModels)
 	router.GET("/v1/models/:id", s.openAIModel)
@@ -894,6 +909,40 @@ func (s *Server) updateAuthSettings(c *gin.Context) {
 		"registrationMode":    registrationMode,
 		"defaultBalance":      defaultBalance,
 	}})
+}
+
+func (s *Server) getMaintenanceSettings(c *gin.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c.JSON(http.StatusOK, gin.H{"maintenance": s.maintenanceSettingsLocked()})
+}
+
+func (s *Server) updateMaintenanceSettings(c *gin.Context) {
+	var body MaintenanceSettings
+	if err := c.ShouldBindJSON(&body); err != nil {
+		validationError(c, "无效的维护设置")
+		return
+	}
+	if body.LogRetentionDays < 1 || body.LogRetentionDays > 3650 {
+		validationError(c, "日志保留天数必须在 1 到 3650 之间")
+		return
+	}
+	if body.MaxLogs < 100 || body.MaxLogs > 1_000_000 {
+		validationError(c, "日志最大条数必须在 100 到 1000000 之间")
+		return
+	}
+	if body.MaxQuotaEntries < 100 || body.MaxQuotaEntries > 2_000_000 {
+		validationError(c, "额度流水最大条数必须在 100 到 2000000 之间")
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	body.Managed = true
+	s.state.Settings.Maintenance = body
+	s.pruneOperationalHistoryLocked()
+	s.saveStateLocked()
+	c.JSON(http.StatusOK, gin.H{"maintenance": s.maintenanceSettingsLocked()})
 }
 
 func (s *Server) getDiscordSettings(c *gin.Context) {
@@ -2428,15 +2477,15 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 		s.mu.Unlock()
 		return
 	}
-	channel := s.primaryChannelLocked(model.ID)
-	if channel == nil {
+	channels := s.channelCandidatesLocked(model.ID)
+	if len(channels) == 0 {
 		s.openAIErrorForCallLocked(c, http.StatusBadRequest, "model_not_available", "No available channel for model: "+model.ID, "invalid_request_error", stringPtr("model"), auth.User.ID, auth.Key.Prefix, model.ID, "")
 		s.mu.Unlock()
 		return
 	}
-	billingModel := modelWithChannelPricing(*model, *channel)
+	billingModel := modelWithChannelPricing(*model, channels[0])
 	if billingModel.PricingConfigured && auth.User.Balance <= 0 {
-		s.openAIErrorForCallLocked(c, http.StatusPaymentRequired, "insufficient_quota", "Insufficient quota", "billing_error", nil, auth.User.ID, auth.Key.Prefix, model.ID, channel.Name)
+		s.openAIErrorForCallLocked(c, http.StatusPaymentRequired, "insufficient_quota", "Insufficient quota", "billing_error", nil, auth.User.ID, auth.Key.Prefix, model.ID, channels[0].Name)
 		s.mu.Unlock()
 		return
 	}
@@ -2445,37 +2494,68 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 	authKeyID := auth.Key.ID
 	authKeyPrefix := auth.Key.Prefix
 	modelCopy := *model
-	channelCopy := *channel
 	requestID := newID("req")
 	s.mu.Unlock()
 
-	call := GatewayCall{RequestID: requestID, Model: modelCopy, Channel: channelCopy, Body: body}
-
 	if body.Stream {
-		if providerErr := s.writeProviderStream(c, call); providerErr != nil {
-			s.recordFailedCall(authUserID, authKeyPrefix, modelCopy.ID, channelCopy.Name, requestID, providerErr.Code, startedAt)
+		var selectedChannel Channel
+		var providerErr *ProviderError
+		for index, channel := range channels {
+			selectedChannel = channel
+			call := GatewayCall{RequestID: requestID, Model: modelCopy, Channel: channel, Body: body}
+			providerErr = s.writeProviderStream(c, call)
+			if providerErr == nil {
+				selectedChannel = channel
+				s.updateChannelRuntimeHealth(channel.ID, true, "")
+				break
+			}
+			s.updateChannelRuntimeHealth(channel.ID, false, providerErr.Message)
+			if !retryableProviderError(providerErr) || index == len(channels)-1 {
+				break
+			}
+		}
+		if providerErr != nil {
+			s.recordFailedCall(authUserID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, providerErr.Code, startedAt)
 			writeOpenAIError(c, providerErr.Status, providerErr.Code, providerErr.Message, providerErr.Type, stringPtr("model"))
 			return
 		}
+		billingModel = modelWithChannelPricing(modelCopy, selectedChannel)
 		streamCost := calculateCallCost(billingModel, nil, body.Messages, true)
-		s.recordSuccessfulCall(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, channelCopy.Name, requestID, streamCost, startedAt)
+		s.recordSuccessfulCall(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, streamCost, startedAt)
 		return
 	}
 
-	responseBody, providerErr := s.callProvider(call)
+	var responseBody gin.H
+	var providerErr *ProviderError
+	var selectedChannel Channel
+	for index, channel := range channels {
+		call := GatewayCall{RequestID: requestID, Model: modelCopy, Channel: channel, Body: body}
+		responseBody, providerErr = s.callProvider(call)
+		if providerErr == nil {
+			selectedChannel = channel
+			s.updateChannelRuntimeHealth(channel.ID, true, "")
+			break
+		}
+		selectedChannel = channel
+		s.updateChannelRuntimeHealth(channel.ID, false, providerErr.Message)
+		if !retryableProviderError(providerErr) || index == len(channels)-1 {
+			break
+		}
+	}
 	if providerErr != nil {
-		s.recordFailedCall(authUserID, authKeyPrefix, modelCopy.ID, channelCopy.Name, requestID, providerErr.Code, startedAt)
+		s.recordFailedCall(authUserID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, providerErr.Code, startedAt)
 		writeOpenAIError(c, providerErr.Status, providerErr.Code, providerErr.Message, providerErr.Type, stringPtr("model"))
 		return
 	}
 
+	billingModel = modelWithChannelPricing(modelCopy, selectedChannel)
 	cost := calculateCallCost(billingModel, responseBody, body.Messages, false)
 	outputBody := interface{}(responseBody)
 	if transform != nil {
 		outputBody = transform(responseBody, modelCopy)
 	}
 	s.mu.Lock()
-	s.recordSuccessfulCallLocked(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, channelCopy.Name, requestID, cost, startedAt)
+	s.recordSuccessfulCallLocked(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, cost, startedAt)
 	if idempotencyKey != "" {
 		s.idempotencyCache[idempotencyKey] = CachedResponse{Status: http.StatusOK, Body: outputBody, CreatedAt: now()}
 	}
@@ -3486,8 +3566,8 @@ func (s *Server) resolveModelLocked(input string) *Model {
 	return nil
 }
 
-func (s *Server) primaryChannelLocked(modelID string) *Channel {
-	var candidates []*Channel
+func (s *Server) channelCandidatesLocked(modelID string) []Channel {
+	candidates := []Channel{}
 	for i := range s.state.Channels {
 		channel := &s.state.Channels[i]
 		if channel.Status == "disabled" {
@@ -3495,18 +3575,59 @@ func (s *Server) primaryChannelLocked(modelID string) *Channel {
 		}
 		for _, id := range channel.Models {
 			if id == modelID {
-				candidates = append(candidates, channel)
+				candidates = append(candidates, *channel)
 				break
 			}
 		}
 	}
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].Priority < candidates[j].Priority
+		iHealthy := candidates[i].Status == "healthy"
+		jHealthy := candidates[j].Status == "healthy"
+		if iHealthy != jHealthy {
+			return iHealthy
+		}
+		if candidates[i].Priority != candidates[j].Priority {
+			return candidates[i].Priority < candidates[j].Priority
+		}
+		if candidates[i].Weight != candidates[j].Weight {
+			return candidates[i].Weight > candidates[j].Weight
+		}
+		return candidates[i].ID < candidates[j].ID
 	})
-	if len(candidates) == 0 {
-		return nil
+	return candidates
+}
+
+func (s *Server) updateChannelRuntimeHealth(channelID string, healthy bool, message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	channel := s.findChannel(channelID)
+	if channel == nil {
+		return
 	}
-	return candidates[0]
+	channel.LastCheckedAt = now()
+	if healthy {
+		channel.Status = "healthy"
+		channel.LastError = ""
+	} else {
+		channel.Status = "standby"
+		channel.LastError = truncateString(strings.TrimSpace(message), 500)
+	}
+	s.saveStateLocked()
+}
+
+func retryableProviderError(providerErr *ProviderError) bool {
+	if providerErr == nil {
+		return false
+	}
+	if providerErr.Status == http.StatusTooManyRequests || providerErr.Status >= http.StatusInternalServerError {
+		return true
+	}
+	return allowedString(providerErr.Code,
+		"upstream_unreachable",
+		"upstream_read_error",
+		"upstream_invalid_json",
+		"upstream_timeout",
+	)
 }
 
 func (s *Server) checkRateLimitLocked(key *APIKey) bool {
@@ -3779,6 +3900,7 @@ func (s *Server) normalizeStateCollections() bool {
 }
 
 func (s *Server) saveStateLocked() {
+	s.pruneOperationalHistoryLocked()
 	if s.persistence == "postgres" {
 		s.savePostgresStateLocked()
 		return
@@ -3794,6 +3916,52 @@ func (s *Server) saveStateLocked() {
 		return
 	}
 	_ = os.WriteFile(s.dataFile, append(content, '\n'), 0644)
+}
+
+func (s *Server) maintenanceSettingsLocked() MaintenanceSettings {
+	settings := s.state.Settings.Maintenance
+	if settings.LogRetentionDays <= 0 {
+		settings.LogRetentionDays = 30
+	}
+	if settings.MaxLogs <= 0 {
+		settings.MaxLogs = 10_000
+	}
+	if settings.MaxQuotaEntries <= 0 {
+		settings.MaxQuotaEntries = 20_000
+	}
+	return settings
+}
+
+func (s *Server) pruneOperationalHistoryLocked() bool {
+	settings := s.maintenanceSettingsLocked()
+	changed := false
+	cutoff := time.Now().AddDate(0, 0, -settings.LogRetentionDays)
+	logs := make([]RequestLog, 0, len(s.state.Logs))
+	for _, log := range s.state.Logs {
+		createdAt, err := time.Parse(time.RFC3339Nano, log.CreatedAt)
+		if err == nil && createdAt.Before(cutoff) {
+			changed = true
+			continue
+		}
+		logs = append(logs, log)
+	}
+	sort.SliceStable(logs, func(i, j int) bool {
+		return logs[i].CreatedAt < logs[j].CreatedAt
+	})
+	if len(logs) > settings.MaxLogs {
+		logs = append([]RequestLog{}, logs[len(logs)-settings.MaxLogs:]...)
+		changed = true
+	}
+	if len(logs) != len(s.state.Logs) {
+		changed = true
+	}
+	s.state.Logs = logs
+
+	if len(s.state.QuotaLedger) > settings.MaxQuotaEntries {
+		s.state.QuotaLedger = append([]QuotaEntry{}, s.state.QuotaLedger[len(s.state.QuotaLedger)-settings.MaxQuotaEntries:]...)
+		changed = true
+	}
+	return changed
 }
 
 func (s *Server) initStorage() {
@@ -4387,6 +4555,13 @@ func stringValue(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+func truncateString(value string, maximum int) string {
+	if maximum <= 0 || len(value) <= maximum {
+		return value
+	}
+	return value[:maximum]
 }
 
 func queryInt(c *gin.Context, name string, fallback int, minimum int, maximum int) int {

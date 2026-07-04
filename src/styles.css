@@ -1736,6 +1736,37 @@ button.table-row:hover {
   width: 130px;
 }
 
+.maintenance-control input {
+  width: 150px;
+  height: 38px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  outline: none;
+}
+
+.maintenance-control input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent);
+}
+
+.settings-save-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
+}
+
+.settings-save-row span {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .ios-switch {
   position: relative;
   flex: 0 0 auto;

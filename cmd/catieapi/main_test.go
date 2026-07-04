@@ -240,6 +240,48 @@ func TestLogsSupportServerSidePaginationAndFilters(t *testing.T) {
 	}
 }
 
+func TestMaintenanceSettingsPruneOperationalHistory(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	nowValue := time.Now().UTC()
+
+	server.mu.Lock()
+	server.state.Logs = []RequestLog{{ID: "expired", Status: "failed", CreatedAt: nowValue.AddDate(0, 0, -30).Format(time.RFC3339Nano)}}
+	for index := 0; index < 101; index++ {
+		server.state.Logs = append(server.state.Logs, RequestLog{
+			ID:        fmt.Sprintf("recent-%03d", index),
+			Status:    "success",
+			CreatedAt: nowValue.Add(time.Duration(index) * time.Second).Format(time.RFC3339Nano),
+		})
+		server.state.QuotaLedger = append(server.state.QuotaLedger, QuotaEntry{
+			ID:        fmt.Sprintf("quota-%03d", index),
+			Amount:    -0.01,
+			CreatedAt: nowValue.Add(time.Duration(index) * time.Second).Format(time.RFC3339Nano),
+		})
+	}
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPatch, "/api/settings/maintenance", `{
+		"logRetentionDays":7,
+		"maxLogs":100,
+		"maxQuotaEntries":100
+	}`, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("maintenance status = %d body = %s", response.Code, response.Body.String())
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if len(server.state.Logs) != 100 || len(server.state.QuotaLedger) != 100 {
+		t.Fatalf("retained logs=%d quota=%d", len(server.state.Logs), len(server.state.QuotaLedger))
+	}
+	for _, log := range server.state.Logs {
+		if log.ID == "expired" || log.ID == "recent-000" {
+			t.Fatalf("old log was retained: %s", log.ID)
+		}
+	}
+}
+
 func TestRegistrationDefaultBalanceAndBulkUserActions(t *testing.T) {
 	withEnv(t, map[string]string{
 		"PERSISTENCE": "memory",
@@ -967,6 +1009,59 @@ func TestOpenAICompatibleProviderForwardsRequest(t *testing.T) {
 	}
 	if !bytes.Contains(ledger.Body.Bytes(), []byte(`"amount":-3`)) {
 		t.Fatalf("channel usage price was not recorded: %s", ledger.Body.String())
+	}
+}
+
+func TestGatewayFailsOverToNextChannelOnRetryableError(t *testing.T) {
+	firstCalls := 0
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"code":"upstream_busy","message":"temporarily unavailable","type":"api_error"}}`))
+	}))
+	defer first.Close()
+
+	secondCalls := 0
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_fallback","object":"chat.completion","model":"gpt-5.6","choices":[{"index":0,"message":{"role":"assistant","content":"fallback ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer second.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "compatible",
+		"UPSTREAM_API_KEY": "test-upstream-key",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Channels = []Channel{
+		{ID: "chn_primary", Name: "Primary", BaseURL: first.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-5.6"}},
+		{ID: "chn_fallback", Name: "Fallback", BaseURL: second.URL + "/v1", Status: "standby", Priority: 2, Weight: 100, Models: []string{"gpt-5.6"}},
+	}
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/chat/completions", `{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}]}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_admin_secret",
+	})
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`fallback ok`)) {
+		t.Fatalf("fallback response status = %d body = %s", response.Code, response.Body.String())
+	}
+	if firstCalls != 1 || secondCalls != 1 {
+		t.Fatalf("channel calls primary=%d fallback=%d", firstCalls, secondCalls)
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.findChannel("chn_primary").Status != "standby" || server.findChannel("chn_fallback").Status != "healthy" {
+		t.Fatalf("channel health primary=%s fallback=%s", server.findChannel("chn_primary").Status, server.findChannel("chn_fallback").Status)
+	}
+	lastLog := server.state.Logs[len(server.state.Logs)-1]
+	if lastLog.Status != "success" || stringValue(lastLog.Channel) != "Fallback" {
+		t.Fatalf("fallback log = %#v", lastLog)
 	}
 }
 

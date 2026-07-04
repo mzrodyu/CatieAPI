@@ -141,6 +141,12 @@ type AuthSettings = {
   defaultBalance: number;
 };
 
+type MaintenanceSettings = {
+  logRetentionDays: number;
+  maxLogs: number;
+  maxQuotaEntries: number;
+};
+
 type AccountProfile = {
   id: string;
   userId: string;
@@ -2217,6 +2223,11 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
   const [registrationEnabled, setRegistrationEnabled] = useState<boolean | null>(null);
   const [registrationMode, setRegistrationMode] = useState<RegistrationMode>("username");
   const [defaultBalance, setDefaultBalance] = useState("0");
+  const [maintenance, setMaintenance] = useState<MaintenanceSettings>({
+    logRetentionDays: 30,
+    maxLogs: 10000,
+    maxQuotaEntries: 20000
+  });
   const [account, setAccount] = useState<AccountProfile | null>(null);
   const [accountUsername, setAccountUsername] = useState("");
   const [accountDisplayName, setAccountDisplayName] = useState("");
@@ -2235,9 +2246,10 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
     Promise.all([
       fetchJson<{ discord: DiscordSettings }>("/api/settings/discord"),
       fetchJson<{ auth: AuthSettings }>("/api/settings/auth"),
-      fetchJson<{ account: AccountProfile; user: User }>("/api/account/me")
+      fetchJson<{ account: AccountProfile; user: User }>("/api/account/me"),
+      fetchJson<{ maintenance: MaintenanceSettings }>("/api/settings/maintenance")
     ])
-      .then(([discordData, authData, accountData]) => {
+      .then(([discordData, authData, accountData, maintenanceData]) => {
         setDiscord(withBrowserDiscordDefaults(discordData.discord));
         setRegistrationEnabled(authData.auth.registrationEnabled);
         setRegistrationMode(normalizeRegistrationMode(authData.auth.registrationMode));
@@ -2247,8 +2259,9 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
         setAccountDisplayName(accountData.user.name || "");
         setAccountEmail(accountData.account?.email || "");
         setDiscordUserId(accountData.account?.discordUserId || "");
+        setMaintenance(maintenanceData.maintenance);
       })
-      .catch(() => setMessage("Discord 配置加载失败"));
+      .catch(() => setMessage("设置加载失败"));
   }, []);
 
   async function saveAuthSettings(nextEnabled = registrationEnabled, nextMode = registrationMode, nextDefaultBalance = Number(defaultBalance)) {
@@ -2317,6 +2330,23 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
     }
   }
 
+  async function saveMaintenanceSettings() {
+    setSaving(true);
+    setMessage("");
+    try {
+      const data = await fetchJson<{ maintenance: MaintenanceSettings }>("/api/settings/maintenance", {
+        method: "PATCH",
+        body: JSON.stringify(maintenance)
+      });
+      setMaintenance(data.maintenance);
+      setMessage("维护设置已保存，历史数据已按新规则清理");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "维护设置保存失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="settings-layout">
       <div className="settings-tabs">
@@ -2339,6 +2369,50 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
           <Setting label="当前默认模型" value={defaultModel} />
           <Setting label="已配置渠道" value={`${channels.length} 个，${activeChannels} 个启用`} />
           <Setting label="可选供应商" value={`${providerOptions.length} 种`} />
+          <div className="setting">
+            <span>日志保留天数</span>
+            <div className="setting-value maintenance-control">
+              <input
+                type="number"
+                min="1"
+                max="3650"
+                value={maintenance.logRetentionDays}
+                onChange={(event) => setMaintenance((current) => ({ ...current, logRetentionDays: Number(event.target.value) }))}
+              />
+            </div>
+          </div>
+          <div className="setting">
+            <span>日志最大条数</span>
+            <div className="setting-value maintenance-control">
+              <input
+                type="number"
+                min="100"
+                max="1000000"
+                step="100"
+                value={maintenance.maxLogs}
+                onChange={(event) => setMaintenance((current) => ({ ...current, maxLogs: Number(event.target.value) }))}
+              />
+            </div>
+          </div>
+          <div className="setting">
+            <span>额度流水最大条数</span>
+            <div className="setting-value maintenance-control">
+              <input
+                type="number"
+                min="100"
+                max="2000000"
+                step="100"
+                value={maintenance.maxQuotaEntries}
+                onChange={(event) => setMaintenance((current) => ({ ...current, maxQuotaEntries: Number(event.target.value) }))}
+              />
+            </div>
+          </div>
+          <div className="settings-save-row">
+            <span role="status">{message}</span>
+            <button type="button" className="primary-button" disabled={saving} onClick={saveMaintenanceSettings}>
+              {saving ? "保存中" : "保存维护设置"}
+            </button>
+          </div>
         </div>
       </Panel>
       )}
