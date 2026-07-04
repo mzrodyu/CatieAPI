@@ -302,6 +302,13 @@ function logChannelText(log: RequestLog) {
   return log.channel || (log.apiKeyPrefix ? `Key ${log.apiKeyPrefix}` : "-");
 }
 
+function channelModelSummary(models: string[]) {
+  const list = arrayOf(models);
+  if (list.length === 0) return "未绑定模型";
+  const visible = list.slice(0, 3).join(", ");
+  return list.length > 3 ? `${visible} 等 ${list.length} 个模型` : visible;
+}
+
 async function copyText(value: string) {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(value);
@@ -1165,7 +1172,7 @@ function OverviewView({
               <div className="list-row" key={channel.id}>
                 <div>
                   <strong>{channel.name}</strong>
-                  <span>{channel.models.join(", ") || "未绑定模型"}</span>
+                  <span title={arrayOf(channel.models).join(", ")}>{channelModelSummary(channel.models)}</span>
                 </div>
                 <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
               </div>
