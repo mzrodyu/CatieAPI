@@ -112,26 +112,32 @@ type User struct {
 }
 
 type APIKey struct {
-	ID           string `json:"id"`
-	UserID       string `json:"userId"`
-	Name         string `json:"name"`
-	Prefix       string `json:"prefix"`
-	Hash         string `json:"hash,omitempty"`
-	Status       string `json:"status"`
-	CreatedAt    string `json:"createdAt"`
-	LastUsedAt   string `json:"lastUsedAt"`
-	RequestCount int    `json:"requestCount"`
+	ID                 string   `json:"id"`
+	UserID             string   `json:"userId"`
+	Name               string   `json:"name"`
+	Prefix             string   `json:"prefix"`
+	Hash               string   `json:"hash,omitempty"`
+	Status             string   `json:"status"`
+	CreatedAt          string   `json:"createdAt"`
+	LastUsedAt         string   `json:"lastUsedAt"`
+	RequestCount       int      `json:"requestCount"`
+	AllowedModels      []string `json:"allowedModels"`
+	ExpiresAt          string   `json:"expiresAt,omitempty"`
+	RateLimitPerMinute int      `json:"rateLimitPerMinute,omitempty"`
 }
 
 type PublicAPIKey struct {
-	ID           string `json:"id"`
-	UserID       string `json:"userId"`
-	Name         string `json:"name"`
-	Prefix       string `json:"prefix"`
-	Status       string `json:"status"`
-	CreatedAt    string `json:"createdAt"`
-	LastUsedAt   string `json:"lastUsedAt"`
-	RequestCount int    `json:"requestCount"`
+	ID                 string   `json:"id"`
+	UserID             string   `json:"userId"`
+	Name               string   `json:"name"`
+	Prefix             string   `json:"prefix"`
+	Status             string   `json:"status"`
+	CreatedAt          string   `json:"createdAt"`
+	LastUsedAt         string   `json:"lastUsedAt"`
+	RequestCount       int      `json:"requestCount"`
+	AllowedModels      []string `json:"allowedModels"`
+	ExpiresAt          string   `json:"expiresAt,omitempty"`
+	RateLimitPerMinute int      `json:"rateLimitPerMinute,omitempty"`
 }
 
 type Channel struct {
@@ -242,6 +248,12 @@ type CachedResponse struct {
 	Status    int         `json:"status"`
 	Body      interface{} `json:"body"`
 	CreatedAt string      `json:"createdAt"`
+}
+
+type BackupEnvelope struct {
+	Version    int      `json:"version"`
+	ExportedAt string   `json:"exportedAt"`
+	State      AppState `json:"state"`
 }
 
 type Session struct {
@@ -441,6 +453,8 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.PATCH("/settings/auth", s.updateAuthSettings)
 	admin.GET("/settings/maintenance", s.getMaintenanceSettings)
 	admin.PATCH("/settings/maintenance", s.updateMaintenanceSettings)
+	admin.GET("/backup", s.exportBackup)
+	admin.POST("/restore", s.restoreBackup)
 
 	router.GET("/v1/models", s.openAIModels)
 	router.GET("/v1/models/:id", s.openAIModel)
@@ -945,6 +959,88 @@ func (s *Server) updateMaintenanceSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"maintenance": s.maintenanceSettingsLocked()})
 }
 
+func (s *Server) exportBackup(c *gin.Context) {
+	s.mu.Lock()
+	envelope := BackupEnvelope{
+		Version:    1,
+		ExportedAt: now(),
+		State:      s.state,
+	}
+	content, err := json.MarshalIndent(envelope, "", "  ")
+	s.mu.Unlock()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "备份生成失败"}})
+		return
+	}
+	filename := "catieapi-backup-" + time.Now().UTC().Format("20060102-150405") + ".json"
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Data(http.StatusOK, "application/json; charset=utf-8", append(content, '\n'))
+}
+
+func (s *Server) restoreBackup(c *gin.Context) {
+	content, err := io.ReadAll(io.LimitReader(c.Request.Body, 32*1024*1024+1))
+	if err != nil {
+		validationError(c, "备份文件读取失败")
+		return
+	}
+	if len(content) > 32*1024*1024 {
+		validationError(c, "备份文件不能超过 32 MB")
+		return
+	}
+	var envelope BackupEnvelope
+	if err := json.Unmarshal(content, &envelope); err != nil {
+		validationError(c, "备份文件不是有效 JSON")
+		return
+	}
+	if envelope.Version != 1 {
+		validationError(c, "不支持的备份版本")
+		return
+	}
+	if err := s.validateBackupState(envelope.State); err != nil {
+		validationError(c, err.Error())
+		return
+	}
+
+	s.mu.Lock()
+	s.state = envelope.State
+	s.normalizeStateCollections()
+	s.pruneOperationalHistoryLocked()
+	s.rateLimitBuckets = map[string]int{}
+	s.idempotencyCache = map[string]CachedResponse{}
+	s.sessions = map[string]Session{}
+	s.saveStateLocked()
+	s.mu.Unlock()
+	s.applyPersistedDiscordSettings()
+	c.JSON(http.StatusOK, gin.H{
+		"restored": true,
+		"users":    len(envelope.State.Users),
+		"channels": len(envelope.State.Channels),
+		"models":   len(envelope.State.Models),
+	})
+}
+
+func (s *Server) validateBackupState(state AppState) error {
+	if state.Users == nil || state.APIKeys == nil || state.Channels == nil || state.Models == nil || state.Logs == nil {
+		return fmt.Errorf("备份缺少必要的数据集合")
+	}
+	for _, channel := range state.Channels {
+		if strings.TrimSpace(channel.ID) == "" || strings.TrimSpace(channel.Name) == "" {
+			return fmt.Errorf("备份包含无效渠道")
+		}
+		if strings.TrimSpace(channel.UpstreamAPIKey) != "" {
+			if _, err := s.revealSecret(channel.UpstreamAPIKey); err != nil {
+				return fmt.Errorf("渠道密钥无法解密，请使用导出备份时的 SECRET_KEY")
+			}
+		}
+	}
+	if secret := state.Settings.Discord.ClientSecret; strings.TrimSpace(secret) != "" {
+		if _, err := s.revealSecret(secret); err != nil {
+			return fmt.Errorf("Discord 密钥无法解密，请使用导出备份时的 SECRET_KEY")
+		}
+	}
+	return nil
+}
+
 func (s *Server) getDiscordSettings(c *gin.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1419,7 +1515,10 @@ func (s *Server) createOwnAPIKey(c *gin.Context) {
 		return
 	}
 	var body struct {
-		Name string `json:"name"`
+		Name               string   `json:"name"`
+		AllowedModels      []string `json:"allowedModels"`
+		ExpiresAt          string   `json:"expiresAt"`
+		RateLimitPerMinute int      `json:"rateLimitPerMinute"`
 	}
 	_ = c.ShouldBindJSON(&body)
 	body.Name = strings.TrimSpace(body.Name)
@@ -1434,15 +1533,32 @@ func (s *Server) createOwnAPIKey(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": gin.H{"message": "User account is not available"}})
 		return
 	}
+	allowedModels, err := s.normalizeAllowedModelsLocked(body.AllowedModels)
+	if err != nil {
+		validationError(c, err.Error())
+		return
+	}
+	expiresAt, err := normalizeAPIKeyExpiresAt(body.ExpiresAt)
+	if err != nil {
+		validationError(c, err.Error())
+		return
+	}
+	if body.RateLimitPerMinute < 0 {
+		validationError(c, "Key rate limit must be greater than or equal to 0")
+		return
+	}
 	secret := "cat_" + randomHex(24)
 	key := APIKey{
-		ID:        newID("key"),
-		UserID:    user.ID,
-		Name:      body.Name,
-		Prefix:    secret[:12],
-		Hash:      hashSecret(secret),
-		Status:    "active",
-		CreatedAt: now(),
+		ID:                 newID("key"),
+		UserID:             user.ID,
+		Name:               body.Name,
+		Prefix:             secret[:12],
+		Hash:               hashSecret(secret),
+		Status:             "active",
+		CreatedAt:          now(),
+		AllowedModels:      allowedModels,
+		ExpiresAt:          expiresAt,
+		RateLimitPerMinute: body.RateLimitPerMinute,
 	}
 	s.state.APIKeys = append(s.state.APIKeys, key)
 	s.saveStateLocked()
@@ -1727,7 +1843,10 @@ func (s *Server) syncAccountAccessLocked(user *User) {
 
 func (s *Server) createAPIKey(c *gin.Context) {
 	var body struct {
-		Name string `json:"name"`
+		Name               string   `json:"name"`
+		AllowedModels      []string `json:"allowedModels"`
+		ExpiresAt          string   `json:"expiresAt"`
+		RateLimitPerMinute int      `json:"rateLimitPerMinute"`
 	}
 	_ = c.ShouldBindJSON(&body)
 	if body.Name == "" {
@@ -1742,19 +1861,36 @@ func (s *Server) createAPIKey(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "User not found"}})
 		return
 	}
+	allowedModels, err := s.normalizeAllowedModelsLocked(body.AllowedModels)
+	if err != nil {
+		validationError(c, err.Error())
+		return
+	}
+	expiresAt, err := normalizeAPIKeyExpiresAt(body.ExpiresAt)
+	if err != nil {
+		validationError(c, err.Error())
+		return
+	}
+	if body.RateLimitPerMinute < 0 {
+		validationError(c, "Key rate limit must be greater than or equal to 0")
+		return
+	}
 
 	secret := "cat_" + randomHex(24)
 	prefix := secret[:18]
 	key := APIKey{
-		ID:           newID("key"),
-		UserID:       user.ID,
-		Name:         body.Name,
-		Prefix:       prefix,
-		Hash:         hashSecret(secret),
-		Status:       "active",
-		CreatedAt:    now(),
-		LastUsedAt:   "",
-		RequestCount: 0,
+		ID:                 newID("key"),
+		UserID:             user.ID,
+		Name:               body.Name,
+		Prefix:             prefix,
+		Hash:               hashSecret(secret),
+		Status:             "active",
+		CreatedAt:          now(),
+		LastUsedAt:         "",
+		RequestCount:       0,
+		AllowedModels:      allowedModels,
+		ExpiresAt:          expiresAt,
+		RateLimitPerMinute: body.RateLimitPerMinute,
 	}
 	s.state.APIKeys = append(s.state.APIKeys, key)
 	s.saveStateLocked()
@@ -1787,6 +1923,35 @@ func (s *Server) updateAPIKey(c *gin.Context) {
 			return
 		}
 		key.Status = value
+	}
+	if value, ok := patch["allowedModels"]; ok {
+		models, ok := stringSliceFromPatch(value)
+		if !ok {
+			validationError(c, "allowedModels must be an array")
+			return
+		}
+		allowedModels, err := s.normalizeAllowedModelsLocked(models)
+		if err != nil {
+			validationError(c, err.Error())
+			return
+		}
+		key.AllowedModels = allowedModels
+	}
+	if value, ok := patch["expiresAt"].(string); ok {
+		expiresAt, err := normalizeAPIKeyExpiresAt(value)
+		if err != nil {
+			validationError(c, err.Error())
+			return
+		}
+		key.ExpiresAt = expiresAt
+	}
+	if value, ok := patch["rateLimitPerMinute"]; ok {
+		limit, ok := intFromPatch(value)
+		if !ok || limit < 0 {
+			validationError(c, "rateLimitPerMinute must be greater than or equal to 0")
+			return
+		}
+		key.RateLimitPerMinute = limit
 	}
 	s.saveStateLocked()
 
@@ -2474,6 +2639,11 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 			name = "<model>"
 		}
 		s.openAIErrorForCallLocked(c, http.StatusBadRequest, "model_not_available", "No available model: "+name, "invalid_request_error", stringPtr("model"), auth.User.ID, auth.Key.Prefix, body.Model, "")
+		s.mu.Unlock()
+		return
+	}
+	if !apiKeyAllowsModel(auth.Key, model.ID) {
+		s.openAIErrorForCallLocked(c, http.StatusForbidden, "model_not_allowed", "API key is not allowed to use model: "+model.ID, "invalid_request_error", stringPtr("model"), auth.User.ID, auth.Key.Prefix, model.ID, "")
 		s.mu.Unlock()
 		return
 	}
@@ -3519,7 +3689,7 @@ func (s *Server) findUserByAPIKeyLocked(secret string) *AuthContext {
 	}
 	for i := range s.state.APIKeys {
 		key := &s.state.APIKeys[i]
-		if key.Status != "active" || !keyMatchesSecret(key, token) {
+		if key.Status != "active" || apiKeyExpired(key) || !keyMatchesSecret(key, token) {
 			continue
 		}
 		user := s.findUser(key.UserID)
@@ -3564,6 +3734,101 @@ func (s *Server) resolveModelLocked(input string) *Model {
 		}
 	}
 	return nil
+}
+
+func (s *Server) normalizeAllowedModelsLocked(input []string) ([]string, error) {
+	if len(input) == 0 {
+		return []string{}, nil
+	}
+	seen := map[string]bool{}
+	models := []string{}
+	for _, value := range input {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		model := s.resolveModelLocked(value)
+		if model == nil {
+			return nil, fmt.Errorf("Unknown model: %s", value)
+		}
+		if seen[model.ID] {
+			continue
+		}
+		seen[model.ID] = true
+		models = append(models, model.ID)
+	}
+	return models, nil
+}
+
+func apiKeyAllowsModel(key *APIKey, modelID string) bool {
+	if key == nil || len(key.AllowedModels) == 0 {
+		return true
+	}
+	for _, allowed := range key.AllowedModels {
+		if allowed == modelID {
+			return true
+		}
+	}
+	return false
+}
+
+func apiKeyExpired(key *APIKey) bool {
+	if key == nil || strings.TrimSpace(key.ExpiresAt) == "" {
+		return false
+	}
+	expiresAt, err := time.Parse(time.RFC3339, key.ExpiresAt)
+	if err != nil {
+		expiresAt, err = time.Parse(time.RFC3339Nano, key.ExpiresAt)
+	}
+	return err == nil && !time.Now().Before(expiresAt)
+}
+
+func stringSliceFromPatch(value interface{}) ([]string, bool) {
+	raw, ok := value.([]interface{})
+	if !ok {
+		return nil, false
+	}
+	result := []string{}
+	for _, item := range raw {
+		text, ok := item.(string)
+		if !ok {
+			return nil, false
+		}
+		result = append(result, text)
+	}
+	return result, true
+}
+
+func intFromPatch(value interface{}) (int, bool) {
+	switch typed := value.(type) {
+	case float64:
+		if typed != math.Trunc(typed) {
+			return 0, false
+		}
+		return int(typed), true
+	case int:
+		return typed, true
+	default:
+		return 0, false
+	}
+}
+
+func normalizeAPIKeyExpiresAt(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	expiresAt, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		expiresAt, err = time.Parse(time.RFC3339Nano, value)
+	}
+	if err != nil {
+		return "", fmt.Errorf("expiresAt must be RFC3339 time")
+	}
+	if !expiresAt.After(time.Now()) {
+		return "", fmt.Errorf("expiresAt must be in the future")
+	}
+	return expiresAt.UTC().Format(time.RFC3339), nil
 }
 
 func (s *Server) channelCandidatesLocked(modelID string) []Channel {
@@ -3633,7 +3898,11 @@ func retryableProviderError(providerErr *ProviderError) bool {
 func (s *Server) checkRateLimitLocked(key *APIKey) bool {
 	bucket := fmt.Sprintf("%s:%d", key.ID, time.Now().Unix()/60)
 	current := s.rateLimitBuckets[bucket]
-	if current >= s.requestLimitPerMinute {
+	limit := s.requestLimitPerMinute
+	if key.RateLimitPerMinute > 0 {
+		limit = key.RateLimitPerMinute
+	}
+	if limit > 0 && current >= limit {
 		return false
 	}
 	s.rateLimitBuckets[bucket] = current + 1
@@ -3893,6 +4162,12 @@ func (s *Server) normalizeStateCollections() bool {
 	for i := range s.state.Models {
 		if s.state.Models[i].Aliases == nil {
 			s.state.Models[i].Aliases = []string{}
+			changed = true
+		}
+	}
+	for i := range s.state.APIKeys {
+		if s.state.APIKeys[i].AllowedModels == nil {
+			s.state.APIKeys[i].AllowedModels = []string{}
 			changed = true
 		}
 	}
@@ -4501,14 +4776,17 @@ func toOpenAIModel(model Model) gin.H {
 
 func publicAPIKey(key APIKey) PublicAPIKey {
 	return PublicAPIKey{
-		ID:           key.ID,
-		UserID:       key.UserID,
-		Name:         key.Name,
-		Prefix:       key.Prefix,
-		Status:       key.Status,
-		CreatedAt:    key.CreatedAt,
-		LastUsedAt:   key.LastUsedAt,
-		RequestCount: key.RequestCount,
+		ID:                 key.ID,
+		UserID:             key.UserID,
+		Name:               key.Name,
+		Prefix:             key.Prefix,
+		Status:             key.Status,
+		CreatedAt:          key.CreatedAt,
+		LastUsedAt:         key.LastUsedAt,
+		RequestCount:       key.RequestCount,
+		AllowedModels:      append([]string{}, key.AllowedModels...),
+		ExpiresAt:          key.ExpiresAt,
+		RateLimitPerMinute: key.RateLimitPerMinute,
 	}
 }
 

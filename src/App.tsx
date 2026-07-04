@@ -32,6 +32,9 @@ type ApiKey = {
   createdAt: string;
   lastUsedAt: string;
   requestCount: number;
+  allowedModels: string[];
+  expiresAt?: string;
+  rateLimitPerMinute?: number;
 };
 
 type Channel = {
@@ -277,6 +280,20 @@ function formatDate(value: string) {
     hour: "2-digit",
     minute: "2-digit"
   }).format(date);
+}
+
+function toLocalDateTime(value: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
+function fromLocalDateTime(value: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
 function formatFullDate(value: string) {
@@ -541,6 +558,20 @@ function App() {
     window.setTimeout(() => setToast(""), 1800);
   }
 
+  async function updateAPIKey(id: string, patch: Partial<ApiKey>) {
+    const data = await fetchJson<{ apiKey: ApiKey }>(`/api/api-keys/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch)
+    });
+    setSelectedUser((current) =>
+      current
+        ? { ...current, apiKeys: current.apiKeys.map((key) => (key.id === id ? data.apiKey : key)) }
+        : current
+    );
+    setToast("Key 已更新");
+    window.setTimeout(() => setToast(""), 1800);
+  }
+
   async function updateChannel(id: string, patch: ChannelPatch) {
     const data = await fetchJson<{ channel: Channel }>(`/api/channels/${id}`, {
       method: "PATCH",
@@ -795,7 +826,7 @@ function App() {
             }}
           />
         )}
-        {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} onDeleteKey={deleteAPIKey} />}
+        {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} onUpdateKey={updateAPIKey} onDeleteKey={deleteAPIKey} />}
         {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} />}
         {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onDelete={deleteChannel} onSyncModels={syncChannelModels} onCheck={checkChannel} />}
         {active === "logs" && <LogsView logs={logs} />}
@@ -1653,10 +1684,12 @@ function UsersView({
 function KeysView({
   selectedUser,
   onCreateKey,
+  onUpdateKey,
   onDeleteKey
 }: {
   selectedUser: UserDetail | null;
   onCreateKey: (id: string) => void;
+  onUpdateKey: (id: string, patch: Partial<ApiKey>) => Promise<void>;
   onDeleteKey: (id: string) => void;
 }) {
   return (
@@ -1671,16 +1704,7 @@ function KeysView({
           </div>
           {selectedUser.apiKeys.length ? (
             selectedUser.apiKeys.map((key) => (
-              <div className="list-row" key={key.id}>
-                <div>
-                  <strong>{key.name}</strong>
-                  <span>{key.prefix}*** · 最后使用 {formatDate(key.lastUsedAt)}</span>
-                </div>
-                <div className="row-actions">
-                  <Badge tone={key.status}>{statusLabel(key.status)}</Badge>
-                  <button className="danger-button compact-button" onClick={() => onDeleteKey(key.id)}>删除</button>
-                </div>
-              </div>
+              <KeyEditor key={key.id} apiKey={key} onSave={onUpdateKey} onDelete={onDeleteKey} />
             ))
           ) : (
             <Empty text="暂无密钥" />
@@ -1690,6 +1714,86 @@ function KeysView({
         <Empty text="请选择一个用户" />
       )}
     </Panel>
+  );
+}
+
+function KeyEditor({
+  apiKey,
+  onSave,
+  onDelete
+}: {
+  apiKey: ApiKey;
+  onSave: (id: string, patch: Partial<ApiKey>) => Promise<void>;
+  onDelete: (id: string) => void;
+}) {
+  const [name, setName] = useState(apiKey.name);
+  const [allowedModels, setAllowedModels] = useState(arrayOf(apiKey.allowedModels).join(", "));
+  const [expiresAt, setExpiresAt] = useState(toLocalDateTime(apiKey.expiresAt || ""));
+  const [rateLimit, setRateLimit] = useState(String(apiKey.rateLimitPerMinute || ""));
+  const [saving, setSaving] = useState(false);
+  const modelSummary = arrayOf(apiKey.allowedModels).length ? arrayOf(apiKey.allowedModels).join(", ") : "全部模型";
+
+  useEffect(() => {
+    setName(apiKey.name);
+    setAllowedModels(arrayOf(apiKey.allowedModels).join(", "));
+    setExpiresAt(toLocalDateTime(apiKey.expiresAt || ""));
+    setRateLimit(String(apiKey.rateLimitPerMinute || ""));
+  }, [apiKey]);
+
+  async function save() {
+    setSaving(true);
+    try {
+      await onSave(apiKey.id, {
+        name: name.trim() || "API Key",
+        allowedModels: allowedModels.split(",").map((item) => item.trim()).filter(Boolean),
+        expiresAt: fromLocalDateTime(expiresAt),
+        rateLimitPerMinute: Number(rateLimit || 0)
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="key-editor">
+      <div className="key-editor-head">
+        <div>
+          <strong>{apiKey.name}</strong>
+          <span>{apiKey.prefix}*** · {modelSummary} · 最后使用 {formatDate(apiKey.lastUsedAt)}</span>
+        </div>
+        <div className="row-actions">
+          <Badge tone={apiKey.status}>{statusLabel(apiKey.status)}</Badge>
+          <button
+            className="secondary-button compact-button"
+            onClick={() => onSave(apiKey.id, { status: apiKey.status === "active" ? "disabled" : "active" })}
+          >
+            {apiKey.status === "active" ? "禁用" : "启用"}
+          </button>
+          <button className="danger-button compact-button" onClick={() => onDelete(apiKey.id)}>删除</button>
+        </div>
+      </div>
+      <div className="key-editor-grid">
+        <label>
+          名称
+          <input value={name} onChange={(event) => setName(event.target.value)} />
+        </label>
+        <label>
+          允许模型
+          <input value={allowedModels} onChange={(event) => setAllowedModels(event.target.value)} placeholder="留空表示全部模型，多个用逗号分隔" />
+        </label>
+        <label>
+          过期时间
+          <input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} />
+        </label>
+        <label>
+          每分钟限制
+          <input type="number" min="0" value={rateLimit} onChange={(event) => setRateLimit(event.target.value)} placeholder="0 使用全局限制" />
+        </label>
+      </div>
+      <div className="key-editor-actions">
+        <button className="primary-button" disabled={saving} onClick={save}>{saving ? "保存中" : "保存设置"}</button>
+      </div>
+    </div>
   );
 }
 
@@ -2347,6 +2451,52 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
     }
   }
 
+  async function downloadBackup() {
+    setSaving(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/backup", { credentials: "include" });
+      if (!response.ok) throw new Error("备份导出失败");
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const filename = disposition.match(/filename="([^"]+)"/)?.[1] || "catieapi-backup.json";
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setMessage("备份已导出，请妥善保管");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "备份导出失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function restoreBackup(file: File) {
+    if (!window.confirm("恢复会覆盖当前全部数据，并退出现有登录会话。确定继续？")) return;
+    setSaving(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/restore", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: file
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(payload?.error?.message || "备份恢复失败");
+      }
+      setMessage(`已恢复 ${payload.users} 个用户、${payload.channels} 条渠道和 ${payload.models} 个模型，请重新登录`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "备份恢复失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="settings-layout">
       <div className="settings-tabs">
@@ -2412,6 +2562,28 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
             <button type="button" className="primary-button" disabled={saving} onClick={saveMaintenanceSettings}>
               {saving ? "保存中" : "保存维护设置"}
             </button>
+          </div>
+          <div className="setting">
+            <span>
+              备份与恢复
+              <small>包含账号哈希和加密后的上游密钥，恢复时需要相同的 SECRET_KEY</small>
+            </span>
+            <div className="setting-value backup-actions">
+              <button type="button" className="secondary-button" disabled={saving} onClick={downloadBackup}>导出备份</button>
+              <label className="secondary-button">
+                恢复备份
+                <input
+                  type="file"
+                  accept="application/json,.json"
+                  disabled={saving}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) restoreBackup(file);
+                    event.target.value = "";
+                  }}
+                />
+              </label>
+            </div>
           </div>
         </div>
       </Panel>

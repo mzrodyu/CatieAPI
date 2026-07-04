@@ -641,6 +641,77 @@ func TestCreatedAPIKeyUsesSecretWithoutLeakingHash(t *testing.T) {
 	}
 }
 
+func TestAPIKeyAllowedModelsRestrictsChat(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+
+	created := perform(router, http.MethodPost, "/api/users/usr_1002/api-keys", `{"name":"Scoped","allowedModels":["ds"]}`, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create scoped key status = %d body = %s", created.Code, created.Body.String())
+	}
+	var payload struct {
+		Secret string       `json:"secret"`
+		APIKey PublicAPIKey `json:"apiKey"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode scoped key response: %v", err)
+	}
+	if len(payload.APIKey.AllowedModels) != 1 || payload.APIKey.AllowedModels[0] != "deepseek-v4" {
+		t.Fatalf("allowed models were not canonicalized: %#v", payload.APIKey.AllowedModels)
+	}
+
+	body := `{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}]}`
+	response := perform(router, http.MethodPost, "/v1/chat/completions", body, map[string]string{"Authorization": "Bearer " + payload.Secret})
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("restricted model status = %d body = %s", response.Code, response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`model_not_allowed`)) {
+		t.Fatalf("restricted model error not returned: %s", response.Body.String())
+	}
+}
+
+func TestAPIKeyRateLimitOverride(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+
+	created := perform(router, http.MethodPost, "/api/users/usr_1002/api-keys", `{"name":"Limited","rateLimitPerMinute":1}`, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create limited key status = %d body = %s", created.Code, created.Body.String())
+	}
+	var payload struct {
+		Secret string `json:"secret"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode limited key response: %v", err)
+	}
+	body := `{"model":"ds","messages":[{"role":"user","content":"hello"}]}`
+	first := perform(router, http.MethodPost, "/v1/chat/completions", body, map[string]string{"Authorization": "Bearer " + payload.Secret})
+	if first.Code != http.StatusOK {
+		t.Fatalf("first rate-limited request status = %d body = %s", first.Code, first.Body.String())
+	}
+	second := perform(router, http.MethodPost, "/v1/chat/completions", body, map[string]string{"Authorization": "Bearer " + payload.Secret})
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second rate-limited request status = %d body = %s", second.Code, second.Body.String())
+	}
+}
+
+func TestExpiredAPIKeyIsRejected(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.APIKeys[1].ExpiresAt = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	server.mu.Unlock()
+
+	body := `{"model":"ds","messages":[{"role":"user","content":"hello"}]}`
+	response := perform(router, http.MethodPost, "/v1/chat/completions", body, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expired key status = %d body = %s", response.Code, response.Body.String())
+	}
+}
+
 func TestXAPIKeyHeaderIsAccepted(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)

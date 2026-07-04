@@ -1664,6 +1664,65 @@ button.table-row:hover {
   font-size: 13px;
 }
 
+.backup-actions label {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.backup-actions input {
+  display: none;
+}
+
+.key-editor {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: var(--panel-soft);
+}
+
+.key-editor + .key-editor {
+  margin-top: 12px;
+}
+
+.key-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.key-editor-head strong,
+.key-editor-head span {
+  display: block;
+}
+
+.key-editor-head span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.key-editor-grid {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(240px, 1.4fr) minmax(180px, 1fr) minmax(140px, 0.8fr);
+  gap: 12px;
+}
+
+.key-editor-grid label {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.key-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .settings-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
