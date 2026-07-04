@@ -349,6 +349,7 @@ function App() {
   const [selectedUserId, setSelectedUserId] = useState("");
   const [selectedUser, setSelectedUser] = useState<UserDetail | null>(null);
   const [toast, setToast] = useState("");
+  const [createdKeySecret, setCreatedKeySecret] = useState("");
   const [consoleReady, setConsoleReady] = useState(false);
 
   const filteredUsers = useMemo(() => {
@@ -428,6 +429,7 @@ function App() {
     if (selectedUser?.user.id === userId) {
       setSelectedUser({ ...selectedUser, apiKeys: [...selectedUser.apiKeys, data.apiKey] });
     }
+    setCreatedKeySecret(data.secret);
     await copyText(data.secret);
     setToast("新 Key 已创建并复制，请立即保存");
     window.setTimeout(() => setToast(""), 2400);
@@ -667,6 +669,31 @@ function App() {
         {active === "settings" && <SettingsView models={models} channels={channels} />}
       </main>
 
+      {createdKeySecret && (
+        <div className="secret-dialog-backdrop" role="presentation">
+          <section className="secret-dialog" role="dialog" aria-modal="true" aria-labelledby="secret-dialog-title">
+            <div>
+              <p className="eyebrow">One-time secret</p>
+              <h2 id="secret-dialog-title">完整 API Key</h2>
+            </div>
+            <p>完整密钥只显示这一次。列表中的星号内容只是识别前缀，不能用于 API 调用。</p>
+            <code>{createdKeySecret}</code>
+            <div className="secret-dialog-actions">
+              <button
+                className="secondary-button"
+                onClick={() => {
+                  copyText(createdKeySecret);
+                  setToast("完整 Key 已复制");
+                  window.setTimeout(() => setToast(""), 1800);
+                }}
+              >
+                复制
+              </button>
+              <button className="primary-button" onClick={() => setCreatedKeySecret("")}>完成</button>
+            </div>
+          </section>
+        </div>
+      )}
       {toast && <div className="toast">{toast}</div>}
     </div>
   );

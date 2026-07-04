@@ -59,6 +59,9 @@ func seedGatewayFixtures(server *Server) {
 		{ID: "gemini-3.1", Name: "Gemini 3.1", Vendor: "Google", Aliases: []string{"gemini"}, Category: "多模态", Description: "Test model", Price: "中", InputPricePer1K: 0.01, OutputPricePer1K: 0.02, Context: "超长上下文", Status: "available", Recommended: false},
 		{ID: "deepseek-v4", Name: "DeepSeek V4", Vendor: "DeepSeek", Aliases: []string{"ds", "deepseek"}, Category: "推理", Description: "Test model", Price: "低", InputPricePer1K: 0.002, OutputPricePer1K: 0.004, Context: "长上下文", Status: "available", Recommended: true},
 	}
+	for i := range server.state.Models {
+		server.state.Models[i].PricingConfigured = server.state.Models[i].InputPricePer1K > 0 || server.state.Models[i].OutputPricePer1K > 0
+	}
 	server.state.Logs = []RequestLog{
 		{ID: "req_fixture_1", UserID: stringPtr("usr_1002"), APIKeyPrefix: stringPtr("cat_live"), Model: stringPtr("gpt-5.6"), Channel: stringPtr("OpenAI Compatible"), Status: "success", Cost: 0.04, LatencyMS: 820, CreatedAt: "2026-07-04T01:22:00.000Z"},
 		{ID: "req_fixture_2", UserID: stringPtr("usr_1003"), APIKeyPrefix: stringPtr("cat_trial"), Model: stringPtr("deepseek-v4"), Channel: stringPtr("Backup Provider"), Status: "failed", Cost: 0, LatencyMS: 1200, ErrorCode: "upstream_timeout", CreatedAt: "2026-07-04T01:25:00.000Z"},
@@ -521,6 +524,32 @@ func TestCreatedAPIKeyUsesSecretWithoutLeakingHash(t *testing.T) {
 	}
 }
 
+func TestUnpricedModelAllowsZeroBalance(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.findUser("usr_1002").Balance = 0
+	model := server.findModel("deepseek-v4")
+	model.InputPricePer1K = 0
+	model.OutputPricePer1K = 0
+	model.PricingConfigured = false
+	server.mu.Unlock()
+
+	body := `{"model":"ds","messages":[{"role":"user","content":"free call"}]}`
+	response := perform(router, http.MethodPost, "/chat/completions", body, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("free model with zero balance status = %d body = %s", response.Code, response.Body.String())
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.findUser("usr_1002").Balance != 0 {
+		t.Fatalf("free model changed balance to %v", server.findUser("usr_1002").Balance)
+	}
+}
+
 func TestInvalidManagementStatusIsRejected(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)
@@ -615,18 +644,16 @@ func TestOpenAICompatibleProviderForwardsRequest(t *testing.T) {
 	var upstreamModel string
 	var upstreamPath string
 	var upstreamAuth string
+	var upstreamPayload map[string]interface{}
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamPath = r.URL.Path
 		upstreamAuth = r.Header.Get("Authorization")
 
-		var payload struct {
-			Model string `json:"model"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&upstreamPayload); err != nil {
 			t.Fatalf("decode upstream request: %v", err)
 		}
-		upstreamModel = payload.Model
+		upstreamModel, _ = upstreamPayload["model"].(string)
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"chatcmpl_upstream","object":"chat.completion","model":"deepseek-v4","choices":[{"index":0,"message":{"role":"assistant","content":"from upstream"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
@@ -653,7 +680,7 @@ func TestOpenAICompatibleProviderForwardsRequest(t *testing.T) {
 		t.Fatalf("patch response did not expose upstreamKeySet: %s", patched.Body.String())
 	}
 
-	chatBody := `{"model":"ds","messages":[{"role":"user","content":"hello"}]}`
+	chatBody := `{"model":"ds","temperature":0.25,"tools":[{"type":"function","function":{"name":"lookup"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`
 	chat := perform(router, http.MethodPost, "/v1/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
 	if chat.Code != http.StatusOK {
 		t.Fatalf("chat status = %d body = %s", chat.Code, chat.Body.String())
@@ -666,6 +693,13 @@ func TestOpenAICompatibleProviderForwardsRequest(t *testing.T) {
 	}
 	if upstreamModel != "deepseek-v4" {
 		t.Fatalf("upstream model = %s", upstreamModel)
+	}
+	if upstreamPayload["temperature"] != 0.25 || upstreamPayload["tools"] == nil {
+		t.Fatalf("OpenAI request fields were not forwarded: %#v", upstreamPayload)
+	}
+	messages, ok := upstreamPayload["messages"].([]interface{})
+	if !ok || len(messages) != 1 {
+		t.Fatalf("multimodal messages were not forwarded: %#v", upstreamPayload["messages"])
 	}
 	if !bytes.Contains(chat.Body.Bytes(), []byte(`from upstream`)) {
 		t.Fatalf("upstream response was not returned: %s", chat.Body.String())

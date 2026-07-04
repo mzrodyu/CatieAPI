@@ -150,18 +150,19 @@ type PublicChannel struct {
 }
 
 type Model struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	Vendor           string   `json:"vendor"`
-	Aliases          []string `json:"aliases"`
-	Category         string   `json:"category"`
-	Description      string   `json:"description"`
-	Price            string   `json:"price"`
-	InputPricePer1K  float64  `json:"inputPricePer1K"`
-	OutputPricePer1K float64  `json:"outputPricePer1K"`
-	Context          string   `json:"context"`
-	Status           string   `json:"status"`
-	Recommended      bool     `json:"recommended"`
+	ID                string   `json:"id"`
+	Name              string   `json:"name"`
+	Vendor            string   `json:"vendor"`
+	Aliases           []string `json:"aliases"`
+	Category          string   `json:"category"`
+	Description       string   `json:"description"`
+	Price             string   `json:"price"`
+	InputPricePer1K   float64  `json:"inputPricePer1K"`
+	OutputPricePer1K  float64  `json:"outputPricePer1K"`
+	PricingConfigured bool     `json:"pricingConfigured"`
+	Context           string   `json:"context"`
+	Status            string   `json:"status"`
+	Recommended       bool     `json:"recommended"`
 }
 
 type RequestLog struct {
@@ -243,14 +244,35 @@ type AuthContext struct {
 }
 
 type ChatRequest struct {
-	Model    string        `json:"model"`
-	Stream   bool          `json:"stream"`
-	Messages []ChatMessage `json:"messages"`
+	Model    string                 `json:"model"`
+	Stream   bool                   `json:"stream"`
+	Messages []ChatMessage          `json:"messages"`
+	Payload  map[string]interface{} `json:"-"`
 }
 
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
+}
+
+func (request *ChatRequest) UnmarshalJSON(data []byte) error {
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return err
+	}
+	var typed struct {
+		Model    string        `json:"model"`
+		Stream   bool          `json:"stream"`
+		Messages []ChatMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(data, &typed); err != nil {
+		return err
+	}
+	request.Model = typed.Model
+	request.Stream = typed.Stream
+	request.Messages = typed.Messages
+	request.Payload = payload
+	return nil
 }
 
 type GatewayCall struct {
@@ -1967,18 +1989,19 @@ func (s *Server) createModel(c *gin.Context) {
 	}
 
 	model := Model{
-		ID:               body.ID,
-		Name:             body.Name,
-		Vendor:           body.Vendor,
-		Aliases:          cleanAliases(body.Aliases),
-		Category:         body.Category,
-		Description:      body.Description,
-		Price:            body.Price,
-		InputPricePer1K:  round4(body.InputPricePer1K),
-		OutputPricePer1K: round4(body.OutputPricePer1K),
-		Context:          body.Context,
-		Status:           body.Status,
-		Recommended:      body.Recommended,
+		ID:                body.ID,
+		Name:              body.Name,
+		Vendor:            body.Vendor,
+		Aliases:           cleanAliases(body.Aliases),
+		Category:          body.Category,
+		Description:       body.Description,
+		Price:             body.Price,
+		InputPricePer1K:   round4(body.InputPricePer1K),
+		OutputPricePer1K:  round4(body.OutputPricePer1K),
+		PricingConfigured: body.InputPricePer1K > 0 || body.OutputPricePer1K > 0,
+		Context:           body.Context,
+		Status:            body.Status,
+		Recommended:       body.Recommended,
 	}
 
 	s.mu.Lock()
@@ -2021,12 +2044,14 @@ func (s *Server) updateModel(c *gin.Context) {
 	if value, ok := patch["description"].(string); ok {
 		model.Description = value
 	}
+	pricingChanged := false
 	if value, ok := asFloat(patch["inputPricePer1K"]); ok {
 		if value < 0 {
 			validationError(c, "Input price must be greater than or equal to 0")
 			return
 		}
 		model.InputPricePer1K = round4(value)
+		pricingChanged = true
 	}
 	if value, ok := asFloat(patch["outputPricePer1K"]); ok {
 		if value < 0 {
@@ -2034,6 +2059,10 @@ func (s *Server) updateModel(c *gin.Context) {
 			return
 		}
 		model.OutputPricePer1K = round4(value)
+		pricingChanged = true
+	}
+	if pricingChanged {
+		model.PricingConfigured = model.InputPricePer1K > 0 || model.OutputPricePer1K > 0
 	}
 	s.saveStateLocked()
 
@@ -2104,7 +2133,7 @@ func (s *Server) chatCompletions(c *gin.Context) {
 
 	var body ChatRequest
 	if err := c.ShouldBindJSON(&body); err != nil {
-		s.openAIError(c, http.StatusBadRequest, "invalid_json", "Invalid JSON body", "invalid_request_error", nil)
+		s.openAIError(c, http.StatusBadRequest, "invalid_json", "Invalid JSON body: "+err.Error(), "invalid_request_error", nil)
 		return
 	}
 
@@ -2116,7 +2145,7 @@ func (s *Server) chatCompletions(c *gin.Context) {
 		s.mu.Unlock()
 		return
 	}
-	if auth.User.Balance <= 0 || auth.User.Status == "limited" {
+	if auth.User.Status == "limited" {
 		s.openAIErrorLocked(c, http.StatusPaymentRequired, "insufficient_quota", "Insufficient quota", "billing_error", nil)
 		s.mu.Unlock()
 		return
@@ -2139,6 +2168,11 @@ func (s *Server) chatCompletions(c *gin.Context) {
 			name = "<model>"
 		}
 		s.openAIErrorLocked(c, http.StatusBadRequest, "model_not_available", "No available model: "+name, "invalid_request_error", stringPtr("model"))
+		s.mu.Unlock()
+		return
+	}
+	if model.PricingConfigured && auth.User.Balance <= 0 {
+		s.openAIErrorLocked(c, http.StatusPaymentRequired, "insufficient_quota", "Insufficient quota", "billing_error", nil)
 		s.mu.Unlock()
 		return
 	}
@@ -2422,11 +2456,13 @@ func (s *Server) newOpenAICompatibleRequest(call GatewayCall, stream bool) (*htt
 		}
 	}
 
-	payload := gin.H{
-		"model":    call.Model.ID,
-		"messages": call.Body.Messages,
-		"stream":   stream,
+	payload := gin.H{}
+	for key, value := range call.Body.Payload {
+		payload[key] = value
 	}
+	payload["model"] = call.Model.ID
+	payload["stream"] = stream
+	payload["messages"] = call.Body.Messages
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "Failed to encode upstream request", Type: "invalid_request_error"}
@@ -3406,10 +3442,9 @@ func (s *Server) migrateModelPricing() bool {
 	changed := false
 	for i := range s.state.Models {
 		model := &s.state.Models[i]
-		if model.InputPricePer1K == 0 && model.OutputPricePer1K == 0 {
-			inputRate, outputRate := modelRates(*model)
-			model.InputPricePer1K = inputRate
-			model.OutputPricePer1K = outputRate
+		if !model.PricingConfigured && (model.InputPricePer1K != 0 || model.OutputPricePer1K != 0) {
+			model.InputPricePer1K = 0
+			model.OutputPricePer1K = 0
 			changed = true
 		}
 	}
@@ -3728,7 +3763,13 @@ func estimateTokens(messages []ChatMessage) int {
 	characters := 0
 	for _, message := range messages {
 		characters += len([]rune(message.Role))
-		characters += len([]rune(message.Content))
+		switch content := message.Content.(type) {
+		case string:
+			characters += len([]rune(content))
+		default:
+			encoded, _ := json.Marshal(content)
+			characters += len([]rune(string(encoded)))
+		}
 	}
 	tokens := characters / 4
 	if tokens < 1 {
@@ -3768,19 +3809,10 @@ func calculateCallCost(model Model, response gin.H, messages []ChatMessage, stre
 }
 
 func modelRates(model Model) (float64, float64) {
-	inputRate := model.InputPricePer1K
-	outputRate := model.OutputPricePer1K
-	if inputRate > 0 || outputRate > 0 {
-		return inputRate, outputRate
+	if !model.PricingConfigured {
+		return 0, 0
 	}
-	switch model.Price {
-	case "高":
-		return 0.03, 0.06
-	case "低":
-		return 0.002, 0.004
-	default:
-		return 0.01, 0.02
-	}
+	return model.InputPricePer1K, model.OutputPricePer1K
 }
 
 func joinURL(base string, path string) string {

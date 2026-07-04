@@ -1529,6 +1529,50 @@ button.table-row:hover {
   backdrop-filter: blur(18px);
 }
 
+.secret-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(12px);
+}
+
+.secret-dialog {
+  display: grid;
+  gap: 18px;
+  width: min(520px, 100%);
+  padding: 22px;
+  color: var(--text);
+  background: var(--surface-solid);
+  border: 1px solid var(--hairline);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+}
+
+.secret-dialog > p {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.secret-dialog code {
+  overflow-x: auto;
+  padding: 13px;
+  color: var(--text);
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.secret-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .auth-page,
 .account-page {
   --bg: #f2f2f7;
