@@ -2166,7 +2166,7 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("check accounts status = %d body = %s", response.Code, response.Body.String())
 	}
-	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":7`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":2`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":1`)) {
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":7`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":3`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":1`)) {
 		t.Fatalf("check response missing summary: %s", response.Body.String())
 	}
 	if len(usageAuthHeaders) != 5 {
@@ -2180,7 +2180,7 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	channel = server.findChannel("chn_1002")
 	if channel.OpenAIAccounts[0].Status != "healthy" ||
 		channel.OpenAIAccounts[1].Status != "healthy" ||
-		channel.OpenAIAccounts[2].Status != "unchecked" ||
+		channel.OpenAIAccounts[2].Status != "healthy" ||
 		channel.OpenAIAccounts[3].Status != "unchecked" ||
 		channel.OpenAIAccounts[4].Status != "invalid" ||
 		channel.OpenAIAccounts[5].Status != "unchecked" ||
@@ -2194,7 +2194,7 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 		t.Fatalf("quota limits were not parsed: %#v", channel.OpenAIAccounts[0].QuotaLimits)
 	}
 	if !strings.Contains(channel.OpenAIAccounts[2].LastError, "usage limit reached") {
-		t.Fatalf("exhausted usage should stay unchecked: %#v", channel.OpenAIAccounts[2])
+		t.Fatalf("exhausted usage should keep reset hint: %#v", channel.OpenAIAccounts[2])
 	}
 	if !strings.Contains(channel.OpenAIAccounts[3].LastError, "HTTP 401") {
 		t.Fatalf("401 usage failure should be left unchecked: %#v", channel.OpenAIAccounts[3])
@@ -2221,6 +2221,33 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	}
 	if !bytes.Contains(imageResponse.Body.Bytes(), []byte(`"b64_json":"image-after-check"`)) {
 		t.Fatalf("image response was not proxied after check: %s", imageResponse.Body.String())
+	}
+}
+
+func TestParseWhamUsageQuotaLimitsDerivesRemainingFromCapAndUsed(t *testing.T) {
+	limits := parseWhamUsageQuotaLimits([]byte(`{
+		"primary_window":{"cap":100,"num_used":0,"reset_time":"2026-07-06T05:46:00Z"},
+		"secondary_window":{"cap":100,"num_used":25,"reset_time":"2026-07-13T00:46:00Z"},
+		"rate_limits":[{"name":"fractional","remaining_percent":0.42,"reset_after_seconds":3600}]
+	}`))
+	if len(limits) < 3 {
+		t.Fatalf("limits len = %d: %#v", len(limits), limits)
+	}
+	byName := map[string]OpenAIQuotaLimit{}
+	for _, limit := range limits {
+		byName[limit.Name] = limit
+	}
+	primary := byName["primary_window"]
+	if primary.Remaining != 100 || primary.PercentRemaining != 100 {
+		t.Fatalf("primary cap/num_used not derived as full quota: %#v", primary)
+	}
+	secondary := byName["secondary_window"]
+	if secondary.Remaining != 75 || secondary.PercentRemaining != 75 {
+		t.Fatalf("secondary cap/num_used not derived correctly: %#v", secondary)
+	}
+	fractional := byName["fractional"]
+	if fractional.PercentRemaining != 42 {
+		t.Fatalf("fractional percent not converted: %#v", fractional)
 	}
 }
 

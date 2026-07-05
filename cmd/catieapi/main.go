@@ -4461,11 +4461,11 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 		return result
 	}
 	result.QuotaLimits = quotaLimits
+	result.Status = "healthy"
 	if !openAIQuotaLimitsHaveRemaining(quotaLimits) {
 		result.Message = "usage limit reached"
 		return result
 	}
-	result.Status = "healthy"
 	result.Message = ""
 	return result
 }
@@ -4592,13 +4592,26 @@ func collectQuotaLimits(value interface{}, path []string, limits *[]OpenAIQuotaL
 }
 
 func quotaLimitFromMap(values map[string]interface{}, path []string) (OpenAIQuotaLimit, bool) {
-	limit, hasLimit := numberFromAnyKeys(values, "limit", "max", "cap", "quota", "total", "allowed")
-	used, hasUsed := numberFromAnyKeys(values, "used", "num_used", "current", "consumed", "usage")
-	remaining, hasRemaining := numberFromAnyKeys(values, "remaining", "available", "left", "remaining_messages", "remaining_credits")
-	percent, hasPercent := numberFromAnyKeys(values, "percent_remaining", "remaining_percent", "remaining_percentage", "remaining_pct", "percentage", "pct_remaining")
+	limit, hasLimit := numberFromAnyKeys(values, "limit", "max", "cap", "quota", "total", "allowed", "maximum", "capacity")
+	used, hasUsed := numberFromAnyKeys(values, "used", "num_used", "current", "consumed", "usage", "used_count", "count")
+	remaining, hasRemaining := numberFromAnyKeys(values, "remaining", "available", "left", "remaining_messages", "remaining_credits", "remaining_count", "remaining_uses")
+	percent, hasPercent := percentFromAnyKeys(values, "percent_remaining", "remaining_percent", "remaining_percentage", "remaining_pct", "percentage", "pct_remaining")
+	if !hasRemaining && hasLimit {
+		if hasUsed {
+			remaining = math.Max(0, limit-used)
+			hasRemaining = true
+		} else if !hasPercent {
+			remaining = limit
+			hasRemaining = true
+		}
+	}
+	if !hasPercent && hasLimit && limit > 0 && hasRemaining {
+		percent = (remaining / limit) * 100
+		hasPercent = true
+	}
 	resetAt := stringFromAnyKeys(values, "reset_at", "resets_at", "reset_time", "next_reset", "expires_at")
 	if resetAt == "" {
-		if resetAfterSeconds, ok := numberFromAnyKeys(values, "reset_after_seconds", "resets_in_seconds", "reset_in_seconds", "seconds_until_reset"); ok && resetAfterSeconds > 0 {
+		if resetAfterSeconds, ok := numberFromAnyKeys(values, "reset_after_seconds", "reset_after_sec", "reset_after", "resets_in_seconds", "reset_in_seconds", "seconds_until_reset"); ok && resetAfterSeconds > 0 {
 			resetAt = time.Now().Add(time.Duration(resetAfterSeconds) * time.Second).UTC().Format(time.RFC3339)
 		}
 	}
@@ -4669,6 +4682,44 @@ func numberFromAnyKeys(values map[string]interface{}, keys ...string) (float64, 
 		}
 	}
 	return 0, false
+}
+
+func percentFromAnyKeys(values map[string]interface{}, keys ...string) (float64, bool) {
+	for _, key := range keys {
+		value, ok := values[key]
+		if !ok {
+			continue
+		}
+		if percent, ok := percentFromAny(value); ok {
+			return percent, true
+		}
+	}
+	return 0, false
+}
+
+func percentFromAny(value interface{}) (float64, bool) {
+	if text, ok := value.(string); ok {
+		trimmed := strings.TrimSpace(text)
+		percent, ok := numberFromAny(trimmed)
+		if !ok {
+			return 0, false
+		}
+		if strings.HasSuffix(trimmed, "%") {
+			return percent, true
+		}
+		if percent > 0 && percent <= 1 {
+			return percent * 100, true
+		}
+		return percent, true
+	}
+	percent, ok := numberFromAny(value)
+	if !ok {
+		return 0, false
+	}
+	if percent > 0 && percent <= 1 {
+		return percent * 100, true
+	}
+	return percent, true
 }
 
 func numberFromAny(value interface{}) (float64, bool) {
@@ -5089,9 +5140,6 @@ func activeOpenAIAccounts(accounts []OpenAIAccount) []OpenAIAccount {
 	standby := []OpenAIAccount{}
 	for _, account := range accounts {
 		if strings.TrimSpace(account.AccessToken) == "" || account.Status == "invalid" {
-			continue
-		}
-		if len(account.QuotaLimits) > 0 && !openAIQuotaLimitsHaveRemaining(account.QuotaLimits) {
 			continue
 		}
 		if account.Status == "healthy" {
