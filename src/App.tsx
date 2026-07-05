@@ -1,4 +1,4 @@
-import type { CSSProperties, FormEvent } from "react";
+import type { FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
 
 type Overview = {
@@ -1278,8 +1278,11 @@ function PublicHome({
       <section className="home-hero">
         <div className="home-copy">
           <span className="home-kicker">OpenAI Compatible Gateway</span>
-          <h1>CatieAPI</h1>
-          <p>给普通用户和开发者用的轻量 AI 聚合网关。管理模型渠道、API Key、额度和调用日志，不做臃肿后台。</p>
+          <h1>
+            CatieAPI
+            <span>轻量 AI 聚合网关</span>
+          </h1>
+          <p>面向个人用户和团队的模型接入层。把 API Key、额度、模型渠道和调用日志放在一个清爽控制台里，保持轻量，也便于排障。</p>
           <div className="home-cta">
             <button className="primary-button" onClick={enterConsole}>
               进入控制台
@@ -1288,29 +1291,59 @@ function PublicHome({
               了解功能
             </a>
           </div>
-        </div>
-
-        <div className="gateway-card" aria-label="网关实时请求示意">
-          <div className="gateway-card-head">
-            <span>Gateway Status</span>
-            <div className="live-island">
-              <div className="pulse-dot" />
-              <span>Online</span>
+          <div className="integration-row" aria-label="网关能力概览">
+            <span>网关能力</span>
+            <div>
+              <span>OpenAI Compatible</span>
+              <span>额度控制</span>
+              <span>调用审计</span>
             </div>
           </div>
-          <div className="endpoint-box">
+        </div>
+
+        <div className="gateway-terminal" aria-label="CatieAPI 终端请求示意">
+          <div className="terminal-titlebar">
+            <div className="terminal-dots" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </div>
+            <strong>CatieAPI Terminal</strong>
+            <div className="terminal-status">
+              <span className="pulse-dot" />
+              <strong>Online</strong>
+            </div>
+          </div>
+          <div className="terminal-endpoint">
             <span>POST</span>
             <strong>/v1/chat/completions</strong>
           </div>
-          <div className="home-flow">
-            <div style={{ "--step": 0 } as CSSProperties}>认证</div>
-            <div style={{ "--step": 1 } as CSSProperties}>额度</div>
-            <div style={{ "--step": 2 } as CSSProperties}>路由</div>
-            <div style={{ "--step": 3 } as CSSProperties}>响应</div>
+          <div className="terminal-body">
+            <div className="terminal-block">
+              <span>REQUEST</span>
+              <pre>{`curl https://api.catie.local/v1/chat/completions \\
+  -H "Authorization: Bearer cat_..." \\
+  -d '{
+    "model": "catie-fast",
+    "messages": [{ "role": "user", "content": "ping" }]
+  }'`}</pre>
+            </div>
+            <div className="terminal-route">
+              <div><span>auth</span><strong>pass</strong></div>
+              <div><span>quota</span><strong>ok</strong></div>
+              <div><span>route</span><strong>catie-fast</strong></div>
+              <div><span>latency</span><strong>186ms</strong></div>
+            </div>
+            <div className="terminal-block response">
+              <span>RESPONSE</span>
+              <pre>{`{
+  "status": 200,
+  "model": "catie-fast",
+  "usage": { "total_tokens": 27 },
+  "message": "request routed"
+}`}</pre>
+            </div>
           </div>
-          <pre><span className="request-trace" aria-hidden="true" />{`curl /v1/chat/completions
-  -H "Authorization: Bearer cat_..."
-  -d '{"model":"你的模型ID"}'`}</pre>
         </div>
       </section>
 
