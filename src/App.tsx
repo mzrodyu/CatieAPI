@@ -345,7 +345,7 @@ const providerOptions = [
 ];
 
 const defaultOpenAIBaseURL = "https://api.openai.com/v1";
-const defaultOpenAIModels = "gpt-5.6, gpt-image-2, gpt-image-1";
+const defaultOpenAIModels = "gpt-5.5, gpt-5.4, gpt-image-2, gpt-image-1";
 
 const streamModeOptions = [
   { value: "auto", label: "自动", description: "按请求参数处理" },

@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
@@ -31,7 +32,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const defaultUpstreamTimeoutSeconds = 600
+const (
+	defaultUpstreamTimeoutSeconds = 600
+	chatGPTCodexUserAgent         = "codex_cli_rs/0.125.0 (Ubuntu 22.4.0; x86_64) xterm-256color"
+	chatGPTCodexVersion           = "0.125.0"
+	chatGPTCodexOriginator        = "codex_cli_rs"
+	chatGPTCodexImageModel        = "gpt-5.4-mini"
+)
 
 type AppState struct {
 	Users       []User       `json:"users"`
@@ -3441,6 +3448,10 @@ func (s *Server) callImageProvider(call ImageGatewayCall) (gin.H, *ProviderError
 }
 
 func (s *Server) callOpenAICompatible(call GatewayCall) (gin.H, *ProviderError) {
+	if len(activeOpenAIAccounts(call.Channel.OpenAIAccounts)) > 0 {
+		return s.callChatGPTCodex(call)
+	}
+
 	request, providerErr := s.newOpenAICompatibleRequest(call, false)
 	if providerErr != nil {
 		return nil, providerErr
@@ -3486,7 +3497,7 @@ func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *Provi
 				lastErr = &ProviderError{Status: http.StatusBadGateway, Code: "upstream_key_unavailable", Message: err.Error(), Type: "api_error"}
 				continue
 			}
-			body, providerErr := s.callOpenAICompatibleImageWithKey(call, upstreamKey)
+			body, providerErr := s.callChatGPTCodexImageWithAccount(call, account, upstreamKey)
 			if providerErr == nil {
 				return body, nil
 			}
@@ -3547,6 +3558,699 @@ func (s *Server) doOpenAICompatibleImageRequest(call ImageGatewayCall, request *
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "Upstream returned invalid JSON", Type: "api_error"}
 	}
 	return body, nil
+}
+
+type chatGPTCodexParseResult struct {
+	Text          string
+	CompletedText string
+	Images        []gin.H
+	Usage         gin.H
+	Created       int64
+	imageSeen     map[string]bool
+}
+
+func (s *Server) callChatGPTCodex(call GatewayCall) (gin.H, *ProviderError) {
+	var lastErr *ProviderError
+	accounts := activeOpenAIAccounts(call.Channel.OpenAIAccounts)
+	if len(accounts) == 0 {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "No active OpenAI accounts are available for chat completions", Type: "api_error"}
+	}
+	attemptedAccounts := 0
+	invalidatedAccounts := 0
+	for _, account := range accounts {
+		attemptedAccounts++
+		accessToken, err := s.revealSecret(account.AccessToken)
+		if err != nil {
+			lastErr = &ProviderError{Status: http.StatusBadGateway, Code: "upstream_key_unavailable", Message: err.Error(), Type: "api_error"}
+			continue
+		}
+		body, providerErr := s.callChatGPTCodexWithAccount(call, account, accessToken)
+		if providerErr == nil {
+			return body, nil
+		}
+		lastErr = providerErr
+		if shouldInvalidateOpenAIAccountForChat(providerErr) {
+			invalidatedAccounts++
+			s.markOpenAIAccountInvalid(call.Channel.ID, account.ID, providerErr.Message)
+			continue
+		}
+		return nil, providerErr
+	}
+	if attemptedAccounts > 0 && invalidatedAccounts == attemptedAccounts {
+		return nil, &ProviderError{
+			Status:  http.StatusBadGateway,
+			Code:    "upstream_accounts_unavailable",
+			Message: "All active OpenAI accounts for chat completions are invalid or expired. Re-import or sign in accounts again, then run batch check.",
+			Type:    "api_error",
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "No active OpenAI accounts are available for chat completions", Type: "api_error"}
+}
+
+func (s *Server) callChatGPTCodexWithAccount(call GatewayCall, account OpenAIAccount, accessToken string) (gin.H, *ProviderError) {
+	encoded, providerErr := buildChatGPTCodexChatPayload(call, true)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+	request, providerErr := s.newChatGPTCodexRequest(encoded, accessToken, account)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	defer response.Body.Close()
+
+	content, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, providerErrorFromUpstream(response.StatusCode, content)
+	}
+
+	parsed := parseChatGPTCodexResponse(content)
+	return chatCompletionFromCodexResult(call, parsed), nil
+}
+
+func (s *Server) streamChatGPTCodex(c *gin.Context, call GatewayCall) *ProviderError {
+	var lastErr *ProviderError
+	accounts := activeOpenAIAccounts(call.Channel.OpenAIAccounts)
+	if len(accounts) == 0 {
+		return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "No active OpenAI accounts are available for chat completions", Type: "api_error"}
+	}
+	attemptedAccounts := 0
+	invalidatedAccounts := 0
+	for _, account := range accounts {
+		attemptedAccounts++
+		accessToken, err := s.revealSecret(account.AccessToken)
+		if err != nil {
+			lastErr = &ProviderError{Status: http.StatusBadGateway, Code: "upstream_key_unavailable", Message: err.Error(), Type: "api_error"}
+			continue
+		}
+		providerErr := s.streamChatGPTCodexWithAccount(c, call, account, accessToken)
+		if providerErr == nil {
+			return nil
+		}
+		lastErr = providerErr
+		if shouldInvalidateOpenAIAccountForChat(providerErr) {
+			invalidatedAccounts++
+			s.markOpenAIAccountInvalid(call.Channel.ID, account.ID, providerErr.Message)
+			continue
+		}
+		return providerErr
+	}
+	if attemptedAccounts > 0 && invalidatedAccounts == attemptedAccounts {
+		return &ProviderError{
+			Status:  http.StatusBadGateway,
+			Code:    "upstream_accounts_unavailable",
+			Message: "All active OpenAI accounts for chat completions are invalid or expired. Re-import or sign in accounts again, then run batch check.",
+			Type:    "api_error",
+		}
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "No active OpenAI accounts are available for chat completions", Type: "api_error"}
+}
+
+func (s *Server) streamChatGPTCodexWithAccount(c *gin.Context, call GatewayCall, account OpenAIAccount, accessToken string) *ProviderError {
+	encoded, providerErr := buildChatGPTCodexChatPayload(call, true)
+	if providerErr != nil {
+		return providerErr
+	}
+	request, providerErr := s.newChatGPTCodexRequest(encoded, accessToken, account)
+	if providerErr != nil {
+		return providerErr
+	}
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		content, _ := io.ReadAll(response.Body)
+		return providerErrorFromUpstream(response.StatusCode, content)
+	}
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+
+	chunkID := newID("chatcmpl")
+	created := unixNow()
+	sentRole := false
+	completed := false
+	dataLines := []string{}
+	flushEvent := func() {
+		if len(dataLines) == 0 || completed {
+			dataLines = nil
+			return
+		}
+		data := strings.TrimSpace(strings.Join(dataLines, "\n"))
+		dataLines = nil
+		if data == "" || data == "[DONE]" {
+			return
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			return
+		}
+		if delta := codexOutputTextDelta(payload); delta != "" {
+			deltaPayload := gin.H{"content": delta}
+			if !sentRole {
+				deltaPayload["role"] = "assistant"
+				sentRole = true
+			}
+			writeSSEChunk(c, gin.H{
+				"id":      chunkID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   call.Model.ID,
+				"choices": []gin.H{{"index": 0, "delta": deltaPayload, "finish_reason": nil}},
+			})
+		}
+		if strings.EqualFold(completionPrompt(payload["type"]), "response.completed") {
+			if !sentRole {
+				finalText := strings.TrimSpace(codexCompletedText(payload))
+				if finalText != "" {
+					writeSSEChunk(c, gin.H{
+						"id":      chunkID,
+						"object":  "chat.completion.chunk",
+						"created": created,
+						"model":   call.Model.ID,
+						"choices": []gin.H{{"index": 0, "delta": gin.H{"role": "assistant", "content": finalText}, "finish_reason": nil}},
+					})
+					sentRole = true
+				}
+			}
+			writeSSEChunk(c, gin.H{
+				"id":      chunkID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   call.Model.ID,
+				"choices": []gin.H{{"index": 0, "delta": gin.H{}, "finish_reason": "stop"}},
+			})
+			_, _ = c.Writer.WriteString("data: [DONE]\n\n")
+			c.Writer.Flush()
+			completed = true
+		}
+	}
+
+	scanner := bufio.NewScanner(response.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10<<20)
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r")
+		if strings.TrimSpace(line) == "" {
+			flushEvent()
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	flushEvent()
+	if err := scanner.Err(); err != nil {
+		return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
+	}
+	if !completed {
+		writeSSEChunk(c, gin.H{
+			"id":      chunkID,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   call.Model.ID,
+			"choices": []gin.H{{"index": 0, "delta": gin.H{}, "finish_reason": "stop"}},
+		})
+		_, _ = c.Writer.WriteString("data: [DONE]\n\n")
+		c.Writer.Flush()
+	}
+	return nil
+}
+
+func (s *Server) callChatGPTCodexImageWithAccount(call ImageGatewayCall, account OpenAIAccount, accessToken string) (gin.H, *ProviderError) {
+	encoded, providerErr := buildChatGPTCodexImagePayload(call)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+	request, providerErr := s.newChatGPTCodexRequest(encoded, accessToken, account)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	defer response.Body.Close()
+
+	content, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, providerErrorFromUpstream(response.StatusCode, content)
+	}
+
+	parsed := parseChatGPTCodexResponse(content)
+	if len(parsed.Images) == 0 {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "Upstream returned no image data", Type: "api_error"}
+	}
+	created := parsed.Created
+	if created <= 0 {
+		created = unixNow()
+	}
+	return gin.H{"created": created, "data": parsed.Images}, nil
+}
+
+func (s *Server) newChatGPTCodexRequest(encoded []byte, accessToken string, account OpenAIAccount) (*http.Request, *ProviderError) {
+	request, err := http.NewRequest(http.MethodPost, s.chatGPTCodexResponsesURL(), bytes.NewReader(encoded))
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	}
+	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "text/event-stream")
+	request.Header.Set("OpenAI-Beta", "responses=experimental")
+	request.Header.Set("Originator", chatGPTCodexOriginator)
+	request.Header.Set("User-Agent", chatGPTCodexUserAgent)
+	request.Header.Set("Version", chatGPTCodexVersion)
+	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
+		request.Header.Set("Chatgpt-Account-Id", accountID)
+	}
+	return request, nil
+}
+
+func (s *Server) chatGPTCodexResponsesURL() string {
+	return joinURL(s.chatGPTAPIBase, "codex/responses")
+}
+
+func buildChatGPTCodexChatPayload(call GatewayCall, stream bool) ([]byte, *ProviderError) {
+	instructions, input := chatMessagesToCodexInput(call.Body.Messages)
+	payload := gin.H{
+		"model":               call.Model.ID,
+		"stream":              stream,
+		"store":               false,
+		"parallel_tool_calls": true,
+		"input":               input,
+	}
+	if strings.TrimSpace(instructions) != "" {
+		payload["instructions"] = instructions
+	}
+	for key, value := range call.Body.Payload {
+		switch key {
+		case "model", "messages", "stream":
+			continue
+		case "temperature", "top_p", "reasoning", "tools", "tool_choice", "metadata", "service_tier", "include", "previous_response_id":
+			payload[key] = value
+		case "max_output_tokens":
+			payload[key] = value
+		case "max_tokens":
+			payload["max_output_tokens"] = value
+		case "store":
+			payload[key] = value
+		case "parallel_tool_calls":
+			payload[key] = value
+		}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "Failed to encode upstream request", Type: "invalid_request_error"}
+	}
+	return encoded, nil
+}
+
+func buildChatGPTCodexImagePayload(call ImageGatewayCall) ([]byte, *ProviderError) {
+	tool := gin.H{
+		"type":   "image_generation",
+		"action": "generate",
+		"model":  call.Model.ID,
+	}
+	for _, key := range []string{"size", "quality", "background", "output_format", "moderation", "style"} {
+		if value, ok := call.Body.Payload[key]; ok && strings.TrimSpace(completionPrompt(value)) != "" {
+			tool[key] = value
+		}
+	}
+	for _, key := range []string{"n", "output_compression", "partial_images"} {
+		if value, ok := call.Body.Payload[key]; ok {
+			tool[key] = value
+		}
+	}
+	payload := gin.H{
+		"model":               chatGPTCodexImageModel,
+		"stream":              true,
+		"store":               false,
+		"parallel_tool_calls": true,
+		"reasoning":           gin.H{"effort": "medium", "summary": "auto"},
+		"include":             []string{"reasoning.encrypted_content"},
+		"tool_choice":         gin.H{"type": "image_generation"},
+		"tools":               []gin.H{tool},
+		"input":               []gin.H{{"type": "message", "role": "user", "content": []gin.H{{"type": "input_text", "text": call.Body.Prompt}}}},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "Failed to encode upstream request", Type: "invalid_request_error"}
+	}
+	return encoded, nil
+}
+
+func chatMessagesToCodexInput(messages []ChatMessage) (string, []gin.H) {
+	instructions := []string{}
+	input := []gin.H{}
+	for _, message := range messages {
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		if role == "" {
+			role = "user"
+		}
+		if role == "system" || role == "developer" {
+			if text := strings.TrimSpace(messageContentText(message.Content)); text != "" {
+				instructions = append(instructions, text)
+			}
+			continue
+		}
+		if role != "assistant" && role != "user" {
+			role = "user"
+		}
+		input = append(input, gin.H{
+			"role":    role,
+			"content": codexContentBlocks(message.Content, role),
+		})
+	}
+	if len(input) == 0 {
+		input = append(input, gin.H{"role": "user", "content": []gin.H{{"type": "input_text", "text": ""}}})
+	}
+	return strings.Join(instructions, "\n\n"), input
+}
+
+func codexContentBlocks(content interface{}, role string) []gin.H {
+	textType := "input_text"
+	if role == "assistant" {
+		textType = "output_text"
+	}
+	switch typed := content.(type) {
+	case []interface{}:
+		blocks := []gin.H{}
+		for _, item := range typed {
+			part, ok := item.(map[string]interface{})
+			if !ok {
+				if text := strings.TrimSpace(completionPrompt(item)); text != "" {
+					blocks = append(blocks, gin.H{"type": textType, "text": text})
+				}
+				continue
+			}
+			partType := strings.ToLower(strings.TrimSpace(completionPrompt(part["type"])))
+			switch partType {
+			case "text", "input_text", "output_text":
+				if text := strings.TrimSpace(completionPrompt(part["text"])); text != "" {
+					blocks = append(blocks, gin.H{"type": textType, "text": text})
+				}
+			case "image_url":
+				imageURL := completionPrompt(part["image_url"])
+				if nested, ok := part["image_url"].(map[string]interface{}); ok {
+					imageURL = completionPrompt(nested["url"])
+				}
+				if strings.TrimSpace(imageURL) != "" {
+					blocks = append(blocks, gin.H{"type": "input_image", "image_url": imageURL})
+				}
+			case "input_image":
+				imageURL := completionPrompt(part["image_url"])
+				if strings.TrimSpace(imageURL) != "" {
+					blocks = append(blocks, gin.H{"type": "input_image", "image_url": imageURL})
+				}
+			default:
+				if text := strings.TrimSpace(completionPrompt(part)); text != "" {
+					blocks = append(blocks, gin.H{"type": textType, "text": text})
+				}
+			}
+		}
+		if len(blocks) > 0 {
+			return blocks
+		}
+	}
+	if text := messageContentText(content); strings.TrimSpace(text) != "" {
+		return []gin.H{{"type": textType, "text": text}}
+	}
+	return []gin.H{{"type": textType, "text": ""}}
+}
+
+func messageContentText(content interface{}) string {
+	switch typed := content.(type) {
+	case string:
+		return typed
+	case []interface{}:
+		parts := []string{}
+		for _, item := range typed {
+			if part, ok := item.(map[string]interface{}); ok {
+				if text := strings.TrimSpace(completionPrompt(part["text"])); text != "" {
+					parts = append(parts, text)
+					continue
+				}
+			}
+			if text := strings.TrimSpace(completionPrompt(item)); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return completionPrompt(content)
+	}
+}
+
+func parseChatGPTCodexResponse(content []byte) chatGPTCodexParseResult {
+	result := chatGPTCodexParseResult{Created: unixNow(), imageSeen: map[string]bool{}}
+	dataLines := []string{}
+	foundSSE := false
+	flushEvent := func() {
+		if len(dataLines) == 0 {
+			return
+		}
+		data := strings.TrimSpace(strings.Join(dataLines, "\n"))
+		dataLines = nil
+		if data == "" || data == "[DONE]" {
+			return
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &payload); err == nil {
+			collectCodexPayload(payload, &result)
+		}
+	}
+	for _, rawLine := range strings.Split(string(content), "\n") {
+		line := strings.TrimRight(rawLine, "\r")
+		if strings.TrimSpace(line) == "" {
+			flushEvent()
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			foundSSE = true
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	flushEvent()
+	if foundSSE {
+		return result
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(content, &payload); err == nil {
+		collectCodexPayload(payload, &result)
+	}
+	return result
+}
+
+func collectCodexPayload(payload map[string]interface{}, result *chatGPTCodexParseResult) {
+	if result == nil || payload == nil {
+		return
+	}
+	if delta := codexOutputTextDelta(payload); delta != "" {
+		result.Text += delta
+	}
+	if text := codexCompletedText(payload); text != "" {
+		result.CompletedText = text
+	}
+	if usage, ok := codexUsage(payload["usage"]); ok {
+		result.Usage = usage
+	}
+	if created, ok := asInt(payload["created_at"]); ok && created > 0 {
+		result.Created = int64(created)
+	}
+	collectCodexImagesFromMap(payload, result)
+	if response, ok := payload["response"].(map[string]interface{}); ok {
+		if usage, ok := codexUsage(response["usage"]); ok {
+			result.Usage = usage
+		}
+		if created, ok := asInt(response["created_at"]); ok && created > 0 {
+			result.Created = int64(created)
+		}
+		if text := codexResponseText(response); text != "" {
+			result.CompletedText = text
+		}
+		collectCodexImagesFromMap(response, result)
+	}
+	if item, ok := payload["item"].(map[string]interface{}); ok {
+		collectCodexImagesFromMap(item, result)
+	}
+}
+
+func codexOutputTextDelta(payload map[string]interface{}) string {
+	if !strings.EqualFold(completionPrompt(payload["type"]), "response.output_text.delta") {
+		return ""
+	}
+	return completionPrompt(payload["delta"])
+}
+
+func codexCompletedText(payload map[string]interface{}) string {
+	if response, ok := payload["response"].(map[string]interface{}); ok {
+		return codexResponseText(response)
+	}
+	return codexResponseText(payload)
+}
+
+func codexResponseText(payload map[string]interface{}) string {
+	if text := completionPrompt(payload["output_text"]); strings.TrimSpace(text) != "" && text != "null" {
+		return text
+	}
+	output, ok := payload["output"].([]interface{})
+	if !ok {
+		return ""
+	}
+	parts := []string{}
+	for _, item := range output {
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if text := codexOutputItemText(entry); strings.TrimSpace(text) != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func codexOutputItemText(item map[string]interface{}) string {
+	if text := completionPrompt(item["text"]); strings.TrimSpace(text) != "" && text != "null" {
+		return text
+	}
+	content, ok := item["content"].([]interface{})
+	if !ok {
+		return ""
+	}
+	parts := []string{}
+	for _, partValue := range content {
+		part, ok := partValue.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		partType := strings.ToLower(strings.TrimSpace(completionPrompt(part["type"])))
+		if partType != "" && partType != "output_text" && partType != "text" {
+			continue
+		}
+		if text := strings.TrimSpace(completionPrompt(part["text"])); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func collectCodexImagesFromMap(payload map[string]interface{}, result *chatGPTCodexParseResult) {
+	if payload == nil || result == nil {
+		return
+	}
+	if image := codexImageFromMap(payload); image != nil {
+		appendCodexImage(result, image)
+	}
+	if output, ok := payload["output"].([]interface{}); ok {
+		for _, item := range output {
+			if entry, ok := item.(map[string]interface{}); ok {
+				collectCodexImagesFromMap(entry, result)
+			}
+		}
+	}
+}
+
+func codexImageFromMap(payload map[string]interface{}) gin.H {
+	itemType := strings.ToLower(strings.TrimSpace(completionPrompt(payload["type"])))
+	result := strings.TrimSpace(completionPrompt(payload["result"]))
+	if result == "" {
+		result = strings.TrimSpace(completionPrompt(payload["b64_json"]))
+	}
+	if result == "" || (itemType != "image_generation_call" && payload["result"] == nil && payload["b64_json"] == nil) {
+		return nil
+	}
+	image := gin.H{"b64_json": result}
+	for _, key := range []string{"revised_prompt", "output_format", "quality"} {
+		if value := strings.TrimSpace(completionPrompt(payload[key])); value != "" && value != "null" {
+			image[key] = value
+		}
+	}
+	return image
+}
+
+func appendCodexImage(result *chatGPTCodexParseResult, image gin.H) {
+	if result.imageSeen == nil {
+		result.imageSeen = map[string]bool{}
+	}
+	key := completionPrompt(image["b64_json"])
+	if key == "" || result.imageSeen[key] {
+		return
+	}
+	result.imageSeen[key] = true
+	result.Images = append(result.Images, image)
+}
+
+func codexUsage(value interface{}) (gin.H, bool) {
+	switch usage := value.(type) {
+	case map[string]interface{}:
+		return gin.H(usage), true
+	case gin.H:
+		return usage, true
+	default:
+		return nil, false
+	}
+}
+
+func chatCompletionFromCodexResult(call GatewayCall, result chatGPTCodexParseResult) gin.H {
+	text := result.Text
+	if text == "" {
+		text = result.CompletedText
+	}
+	return gin.H{
+		"id":      newID("chatcmpl"),
+		"object":  "chat.completion",
+		"created": unixNow(),
+		"model":   call.Model.ID,
+		"choices": []gin.H{
+			{
+				"index": 0,
+				"message": gin.H{
+					"role":    "assistant",
+					"content": text,
+				},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": chatCompletionUsageFromCodex(result.Usage, call.Body.Messages),
+	}
+}
+
+func chatCompletionUsageFromCodex(usage gin.H, messages []ChatMessage) gin.H {
+	promptTokens := estimateTokens(messages)
+	completionTokens := 18
+	if usage != nil {
+		promptTokens, completionTokens = tokenUsageFromMap(map[string]interface{}(usage), promptTokens, completionTokens)
+	}
+	totalTokens := promptTokens + completionTokens
+	if usage != nil {
+		if value, ok := asInt(usage["total_tokens"]); ok {
+			totalTokens = value
+		}
+	}
+	return gin.H{
+		"prompt_tokens":     promptTokens,
+		"completion_tokens": completionTokens,
+		"total_tokens":      totalTokens,
+	}
 }
 
 func (s *Server) fetchUpstreamModelIDs(channel Channel, upstreamKey string) ([]string, error) {
@@ -3685,35 +4389,24 @@ func (s *Server) fetchOpenAIAccountQuotaLimits(accessToken string) []OpenAIQuota
 }
 
 func (s *Server) checkOpenAIAccountImageGeneration(channel Channel, accessToken string) *ProviderError {
-	if strings.TrimSpace(channel.BaseURL) == "" {
-		return &ProviderError{Status: http.StatusBadRequest, Code: "upstream_not_configured", Message: "Channel Base URL is required before checking image accounts", Type: "invalid_request_error"}
+	modelID := imageHealthCheckModelID(channel)
+	call := ImageGatewayCall{
+		RequestID: newID("req"),
+		Model:     Model{ID: modelID},
+		Channel:   channel,
+		Body: ImageRequest{
+			Model:  modelID,
+			Prompt: "health check",
+			Payload: map[string]interface{}{
+				"model":  modelID,
+				"prompt": "health check",
+				"n":      float64(1),
+				"size":   "1024x1024",
+			},
+		},
 	}
-	payload := gin.H{
-		"model":  imageHealthCheckModelID(channel),
-		"prompt": "health check",
-		"n":      1,
-		"size":   "1024x1024",
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "Failed to encode image health check request", Type: "invalid_request_error"}
-	}
-	request, err := http.NewRequest(http.MethodPost, joinURL(channel.BaseURL, "images/generations"), bytes.NewReader(encoded))
-	if err != nil {
-		return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
-	}
-	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
-	request.Header.Set("Content-Type", "application/json")
-	response, err := s.httpClient.Do(request)
-	if err != nil {
-		return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
-	}
-	defer response.Body.Close()
-	content, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if response.StatusCode >= 200 && response.StatusCode < 300 {
-		return nil
-	}
-	return providerErrorFromUpstream(response.StatusCode, content)
+	_, providerErr := s.callChatGPTCodexImageWithAccount(call, OpenAIAccount{}, accessToken)
+	return providerErr
 }
 
 func imageHealthCheckModelID(channel Channel) string {
@@ -4085,6 +4778,10 @@ func (s *Server) refreshOpenAIAccount(refreshToken string) (OpenAIRefreshResult,
 }
 
 func (s *Server) streamOpenAICompatible(c *gin.Context, call GatewayCall) *ProviderError {
+	if len(activeOpenAIAccounts(call.Channel.OpenAIAccounts)) > 0 {
+		return s.streamChatGPTCodex(c, call)
+	}
+
 	request, providerErr := s.newOpenAICompatibleRequest(call, true)
 	if providerErr != nil {
 		return providerErr
@@ -5544,6 +6241,16 @@ func shouldInvalidateOpenAIAccountForImage(providerErr *ProviderError) bool {
 	return isBillingProviderError(providerErr) || isImagePermissionProviderError(providerErr) || isTokenInvalidatedProviderError(providerErr)
 }
 
+func shouldInvalidateOpenAIAccountForChat(providerErr *ProviderError) bool {
+	if providerErr == nil {
+		return false
+	}
+	if isTokenInvalidatedProviderError(providerErr) || providerErr.Status == http.StatusUnauthorized {
+		return true
+	}
+	return allowedString(providerErr.Code, "upstream_authentication_error", "upstream_invalid_api_key")
+}
+
 func isImagePermissionProviderError(providerErr *ProviderError) bool {
 	if providerErr == nil {
 		return false
@@ -5787,10 +6494,13 @@ func isDemoSeedChannel(channel Channel) bool {
 
 func isDemoSeedModel(model Model) bool {
 	switch model.ID {
-	case "gpt-5.6":
-		return model.Name == "GPT-5.6" && model.Vendor == "OpenAI"
 	case "gpt-5.5":
 		return model.Name == "GPT-5.5" && model.Vendor == "OpenAI"
+	case "gpt-5.4":
+		return model.Name == "GPT-5.4" && model.Vendor == "OpenAI"
+	case "gpt-5.6":
+		// Legacy demo data cleanup only; 5.6 is not offered as an active default.
+		return model.Name == "GPT-5.6" && model.Vendor == "OpenAI"
 	case "claude-fable-5":
 		return model.Name == "Claude Fable 5" && model.Vendor == "Claude"
 	case "gemini-3.1":

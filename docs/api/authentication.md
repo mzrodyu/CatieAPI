@@ -14,7 +14,7 @@ Authorization: Bearer <catieapi_key>
 curl http://localhost:8787/v1/chat/completions \
   -H "Authorization: Bearer cat_你的_api_key" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}]}'
+  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}'
 ```
 
 ## Key 展示规则

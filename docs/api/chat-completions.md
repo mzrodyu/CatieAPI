@@ -26,7 +26,7 @@ Idempotency-Key: <optional_unique_key>
 
 ```json
 {
-  "model": "gpt-5.6",
+  "model": "gpt-5.5",
   "stream": false,
   "messages": [
     {
@@ -45,7 +45,7 @@ Idempotency-Key: <optional_unique_key>
 curl http://localhost:8787/v1/chat/completions \
   -H "Authorization: Bearer cat_你的_api_key" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}]}'
+  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}'
 ```
 
 省略 `/v1` 的写法：
@@ -84,7 +84,7 @@ curl http://localhost:8787/v1/models \
   "object": "list",
   "data": [
     {
-      "id": "gpt-5.6",
+      "id": "gpt-5.5",
       "object": "model",
       "created": 1780000000,
       "owned_by": "openai"
@@ -100,7 +100,7 @@ curl http://localhost:8787/v1/models \
   "id": "chatcmpl_1780000000000",
   "object": "chat.completion",
   "created": 1780000000,
-  "model": "gpt-5.6",
+  "model": "gpt-5.5",
   "choices": [
     {
       "index": 0,

@@ -38,6 +38,14 @@ func testServerRouter(t *testing.T) (*Server, *gin.Engine) {
 	return server, router
 }
 
+func codexChatSSE(text string) string {
+	return fmt.Sprintf("data: {\"type\":\"response.output_text.delta\",\"delta\":%q}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\ndata: [DONE]\n\n", text)
+}
+
+func codexImageSSE(b64 string) string {
+	return fmt.Sprintf("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"result\":%q}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"created_at\":1780000000,\"output\":[]}}\n\ndata: [DONE]\n\n", b64)
+}
+
 func seedGatewayFixtures(server *Server) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -52,12 +60,12 @@ func seedGatewayFixtures(server *Server) {
 		{ID: "key_1002", UserID: "usr_1002", Name: "App Key", Prefix: "cat_live", Hash: hashSecret("cat_fixture_live_secret"), Status: "active", CreatedAt: "2026-07-02T09:12:00.000Z", LastUsedAt: "2026-07-03T21:28:00.000Z", RequestCount: 526},
 	}
 	server.state.Channels = []Channel{
-		{ID: "chn_1001", Name: "OpenAI Compatible", Provider: "openai", BaseURL: "https://upstream-one.example.test/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-5.6", "gpt-5.5"}},
+		{ID: "chn_1001", Name: "OpenAI Compatible", Provider: "openai", BaseURL: "https://upstream-one.example.test/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-5.5", "gpt-5.4"}},
 		{ID: "chn_1002", Name: "Backup Provider", Provider: "compatible", BaseURL: "https://upstream-two.example.test/v1", Status: "standby", Priority: 2, Weight: 20, Models: []string{"claude-fable-5", "gemini-3.1", "deepseek-v4"}},
 	}
 	server.state.Models = []Model{
-		{ID: "gpt-5.6", Name: "GPT-5.6", Vendor: "OpenAI", Aliases: []string{"gpt"}, Category: "通用", Description: "Test model", Price: "高", InputPricePer1K: 0.03, OutputPricePer1K: 0.06, Context: "长上下文", Status: "available", Recommended: true},
-		{ID: "gpt-5.5", Name: "GPT-5.5", Vendor: "OpenAI", Aliases: []string{"gpt55"}, Category: "通用", Description: "Test model", Price: "中", InputPricePer1K: 0.01, OutputPricePer1K: 0.02, Context: "长上下文", Status: "available", Recommended: false},
+		{ID: "gpt-5.5", Name: "GPT-5.5", Vendor: "OpenAI", Aliases: []string{"gpt", "gpt55"}, Category: "通用", Description: "Test model", Price: "高", InputPricePer1K: 0.03, OutputPricePer1K: 0.06, Context: "长上下文", Status: "available", Recommended: true},
+		{ID: "gpt-5.4", Name: "GPT-5.4", Vendor: "OpenAI", Aliases: []string{"gpt54"}, Category: "通用", Description: "Test model", Price: "中", InputPricePer1K: 0.01, OutputPricePer1K: 0.02, Context: "长上下文", Status: "available", Recommended: false},
 		{ID: "claude-fable-5", Name: "Claude Fable 5", Vendor: "Claude", Aliases: []string{"f5"}, Category: "写作", Description: "Test model", Price: "中", InputPricePer1K: 0.01, OutputPricePer1K: 0.02, Context: "长上下文", Status: "available", Recommended: true},
 		{ID: "gemini-3.1", Name: "Gemini 3.1", Vendor: "Google", Aliases: []string{"gemini"}, Category: "多模态", Description: "Test model", Price: "中", InputPricePer1K: 0.01, OutputPricePer1K: 0.02, Context: "超长上下文", Status: "available", Recommended: false},
 		{ID: "deepseek-v4", Name: "DeepSeek V4", Vendor: "DeepSeek", Aliases: []string{"ds", "deepseek"}, Category: "推理", Description: "Test model", Price: "低", InputPricePer1K: 0.002, OutputPricePer1K: 0.004, Context: "长上下文", Status: "available", Recommended: true},
@@ -66,7 +74,7 @@ func seedGatewayFixtures(server *Server) {
 		server.state.Models[i].PricingConfigured = server.state.Models[i].InputPricePer1K > 0 || server.state.Models[i].OutputPricePer1K > 0
 	}
 	server.state.Logs = []RequestLog{
-		{ID: "req_fixture_1", UserID: stringPtr("usr_1002"), APIKeyPrefix: stringPtr("cat_live"), Model: stringPtr("gpt-5.6"), Channel: stringPtr("OpenAI Compatible"), Status: "success", Cost: 0.04, LatencyMS: 820, CreatedAt: "2026-07-04T01:22:00.000Z"},
+		{ID: "req_fixture_1", UserID: stringPtr("usr_1002"), APIKeyPrefix: stringPtr("cat_live"), Model: stringPtr("gpt-5.5"), Channel: stringPtr("OpenAI Compatible"), Status: "success", Cost: 0.04, LatencyMS: 820, CreatedAt: "2026-07-04T01:22:00.000Z"},
 		{ID: "req_fixture_2", UserID: stringPtr("usr_1003"), APIKeyPrefix: stringPtr("cat_trial"), Model: stringPtr("deepseek-v4"), Channel: stringPtr("Backup Provider"), Status: "failed", Cost: 0, LatencyMS: 1200, ErrorCode: "upstream_timeout", CreatedAt: "2026-07-04T01:25:00.000Z"},
 	}
 }
@@ -534,6 +542,7 @@ func TestDemoSeedDataIsRemovedOnLoad(t *testing.T) {
 		{ID: "chn_real", Name: "Real Provider", Provider: "compatible", BaseURL: "https://real.example.test/v1", Status: "healthy"},
 	}
 	stored.Models = []Model{
+		{ID: "gpt-5.4", Name: "GPT-5.4", Vendor: "OpenAI", Status: "available"},
 		{ID: "gpt-5.6", Name: "GPT-5.6", Vendor: "OpenAI", Status: "available"},
 		{ID: "real-model", Name: "Real Model", Vendor: "Custom", Status: "available"},
 	}
@@ -619,7 +628,7 @@ func TestDeleteModelCleansReferences(t *testing.T) {
 	seedGatewayFixtures(server)
 
 	server.mu.Lock()
-	server.state.APIKeys[1].AllowedModels = []string{"deepseek-v4", "gpt-5.6"}
+	server.state.APIKeys[1].AllowedModels = []string{"deepseek-v4", "gpt-5.5"}
 	server.mu.Unlock()
 
 	response := perform(router, http.MethodDelete, "/api/models/deepseek-v4", "", nil)
@@ -707,7 +716,7 @@ func TestAPIKeyAllowedModelsRestrictsChat(t *testing.T) {
 		t.Fatalf("allowed models were not canonicalized: %#v", payload.APIKey.AllowedModels)
 	}
 
-	body := `{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}]}`
+	body := `{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}`
 	response := perform(router, http.MethodPost, "/v1/chat/completions", body, map[string]string{"Authorization": "Bearer " + payload.Secret})
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("restricted model status = %d body = %s", response.Code, response.Body.String())
@@ -875,6 +884,64 @@ func TestResponsesEndpointUsesChatFlow(t *testing.T) {
 	}
 	if upstreamPayload["input"] != nil || upstreamPayload["instructions"] != nil {
 		t.Fatalf("responses-only fields leaked to chat upstream: %#v", upstreamPayload)
+	}
+}
+
+func TestOpenAIAccountPoolChatUsesChatGPTCodexResponses(t *testing.T) {
+	var upstreamPayload map[string]interface{}
+	var upstreamAuth string
+	var upstreamPath string
+	var upstreamBeta string
+	var upstreamOriginator string
+	var upstreamAccountID string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamAuth = r.Header.Get("Authorization")
+		upstreamPath = r.URL.Path
+		upstreamBeta = r.Header.Get("OpenAI-Beta")
+		upstreamOriginator = r.Header.Get("Originator")
+		upstreamAccountID = r.Header.Get("Chatgpt-Account-Id")
+		if r.URL.Path != "/backend-api/codex/responses" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamPayload); err != nil {
+			t.Fatalf("decode codex request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(codexChatSSE("hello from codex")))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	channel := server.findChannel("chn_1001")
+	channel.BaseURL = "https://api.openai.com/v1"
+	channel.OpenAIAccounts = []OpenAIAccount{
+		{ID: "oaiacc_chat", Email: "chat@example.com", AccessToken: "oauth-token", AccountID: "chatgpt-account", Status: "healthy"},
+	}
+	server.mu.Unlock()
+
+	body := `{"model":"gpt-5.5","messages":[{"role":"system","content":"be brief"},{"role":"user","content":"hello"}]}`
+	response := perform(router, http.MethodPost, "/v1/chat/completions", body, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("chat status = %d body = %s", response.Code, response.Body.String())
+	}
+	if upstreamPath != "/backend-api/codex/responses" || upstreamAuth != "Bearer oauth-token" {
+		t.Fatalf("unexpected codex upstream path/auth = %s %s", upstreamPath, upstreamAuth)
+	}
+	if upstreamBeta != "responses=experimental" || upstreamOriginator != chatGPTCodexOriginator || upstreamAccountID != "chatgpt-account" {
+		t.Fatalf("missing codex headers beta=%s originator=%s account=%s", upstreamBeta, upstreamOriginator, upstreamAccountID)
+	}
+	if upstreamPayload["model"] != "gpt-5.5" || upstreamPayload["stream"] != true || upstreamPayload["store"] != false {
+		t.Fatalf("unexpected codex payload = %#v", upstreamPayload)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"content":"hello from codex"`)) {
+		t.Fatalf("chat response was not converted: %s", response.Body.String())
 	}
 }
 
@@ -1143,7 +1210,7 @@ func TestGatewayFailsOverToNextChannelOnRetryableError(t *testing.T) {
 	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		secondCalls++
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"chatcmpl_fallback","object":"chat.completion","model":"gpt-5.6","choices":[{"index":0,"message":{"role":"assistant","content":"fallback ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_fallback","object":"chat.completion","model":"gpt-5.5","choices":[{"index":0,"message":{"role":"assistant","content":"fallback ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
 	}))
 	defer second.Close()
 
@@ -1156,12 +1223,12 @@ func TestGatewayFailsOverToNextChannelOnRetryableError(t *testing.T) {
 	seedGatewayFixtures(server)
 	server.mu.Lock()
 	server.state.Channels = []Channel{
-		{ID: "chn_primary", Name: "Primary", BaseURL: first.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-5.6"}},
-		{ID: "chn_fallback", Name: "Fallback", BaseURL: second.URL + "/v1", Status: "standby", Priority: 2, Weight: 100, Models: []string{"gpt-5.6"}},
+		{ID: "chn_primary", Name: "Primary", BaseURL: first.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-5.5"}},
+		{ID: "chn_fallback", Name: "Fallback", BaseURL: second.URL + "/v1", Status: "standby", Priority: 2, Weight: 100, Models: []string{"gpt-5.5"}},
 	}
 	server.mu.Unlock()
 
-	response := perform(router, http.MethodPost, "/v1/chat/completions", `{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}]}`, map[string]string{
+	response := perform(router, http.MethodPost, "/v1/chat/completions", `{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}`, map[string]string{
 		"Authorization": "Bearer cat_fixture_admin_secret",
 	})
 	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`fallback ok`)) {
@@ -1280,7 +1347,7 @@ func TestImageGenerationsRetryNextOpenAIAccountOnBillingError(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		authHeaders = append(authHeaders, auth)
-		if r.URL.Path != "/v1/images/generations" {
+		if r.URL.Path != "/backend-api/codex/responses" {
 			t.Fatalf("upstream image path = %s", r.URL.Path)
 		}
 		if auth == "Bearer billing-token" {
@@ -1289,14 +1356,15 @@ func TestImageGenerationsRetryNextOpenAIAccountOnBillingError(t *testing.T) {
 			_, _ = w.Write([]byte(`{"error":{"code":"billing_not_active","message":"billing inactive","type":"billing_not_active"}}`))
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"b64_json":"image-after-retry"}]}`))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(codexImageSSE("image-after-retry")))
 	}))
 	defer upstream.Close()
 
 	withEnv(t, map[string]string{
-		"PERSISTENCE":   "memory",
-		"PROVIDER_MODE": "mock",
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
 	})
 	server, router := testServerRouter(t)
 	seedGatewayFixtures(server)
@@ -1342,7 +1410,7 @@ func TestImageGenerationsRetryNextOpenAIAccountOnMissingImageScope(t *testing.T)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		authHeaders = append(authHeaders, auth)
-		if r.URL.Path != "/v1/images/generations" {
+		if r.URL.Path != "/backend-api/codex/responses" {
 			t.Fatalf("upstream image path = %s", r.URL.Path)
 		}
 		if auth == "Bearer no-image-scope-token" {
@@ -1351,14 +1419,15 @@ func TestImageGenerationsRetryNextOpenAIAccountOnMissingImageScope(t *testing.T)
 			_, _ = w.Write([]byte(`{"error":{"code":"upstream_error","message":"You have insufficient permissions for this operation. Missing scopes: api.model.images.request.","type":"invalid_request_error"}}`))
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"b64_json":"image-after-scope-retry"}]}`))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(codexImageSSE("image-after-scope-retry")))
 	}))
 	defer upstream.Close()
 
 	withEnv(t, map[string]string{
-		"PERSISTENCE":   "memory",
-		"PROVIDER_MODE": "mock",
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
 	})
 	server, router := testServerRouter(t)
 	seedGatewayFixtures(server)
@@ -1409,7 +1478,7 @@ func TestImageGenerationsRetryNextOpenAIAccountOnInvalidatedToken(t *testing.T) 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		authHeaders = append(authHeaders, auth)
-		if r.URL.Path != "/v1/images/generations" {
+		if r.URL.Path != "/backend-api/codex/responses" {
 			t.Fatalf("upstream image path = %s", r.URL.Path)
 		}
 		if auth == "Bearer invalidated-token" {
@@ -1418,14 +1487,15 @@ func TestImageGenerationsRetryNextOpenAIAccountOnInvalidatedToken(t *testing.T) 
 			_, _ = w.Write([]byte(`{"error":{"code":"upstream_token_invalidated","message":"Your authentication token has been invalidated. Please try signing in again.","param":"model","type":"invalid_request_error"}}`))
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"b64_json":"image-after-token-retry"}]}`))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(codexImageSSE("image-after-token-retry")))
 	}))
 	defer upstream.Close()
 
 	withEnv(t, map[string]string{
-		"PERSISTENCE":   "memory",
-		"PROVIDER_MODE": "mock",
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
 	})
 	server, router := testServerRouter(t)
 	seedGatewayFixtures(server)
@@ -1473,7 +1543,7 @@ func TestImageGenerationsRetryNextOpenAIAccountOnInvalidatedToken(t *testing.T) 
 
 func TestImageGenerationsReturnPoolUnavailableWhenAllOpenAIAccountsInvalidated(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/images/generations" {
+		if r.URL.Path != "/backend-api/codex/responses" {
 			t.Fatalf("upstream image path = %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -1483,8 +1553,9 @@ func TestImageGenerationsReturnPoolUnavailableWhenAllOpenAIAccountsInvalidated(t
 	defer upstream.Close()
 
 	withEnv(t, map[string]string{
-		"PERSISTENCE":   "memory",
-		"PROVIDER_MODE": "mock",
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
 	})
 	server, router := testServerRouter(t)
 	seedGatewayFixtures(server)
@@ -1891,19 +1962,22 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 			usageAuthHeaders = append(usageAuthHeaders, auth)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"object":"usage","limits":[{"name":"5h","used":4,"limit":100,"reset_at":"2026-07-06T05:00:00Z"},{"name":"weekly","remaining":90,"limit":100,"reset_at":"2026-07-13T00:00:00Z"}]}`))
-		case "/v1/images/generations":
+		case "/backend-api/codex/responses":
 			imageAuthHeaders = append(imageAuthHeaders, auth)
-			w.Header().Set("Content-Type", "application/json")
 			switch {
 			case strings.Contains(auth, "good-token"):
-				_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"b64_json":"ok"}]}`))
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(codexImageSSE("ok")))
 			case strings.Contains(auth, "missing-image-scope-token"):
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				_, _ = w.Write([]byte(`{"error":{"code":"upstream_error","message":"You have insufficient permissions for this operation. Missing scopes: api.model.images.request.","type":"invalid_request_error"}}`))
 			case strings.Contains(auth, "invalidated-token"):
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				_, _ = w.Write([]byte(`{"error":{"code":"upstream_token_invalidated","message":"Your authentication token has been invalidated. Please try signing in again.","type":"invalid_request_error"}}`))
 			case strings.Contains(auth, "billing-token"):
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusPaymentRequired)
 				_, _ = w.Write([]byte(`{"error":{"code":"billing_not_active","message":"billing inactive","type":"billing_not_active"}}`))
 			default:

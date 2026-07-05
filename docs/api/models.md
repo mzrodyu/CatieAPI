@@ -28,7 +28,13 @@ curl http://localhost:8787/v1/models \
   "object": "list",
   "data": [
     {
-      "id": "gpt-5.6",
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1780000000,
+      "owned_by": "openai"
+    },
+    {
+      "id": "gpt-5.4",
       "object": "model",
       "created": 1780000000,
       "owned_by": "openai"
@@ -52,13 +58,13 @@ GET /models/{model}
 示例：
 
 ```bash
-curl http://localhost:8787/v1/models/gpt-5.6 \
+curl http://localhost:8787/v1/models/gpt-5.5 \
   -H "Authorization: Bearer cat_你的_api_key"
 ```
 
 `model` 支持模型 ID 和别名：
 
-- `gpt-5.6`、`gpt-5.5`、`gpt`、`安全区`
+- `gpt-5.5`、`gpt-5.4`、`gpt`、`gpt55`、`gpt54`
 - `claude-fable-5`、`f5`、`肥波5`
 - `gemini-3.1`、`哈基米`、`基米`
 - `deepseek-v4`、`ds`、`deepseek`、`鲸鱼`
