@@ -5601,18 +5601,67 @@ func parseOpenAIAccountImport(payload map[string]interface{}) []ImportedOpenAIAc
 			credentials, _ := item["credentials"].(map[string]interface{})
 			codexAuth, _ := item["codex_auth"].(map[string]interface{})
 			tokens, _ := codexAuth["tokens"].(map[string]interface{})
+			metadata, _ := item["metadata"].(map[string]interface{})
 			account := ImportedOpenAIAccount{
-				Name:         firstNonEmptyString(stringFromMap(item, "name"), stringFromMap(credentials, "name")),
-				Email:        stringFromMap(credentials, "email"),
-				AccessToken:  firstNonEmptyString(stringFromMap(credentials, "access_token"), stringFromMap(tokens, "access_token")),
-				RefreshToken: firstNonEmptyString(stringFromMap(credentials, "refresh_token"), stringFromMap(tokens, "refresh_token")),
-				IDToken:      firstNonEmptyString(stringFromMap(credentials, "id_token"), stringFromMap(tokens, "id_token")),
-				AccountID:    firstNonEmptyString(stringFromMap(credentials, "chatgpt_account_id"), stringFromMap(credentials, "account_id")),
-				UserID:       firstNonEmptyString(stringFromMap(credentials, "chatgpt_user_id"), stringFromMap(credentials, "user_id")),
-				ExpiresAt:    stringFromMap(credentials, "expires_at"),
-				LastRefresh:  stringFromMap(credentials, "last_refresh"),
-				PlanType:     stringFromMap(credentials, "plan_type"),
-				Source:       "sub2api",
+				Name: firstNonEmptyString(
+					stringFromMap(item, "name"),
+					stringFromMap(credentials, "name"),
+				),
+				Email: firstNonEmptyString(
+					stringFromMap(credentials, "email"),
+					stringFromMap(tokens, "email"),
+					stringFromMap(item, "email"),
+					stringFromMap(metadata, "email"),
+				),
+				AccessToken: firstNonEmptyString(
+					stringFromMap(credentials, "access_token"),
+					stringFromMap(tokens, "access_token"),
+					stringFromMap(item, "access_token"),
+				),
+				RefreshToken: firstNonEmptyString(
+					stringFromMap(credentials, "refresh_token"),
+					stringFromMap(tokens, "refresh_token"),
+					stringFromMap(item, "refresh_token"),
+				),
+				IDToken: firstNonEmptyString(
+					stringFromMap(credentials, "id_token"),
+					stringFromMap(tokens, "id_token"),
+					stringFromMap(item, "id_token"),
+				),
+				AccountID: firstNonEmptyString(
+					stringFromMap(credentials, "chatgpt_account_id"),
+					stringFromMap(credentials, "account_id"),
+					stringFromMap(tokens, "chatgpt_account_id"),
+					stringFromMap(tokens, "account_id"),
+					stringFromMap(item, "chatgpt_account_id"),
+					stringFromMap(item, "account_id"),
+					stringFromMap(metadata, "chatgpt_account_id"),
+					stringFromMap(metadata, "account_id"),
+				),
+				UserID: firstNonEmptyString(
+					stringFromMap(credentials, "chatgpt_user_id"),
+					stringFromMap(credentials, "user_id"),
+					stringFromMap(tokens, "chatgpt_user_id"),
+					stringFromMap(tokens, "user_id"),
+					stringFromMap(item, "chatgpt_user_id"),
+					stringFromMap(item, "user_id"),
+				),
+				ExpiresAt: firstNonEmptyString(
+					stringFromMap(credentials, "expires_at"),
+					stringFromMap(tokens, "expires_at"),
+					stringFromMap(item, "expires_at"),
+				),
+				LastRefresh: firstNonEmptyString(
+					stringFromMap(credentials, "last_refresh"),
+					stringFromMap(tokens, "last_refresh"),
+					stringFromMap(item, "last_refresh"),
+				),
+				PlanType: firstNonEmptyString(
+					stringFromMap(credentials, "plan_type"),
+					stringFromMap(tokens, "plan_type"),
+					stringFromMap(item, "plan_type"),
+				),
+				Source: "sub2api",
 			}
 			if account.Email == "" && strings.Contains(account.Name, "@") {
 				account.Email = account.Name
@@ -5694,6 +5743,7 @@ func parseOpenAIAccountImportJSON(content []byte) ([]ImportedOpenAIAccount, []st
 	importData := payload
 	if nested, ok := payload["data"].(map[string]interface{}); ok {
 		importData = nested
+		models = mergeStrings(models, stringSliceFromAny(importData["models"]))
 	}
 	accounts := parseOpenAIAccountImport(importData)
 	invalid := 0
@@ -5803,11 +5853,7 @@ func stringFromMap(values map[string]interface{}, key string) string {
 	if !ok {
 		return ""
 	}
-	text, ok := value.(string)
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(text)
+	return stringFromAny(value)
 }
 
 func stringSliceFromAny(value interface{}) []string {

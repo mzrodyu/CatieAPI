@@ -1802,6 +1802,7 @@ func TestImportSub2APIJSONAddsAccountsToExistingChannel(t *testing.T) {
 		"models":["gpt-image-2"],
 		"data":{
 			"exported_at":"2026-07-06T00:00:00Z",
+			"models":["gpt-5.4"],
 			"accounts":[
 				{
 					"name":"first@example.com",
@@ -1828,6 +1829,20 @@ func TestImportSub2APIJSONAddsAccountsToExistingChannel(t *testing.T) {
 							"refresh_token":"second-refresh-token"
 						}
 					}
+				},
+				{
+					"email":"third@example.com",
+					"platform":"openai",
+					"type":"oauth",
+					"codex_auth":{
+						"tokens":{
+							"access_token":"third-access-token",
+							"refresh_token":"third-refresh-token",
+							"account_id":"acc_third",
+							"user_id":"user_third",
+							"expires_at":"2026-07-06T02:00:00Z"
+						}
+					}
 				}
 			],
 			"type":"sub2api-data",
@@ -1838,10 +1853,12 @@ func TestImportSub2APIJSONAddsAccountsToExistingChannel(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("Sub2 import status = %d body = %s", response.Code, response.Body.String())
 	}
-	if bytes.Contains(response.Body.Bytes(), []byte("first-access-token")) || bytes.Contains(response.Body.Bytes(), []byte("second-access-token")) {
+	if bytes.Contains(response.Body.Bytes(), []byte("first-access-token")) ||
+		bytes.Contains(response.Body.Bytes(), []byte("second-access-token")) ||
+		bytes.Contains(response.Body.Bytes(), []byte("third-access-token")) {
 		t.Fatalf("Sub2 import response leaked token: %s", response.Body.String())
 	}
-	if !bytes.Contains(response.Body.Bytes(), []byte(`"imported":2`)) {
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"imported":3`)) {
 		t.Fatalf("Sub2 import response missing imported count: %s", response.Body.String())
 	}
 
@@ -1851,8 +1868,14 @@ func TestImportSub2APIJSONAddsAccountsToExistingChannel(t *testing.T) {
 	if channel == nil {
 		t.Fatal("target channel missing")
 	}
-	if len(channel.OpenAIAccounts) != 2 {
+	if len(channel.OpenAIAccounts) != 3 {
 		t.Fatalf("imported account count = %d", len(channel.OpenAIAccounts))
+	}
+	if channel.OpenAIAccounts[2].Email != "third@example.com" ||
+		channel.OpenAIAccounts[2].AccountID != "acc_third" ||
+		channel.OpenAIAccounts[2].UserID != "user_third" ||
+		channel.OpenAIAccounts[2].ExpiresAt != "2026-07-06T02:00:00Z" {
+		t.Fatalf("Sub2 codex_auth token fields were not imported: %#v", channel.OpenAIAccounts[2])
 	}
 	upstreamKey, err := server.channelUpstreamKey(*channel)
 	if err != nil {
@@ -1863,6 +1886,9 @@ func TestImportSub2APIJSONAddsAccountsToExistingChannel(t *testing.T) {
 	}
 	if !containsString(channel.Models, "gpt-image-2") {
 		t.Fatalf("import did not add model to target channel: %#v", channel.Models)
+	}
+	if !containsString(channel.Models, "gpt-5.4") {
+		t.Fatalf("import did not add nested Sub2 model to target channel: %#v", channel.Models)
 	}
 	if !containsString(channel.Models, "gpt-image-1") {
 		t.Fatalf("import did not add default image model to target channel: %#v", channel.Models)
