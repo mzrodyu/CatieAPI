@@ -1,9 +1,11 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1549,6 +1551,89 @@ func TestImportSub2APIJSONAddsAccountsToExistingChannel(t *testing.T) {
 	}
 	if server.findModel("gpt-image-2") == nil {
 		t.Fatal("import did not create missing model")
+	}
+}
+
+func TestImportOpenAIAccountsFromZipAddsAccountsToExistingChannel(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+
+	var zipBody bytes.Buffer
+	zipWriter := zip.NewWriter(&zipBody)
+	cpaFile, err := zipWriter.Create("cpa/no-refresh.json")
+	if err != nil {
+		t.Fatalf("create cpa zip file: %v", err)
+	}
+	_, _ = cpaFile.Write([]byte(`{
+		"access_token":"zip-cpa-access-token",
+		"account_id":"acc_zip_cpa",
+		"email":"zip-cpa@example.com",
+		"type":"codex"
+	}`))
+	sub2File, err := zipWriter.Create("sub2/accounts.json")
+	if err != nil {
+		t.Fatalf("create sub2 zip file: %v", err)
+	}
+	_, _ = sub2File.Write([]byte(`{
+		"type":"sub2api-data",
+		"accounts":[
+			{
+				"name":"zip-sub2@example.com",
+				"credentials":{
+					"access_token":"zip-sub2-access-token",
+					"email":"zip-sub2@example.com",
+					"chatgpt_account_id":"acc_zip_sub2"
+				}
+			}
+		]
+	}`))
+	invalidFile, err := zipWriter.Create("notes/not-an-account.json")
+	if err != nil {
+		t.Fatalf("create invalid zip file: %v", err)
+	}
+	_, _ = invalidFile.Write([]byte(`{"hello":"world"}`))
+	if err := zipWriter.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+
+	var multipartBody bytes.Buffer
+	multipartWriter := multipart.NewWriter(&multipartBody)
+	part, err := multipartWriter.CreateFormFile("file", "accounts.zip")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	_, _ = part.Write(zipBody.Bytes())
+	if err := multipartWriter.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/channels/chn_1002/import-openai-accounts", &multipartBody)
+	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, req)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("ZIP import status = %d body = %s", response.Code, response.Body.String())
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte("zip-cpa-access-token")) || bytes.Contains(response.Body.Bytes(), []byte("zip-sub2-access-token")) {
+		t.Fatalf("ZIP import response leaked token: %s", response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"imported":2`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"skipped":1`)) {
+		t.Fatalf("ZIP import response missing summary: %s", response.Body.String())
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel := server.findChannel("chn_1002")
+	if channel == nil {
+		t.Fatal("target channel missing")
+	}
+	if len(channel.OpenAIAccounts) != 2 {
+		t.Fatalf("imported ZIP account count = %d", len(channel.OpenAIAccounts))
+	}
+	if channel.OpenAIAccounts[0].RefreshToken != "" {
+		t.Fatal("missing refresh_token should be stored as empty and still imported")
 	}
 }
 

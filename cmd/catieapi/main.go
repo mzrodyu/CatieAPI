@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
@@ -2184,25 +2185,17 @@ func (s *Server) createChannel(c *gin.Context) {
 }
 
 func (s *Server) importOpenAIAccounts(c *gin.Context) {
-	var payload map[string]interface{}
-	if err := c.ShouldBindJSON(&payload); err != nil {
-		s.openAIError(c, http.StatusBadRequest, "invalid_json", "Request body must be valid JSON", "invalid_request_error", nil)
+	accounts, models, invalid, err := parseOpenAIAccountImportRequest(c)
+	if err != nil {
+		s.openAIError(c, http.StatusBadRequest, "invalid_import", err.Error(), "invalid_request_error", nil)
 		return
 	}
-
-	models := stringSliceFromAny(payload["models"])
-	importData := payload
-	if nested, ok := payload["data"].(map[string]interface{}); ok {
-		importData = nested
-	}
-	accounts := parseOpenAIAccountImport(importData)
 	if len(accounts) == 0 {
-		validationError(c, "No CPA or Sub2API accounts found in JSON")
+		validationError(c, "No CPA or Sub2API accounts found in import file")
 		return
 	}
 
 	importedAccounts := []PublicOpenAIAccount{}
-	invalid := 0
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	channel := s.findChannel(c.Param("id"))
@@ -4122,6 +4115,126 @@ func parseOpenAIAccountImport(payload map[string]interface{}) []ImportedOpenAIAc
 	return nil
 }
 
+func parseOpenAIAccountImportRequest(c *gin.Context) ([]ImportedOpenAIAccount, []string, int, error) {
+	contentType := strings.ToLower(c.GetHeader("Content-Type"))
+	if strings.Contains(contentType, "multipart/form-data") {
+		file, header, err := c.Request.FormFile("file")
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("missing import file")
+		}
+		defer file.Close()
+		content, err := io.ReadAll(io.LimitReader(file, 128<<20))
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		accounts, invalid, err := parseOpenAIAccountImportFile(header.Filename, content)
+		if err != nil {
+			return nil, nil, invalid, err
+		}
+		return accounts, stringSliceFromCSV(c.PostForm("models")), invalid, nil
+	}
+
+	content, err := io.ReadAll(io.LimitReader(c.Request.Body, 128<<20))
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	if len(bytes.TrimSpace(content)) == 0 {
+		return nil, nil, 0, fmt.Errorf("empty import body")
+	}
+	if strings.Contains(contentType, "zip") {
+		accounts, invalid, err := parseOpenAIAccountImportFile("import.zip", content)
+		return accounts, nil, invalid, err
+	}
+	return parseOpenAIAccountImportJSON(content)
+}
+
+func parseOpenAIAccountImportFile(filename string, content []byte) ([]ImportedOpenAIAccount, int, error) {
+	lowerName := strings.ToLower(strings.TrimSpace(filename))
+	if strings.HasSuffix(lowerName, ".zip") || isZipContent(content) {
+		return parseOpenAIAccountImportZip(content)
+	}
+	if lowerName != "" && !strings.HasSuffix(lowerName, ".json") {
+		return nil, 1, fmt.Errorf("import file must be .json or .zip")
+	}
+	accounts, _, invalid, err := parseOpenAIAccountImportJSON(content)
+	return accounts, invalid, err
+}
+
+func parseOpenAIAccountImportJSON(content []byte) ([]ImportedOpenAIAccount, []string, int, error) {
+	var payload map[string]interface{}
+	if err := json.Unmarshal(content, &payload); err != nil {
+		return nil, nil, 1, fmt.Errorf("import JSON is invalid")
+	}
+	models := stringSliceFromAny(payload["models"])
+	importData := payload
+	if nested, ok := payload["data"].(map[string]interface{}); ok {
+		importData = nested
+	}
+	accounts := parseOpenAIAccountImport(importData)
+	invalid := 0
+	if len(accounts) == 0 {
+		invalid = 1
+	}
+	return accounts, models, invalid, nil
+}
+
+func parseOpenAIAccountImportZip(content []byte) ([]ImportedOpenAIAccount, int, error) {
+	reader, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
+	if err != nil {
+		return nil, 1, fmt.Errorf("import ZIP is invalid")
+	}
+	accounts := []ImportedOpenAIAccount{}
+	invalid := 0
+	jsonFiles := 0
+	totalUncompressed := int64(0)
+	for _, file := range reader.File {
+		if file.FileInfo().IsDir() {
+			continue
+		}
+		if !strings.HasSuffix(strings.ToLower(file.Name), ".json") {
+			continue
+		}
+		jsonFiles++
+		if jsonFiles > 10000 {
+			return nil, invalid, fmt.Errorf("import ZIP contains too many JSON files")
+		}
+		if file.UncompressedSize64 > 8<<20 {
+			invalid++
+			continue
+		}
+		totalUncompressed += int64(file.UncompressedSize64)
+		if totalUncompressed > 128<<20 {
+			return nil, invalid, fmt.Errorf("import ZIP JSON content is too large")
+		}
+		handle, err := file.Open()
+		if err != nil {
+			invalid++
+			continue
+		}
+		content, err := io.ReadAll(io.LimitReader(handle, 8<<20))
+		_ = handle.Close()
+		if err != nil {
+			invalid++
+			continue
+		}
+		fileAccounts, _, fileInvalid, err := parseOpenAIAccountImportJSON(content)
+		if err != nil {
+			invalid++
+			continue
+		}
+		invalid += fileInvalid
+		accounts = append(accounts, fileAccounts...)
+	}
+	if jsonFiles == 0 {
+		return nil, invalid, fmt.Errorf("import ZIP does not contain JSON files")
+	}
+	return accounts, invalid, nil
+}
+
+func isZipContent(content []byte) bool {
+	return len(content) >= 4 && content[0] == 'P' && content[1] == 'K' && content[2] == 0x03 && content[3] == 0x04
+}
+
 func (s *Server) ensureImportedModelLocked(modelID string) {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" || s.findModel(modelID) != nil {
@@ -4164,6 +4277,13 @@ func stringSliceFromAny(value interface{}) []string {
 	default:
 		return []string{}
 	}
+}
+
+func stringSliceFromCSV(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return []string{}
+	}
+	return cleanAliases(strings.Split(value, ","))
 }
 
 func firstNonEmptyString(values ...string) string {

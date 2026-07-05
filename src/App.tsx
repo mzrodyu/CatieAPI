@@ -279,6 +279,23 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return response.json();
 }
 
+async function fetchFormJson<T>(url: string, body: FormData): Promise<T> {
+  const headers = new Headers();
+  const adminToken = window.sessionStorage.getItem("catieapi-admin-token");
+  if (adminToken) headers.set("Authorization", `Bearer ${adminToken}`);
+  const response = await fetch(url, {
+    credentials: "include",
+    method: "POST",
+    headers,
+    body
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new ApiError(response.status, payload?.error?.message || `Request failed: ${response.status}`, payload);
+  }
+  return response.json();
+}
+
 const navItems = [
   { id: "overview", label: "概览", icon: "home" },
   { id: "users", label: "用户", icon: "users" },
@@ -300,6 +317,9 @@ const providerOptions = [
   { value: "moonshot", label: "Moonshot" },
   { value: "compatible", label: "OpenAI Compatible" }
 ];
+
+const defaultOpenAIBaseURL = "https://api.openai.com/v1";
+const defaultOpenAIModels = "gpt-5.6, gpt-image-2, gpt-image-1";
 
 const streamModeOptions = [
   { value: "auto", label: "自动", description: "按请求参数处理" },
@@ -681,27 +701,23 @@ function App() {
   async function createChannel() {
     const data = await fetchJson<{ channel: Channel }>("/api/channels", {
       method: "POST",
-      body: JSON.stringify({})
+      body: JSON.stringify({
+        name: "OpenAI 账号池",
+        provider: "openai",
+        baseUrl: defaultOpenAIBaseURL,
+        models: defaultOpenAIModels.split(",").map((model) => model.trim())
+      })
     });
     setChannels((current) => [...current, normalizeChannel(data.channel)]);
     setActive("channels");
-    setToast("已创建禁用的新渠道，请补充上游地址后启用");
+    setToast("已创建 OpenAI 账号池渠道，导入账号后即可启用");
     window.setTimeout(() => setToast(""), 2400);
   }
 
   async function importOpenAIAccounts(channelId: string, file: File) {
-    let data: unknown;
-    try {
-      data = JSON.parse(await file.text());
-    } catch {
-      setToast("JSON 文件格式不正确");
-      window.setTimeout(() => setToast(""), 2400);
-      return;
-    }
-    const result = await fetchJson<OpenAIAccountImportResult>(`/api/channels/${encodeURIComponent(channelId)}/import-openai-accounts`, {
-      method: "POST",
-      body: JSON.stringify(data)
-    });
+    const formData = new FormData();
+    formData.append("file", file);
+    const result = await fetchFormJson<OpenAIAccountImportResult>(`/api/channels/${encodeURIComponent(channelId)}/import-openai-accounts`, formData);
     setChannels((current) => current.map((channel) => (channel.id === result.channel.id ? normalizeChannel(result.channel) : channel)));
     setActive("channels");
     setToast(`已导入 ${result.imported} 个账号${result.skipped ? `，跳过 ${result.skipped} 个` : ""}`);
@@ -2333,11 +2349,23 @@ function ChannelEditor({
   }, [channel.id, channel.name, channel.provider, channel.streamMode, channel.baseUrl, channel.models, channel.inputPricePer1K, channel.outputPricePer1K]);
 
   async function save() {
+    const patch = currentChannelPatch();
+    setBusy("save");
+    try {
+      await onUpdate(channel.id, patch);
+      setUpstreamApiKey("");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function currentChannelPatch(): ChannelPatch {
+    const normalizedBaseUrl = provider === "openai" && !/^https?:\/\//i.test(baseUrl.trim()) ? defaultOpenAIBaseURL : baseUrl;
     const patch: ChannelPatch = {
       name: name.trim() || channel.name,
       provider,
       streamMode,
-      baseUrl,
+      baseUrl: normalizedBaseUrl,
       inputPricePer1K: Number(inputPrice) || 0,
       outputPricePer1K: Number(outputPrice) || 0,
       models: models
@@ -2348,9 +2376,14 @@ function ChannelEditor({
     if (upstreamApiKey.trim()) {
       patch.upstreamApiKey = upstreamApiKey.trim();
     }
-    setBusy("save");
+    return patch;
+  }
+
+  async function toggleStatus() {
+    const nextStatus = channel.status === "disabled" ? "healthy" : "disabled";
+    setBusy("status");
     try {
-      await onUpdate(channel.id, patch);
+      await onUpdate(channel.id, { ...currentChannelPatch(), status: nextStatus });
       setUpstreamApiKey("");
     } finally {
       setBusy("");
@@ -2402,7 +2435,17 @@ function ChannelEditor({
 
       <div className="provider-chip-grid" role="radiogroup" aria-label="供应商">
         {providerOptions.map((option) => (
-          <button key={option.value} type="button" className={provider === option.value ? "selected" : ""} onClick={() => setProvider(option.value)}>
+          <button
+            key={option.value}
+            type="button"
+            className={provider === option.value ? "selected" : ""}
+            onClick={() => {
+              setProvider(option.value);
+              if (option.value === "openai" && !/^https?:\/\//i.test(baseUrl.trim())) {
+                setBaseUrl(defaultOpenAIBaseURL);
+              }
+            }}
+          >
             {option.label}
           </button>
         ))}
@@ -2458,7 +2501,7 @@ function ChannelEditor({
           {busy === "import" ? "导入中" : "导入账号 JSON"}
           <input
             type="file"
-            accept="application/json,.json"
+            accept="application/json,application/zip,.json,.zip"
             disabled={busy !== ""}
             onChange={(event) => {
               const file = event.target.files?.[0];
@@ -2476,7 +2519,7 @@ function ChannelEditor({
         <button className="secondary-button" onClick={save} disabled={busy !== ""}>
           {busy === "save" ? "保存中" : "保存"}
         </button>
-        <button className="status-button" onClick={() => onUpdate(channel.id, { status: channel.status === "disabled" ? "healthy" : "disabled" })}>
+        <button className="status-button" onClick={toggleStatus} disabled={busy !== ""}>
           <Badge tone={channel.status}>{channel.status === "disabled" ? "启用" : "禁用"}</Badge>
         </button>
         <button className="danger-button" onClick={() => onDelete(channel.id)} disabled={busy !== ""}>删除</button>
