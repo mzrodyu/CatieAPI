@@ -2328,6 +2328,9 @@ function DrawingView({
 }) {
   const drawingChannels = channels.filter((channel) => channel.provider === "openai" || arrayOf(channel.models).some((model) => model.includes("image")));
   const [busy, setBusy] = useState("");
+  const [accountVisibleCounts, setAccountVisibleCounts] = useState<Record<string, number>>({});
+  const defaultVisibleAccounts = 24;
+  const accountBatchSize = 48;
 
   async function importFile(channelId: string, file: File) {
     setBusy(`import:${channelId}`);
@@ -2373,6 +2376,10 @@ function DrawingView({
           const healthy = accounts.filter((account) => account.status === "healthy").length;
           const invalid = accounts.filter((account) => account.status === "invalid").length;
           const unchecked = Math.max(0, accounts.length - healthy - invalid);
+          const visibleAccountCount = Math.min(accounts.length, accountVisibleCounts[channel.id] || defaultVisibleAccounts);
+          const visibleAccounts = accounts.slice(0, visibleAccountCount);
+          const hiddenAccountCount = Math.max(0, accounts.length - visibleAccounts.length);
+          const allAccountsVisible = hiddenAccountCount === 0;
           return (
             <div className="channel-card" key={channel.id}>
               <div className="channel-card-head">
@@ -2412,7 +2419,7 @@ function DrawingView({
               </div>
               {accounts.length > 0 && (
                 <div className="account-pool-list">
-                  {accounts.slice(0, 12).map((account) => (
+                  {visibleAccounts.map((account) => (
                     <div className="account-pool-row" key={account.id}>
                       <div className="account-pool-main">
                         <div>
@@ -2421,12 +2428,52 @@ function DrawingView({
                         </div>
                         <QuotaBars limits={account.quotaLimits} />
                       </div>
-                      <Badge tone={account.status === "healthy" ? "healthy" : account.status === "invalid" ? "disabled" : "standby"}>
-                        {account.status === "healthy" ? "可用" : account.status === "invalid" ? "异常" : "未测"}
-                      </Badge>
+                      <div className="account-pool-meta">
+                        <Badge tone={account.status === "healthy" ? "healthy" : account.status === "invalid" ? "disabled" : "standby"}>
+                          {account.status === "healthy" ? "可用" : account.status === "invalid" ? "异常" : "未测"}
+                        </Badge>
+                      </div>
                     </div>
                   ))}
-                  {accounts.length > 12 && <span className="muted-inline">还有 {accounts.length - 12} 个账号未展开显示</span>}
+                  {accounts.length > defaultVisibleAccounts && (
+                    <div className="account-pool-more">
+                      <span className="muted-inline">
+                        {allAccountsVisible ? `已显示全部 ${accounts.length} 个账号` : `已显示 ${visibleAccounts.length} 个，还有 ${hiddenAccountCount} 个`}
+                      </span>
+                      <div className="account-pool-more-actions">
+                        {!allAccountsVisible && (
+                          <button
+                            type="button"
+                            className="secondary-button compact-button"
+                            onClick={() => setAccountVisibleCounts((current) => ({
+                              ...current,
+                              [channel.id]: Math.min(accounts.length, visibleAccountCount + accountBatchSize)
+                            }))}
+                          >
+                            再显示 {Math.min(accountBatchSize, hiddenAccountCount)} 个
+                          </button>
+                        )}
+                        {!allAccountsVisible && (
+                          <button
+                            type="button"
+                            className="secondary-button compact-button"
+                            onClick={() => setAccountVisibleCounts((current) => ({ ...current, [channel.id]: accounts.length }))}
+                          >
+                            全部显示
+                          </button>
+                        )}
+                        {visibleAccountCount > defaultVisibleAccounts && (
+                          <button
+                            type="button"
+                            className="secondary-button compact-button"
+                            onClick={() => setAccountVisibleCounts((current) => ({ ...current, [channel.id]: defaultVisibleAccounts }))}
+                          >
+                            收起
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

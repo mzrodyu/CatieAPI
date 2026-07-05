@@ -5453,6 +5453,7 @@ func shouldMarkChannelUnhealthy(providerErr *ProviderError) bool {
 	return allowedString(providerErr.Code,
 		"upstream_authentication_error",
 		"upstream_invalid_api_key",
+		"upstream_token_invalidated",
 		"upstream_key_unavailable",
 		"upstream_not_configured",
 		"upstream_request_error",
@@ -5467,7 +5468,7 @@ func isBillingProviderError(providerErr *ProviderError) bool {
 }
 
 func shouldInvalidateOpenAIAccountForImage(providerErr *ProviderError) bool {
-	return isBillingProviderError(providerErr) || isImagePermissionProviderError(providerErr)
+	return isBillingProviderError(providerErr) || isImagePermissionProviderError(providerErr) || isTokenInvalidatedProviderError(providerErr)
 }
 
 func isImagePermissionProviderError(providerErr *ProviderError) bool {
@@ -5486,6 +5487,16 @@ func imagePermissionErrorText(parts ...string) bool {
 		return true
 	}
 	return strings.Contains(text, "insufficient permissions") && strings.Contains(text, "image")
+}
+
+func isTokenInvalidatedProviderError(providerErr *ProviderError) bool {
+	if providerErr == nil {
+		return false
+	}
+	text := strings.ToLower(strings.Join([]string{providerErr.Code, providerErr.Message, providerErr.Type}, " "))
+	return strings.Contains(text, "token_invalidated") ||
+		strings.Contains(text, "authentication token has been invalidated") ||
+		strings.Contains(text, "try signing in again")
 }
 
 func (s *Server) checkRateLimitLocked(key *APIKey) bool {
@@ -6342,7 +6353,10 @@ func providerErrorFromUpstream(status int, content []byte) *ProviderError {
 			errorType = payload.Error.Type
 		}
 		if parsedCode := completionPrompt(payload.Error.Code); strings.TrimSpace(parsedCode) != "" && parsedCode != "null" {
-			code = "upstream_" + sanitizeErrorCode(parsedCode)
+			code = sanitizeErrorCode(parsedCode)
+			if !strings.HasPrefix(code, "upstream_") {
+				code = "upstream_" + code
+			}
 		}
 	}
 	if message == "" {

@@ -1404,6 +1404,73 @@ func TestImageGenerationsRetryNextOpenAIAccountOnMissingImageScope(t *testing.T)
 	}
 }
 
+func TestImageGenerationsRetryNextOpenAIAccountOnInvalidatedToken(t *testing.T) {
+	authHeaders := []string{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		authHeaders = append(authHeaders, auth)
+		if r.URL.Path != "/v1/images/generations" {
+			t.Fatalf("upstream image path = %s", r.URL.Path)
+		}
+		if auth == "Bearer invalidated-token" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"upstream_token_invalidated","message":"Your authentication token has been invalidated. Please try signing in again.","param":"model","type":"invalid_request_error"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"b64_json":"image-after-token-retry"}]}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":   "memory",
+		"PROVIDER_MODE": "mock",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-1", Name: "GPT Image", Vendor: "OpenAI", Aliases: []string{"image"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image_pool", Name: "Image Pool", Provider: "openai", BaseURL: upstream.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-1"},
+		OpenAIAccounts: []OpenAIAccount{
+			{ID: "oaiacc_invalidated", Email: "invalidated@example.com", AccessToken: "invalidated-token", Status: "healthy"},
+			{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "healthy"},
+		},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"image","prompt":"retry invalidated token"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
+	}
+	if len(authHeaders) != 2 || authHeaders[0] != "Bearer invalidated-token" || authHeaders[1] != "Bearer good-token" {
+		t.Fatalf("upstream auth sequence = %#v", authHeaders)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"image-after-token-retry"`)) {
+		t.Fatalf("image response was not retried successfully: %s", response.Body.String())
+	}
+
+	providerErr := providerErrorFromUpstream(http.StatusUnauthorized, []byte(`{"error":{"code":"upstream_token_invalidated","message":"Your authentication token has been invalidated. Please try signing in again.","param":"model","type":"invalid_request_error"}}`))
+	if providerErr.Code != "upstream_token_invalidated" {
+		t.Fatalf("invalidated token error code = %s", providerErr.Code)
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel := server.findChannel("chn_image_pool")
+	if channel.OpenAIAccounts[0].Status != "invalid" || !strings.Contains(channel.OpenAIAccounts[0].LastError, "token has been invalidated") {
+		t.Fatalf("invalidated account was not marked invalid: %#v", channel.OpenAIAccounts[0])
+	}
+	if channel.OpenAIAccounts[1].Status != "healthy" {
+		t.Fatalf("good account status changed: %#v", channel.OpenAIAccounts[1])
+	}
+}
+
 func TestImageGenerationsWorkWithoutV1Prefix(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)

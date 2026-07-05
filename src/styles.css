@@ -2153,13 +2153,14 @@ button.table-row:hover {
 .account-pool-list {
   display: grid;
   gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   margin-top: 14px;
 }
 
 .account-pool-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
   gap: 12px;
   padding: 10px 12px;
   border: 1px solid var(--hairline);
@@ -2171,7 +2172,6 @@ button.table-row:hover {
   display: grid;
   gap: 8px;
   min-width: 0;
-  flex: 1;
 }
 
 .account-pool-main > div {
@@ -2190,6 +2190,31 @@ button.table-row:hover {
 .account-pool-row span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.account-pool-meta {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.account-pool-more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  grid-column: 1 / -1;
+  padding: 6px 2px 0;
+}
+
+.account-pool-more-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.account-pool-more-actions .secondary-button {
+  flex-shrink: 0;
 }
 
 .quota-bars {
