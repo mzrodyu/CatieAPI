@@ -333,6 +333,7 @@ const navItems = [
 ] as const;
 
 const providerOptions = [
+  { value: "codex", label: "Codex / ChatGPT OAuth" },
   { value: "openai", label: "OpenAI" },
   { value: "anthropic", label: "Anthropic / Claude" },
   { value: "google", label: "Google Gemini" },
@@ -345,7 +346,9 @@ const providerOptions = [
 ];
 
 const defaultOpenAIBaseURL = "https://api.openai.com/v1";
-const defaultOpenAIModels = "gpt-5.5, gpt-5.4, gpt-image-2, gpt-image-1";
+const defaultCodexBaseURL = "https://chatgpt.com/backend-api";
+const defaultCodexModels = "gpt-5.5, gpt-5.4, gpt-image-2, gpt-image-1";
+const defaultOpenAIModels = "gpt-5.5, gpt-5.4";
 
 const streamModeOptions = [
   { value: "auto", label: "自动", description: "按请求参数处理" },
@@ -473,14 +476,15 @@ function ProviderIcon({ provider }: { provider: string }) {
       </span>
     );
   }
-  const mark = provider === "openai" ? "◎"
-    : provider === "anthropic" ? "A"
-      : provider === "google" ? "✦"
-        : provider === "openrouter" ? "↗"
-            : provider === "groq" ? "G"
-              : provider === "siliconflow" ? "S"
-                : provider === "moonshot" ? "M"
-                  : "◇";
+  const mark = provider === "codex" ? "C"
+    : provider === "openai" ? "◎"
+      : provider === "anthropic" ? "A"
+        : provider === "google" ? "✦"
+          : provider === "openrouter" ? "↗"
+              : provider === "groq" ? "G"
+                : provider === "siliconflow" ? "S"
+                  : provider === "moonshot" ? "M"
+                    : "◇";
   return (
     <span className={`provider-icon provider-icon-${provider}`} aria-hidden="true">
       <svg viewBox="0 0 32 32" role="img">
@@ -728,15 +732,15 @@ function App() {
     const data = await fetchJson<{ channel: Channel }>("/api/channels", {
       method: "POST",
       body: JSON.stringify({
-        name: "OpenAI 账号池",
-        provider: "openai",
-        baseUrl: defaultOpenAIBaseURL,
-        models: defaultOpenAIModels.split(",").map((model) => model.trim())
+        name: "Codex 账号池",
+        provider: "codex",
+        baseUrl: defaultCodexBaseURL,
+        models: defaultCodexModels.split(",").map((model) => model.trim())
       })
     });
     setChannels((current) => [...current, normalizeChannel(data.channel)]);
     setActive("channels");
-    setToast("已创建 OpenAI 账号池渠道，导入账号后即可启用");
+    setToast("已创建 Codex 账号池渠道，导入账号后即可启用");
     window.setTimeout(() => setToast(""), 2400);
   }
 
@@ -2326,7 +2330,7 @@ function DrawingView({
   onCheckAccounts: (channelId: string) => Promise<void>;
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
 }) {
-  const drawingChannels = channels.filter((channel) => channel.provider === "openai" || arrayOf(channel.models).some((model) => model.includes("image")));
+  const drawingChannels = channels.filter((channel) => channel.provider === "codex" || channel.provider === "openai" || arrayOf(channel.models).some((model) => model.includes("image")));
   const [busy, setBusy] = useState("");
   const [accountVisibleCounts, setAccountVisibleCounts] = useState<Record<string, number>>({});
   const defaultVisibleAccounts = 24;
@@ -2355,9 +2359,9 @@ function DrawingView({
     try {
       await onUpdate(channel.id, {
         status: channel.status === "disabled" ? "healthy" : "disabled",
-        baseUrl: channel.baseUrl || defaultOpenAIBaseURL,
-        provider: channel.provider || "openai",
-        models: arrayOf(channel.models).length ? channel.models : defaultOpenAIModels.split(",").map((model) => model.trim())
+        baseUrl: channel.baseUrl || (channel.provider === "openai" ? defaultOpenAIBaseURL : defaultCodexBaseURL),
+        provider: channel.provider || "codex",
+        models: arrayOf(channel.models).length ? channel.models : defaultCodexModels.split(",").map((model) => model.trim())
       });
     } finally {
       setBusy("");
@@ -2385,7 +2389,7 @@ function DrawingView({
               <div className="channel-card-head">
                 <div>
                   <strong>{channel.name}</strong>
-                  <span>{channel.baseUrl || defaultOpenAIBaseURL}</span>
+                  <span>{channel.baseUrl || (channel.provider === "openai" ? defaultOpenAIBaseURL : defaultCodexBaseURL)}</span>
                   <small>账号 {accounts.length} 个，可用 {healthy}，无效 {invalid}，未验证 {unchecked}</small>
                 </div>
                 <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
@@ -2613,7 +2617,13 @@ function ChannelEditor({
   }
 
   function currentChannelPatch(): ChannelPatch {
-    const normalizedBaseUrl = provider === "openai" && !/^https?:\/\//i.test(baseUrl.trim()) ? defaultOpenAIBaseURL : baseUrl;
+    const normalizedBaseUrl = !/^https?:\/\//i.test(baseUrl.trim())
+      ? provider === "openai"
+        ? defaultOpenAIBaseURL
+        : provider === "codex"
+          ? defaultCodexBaseURL
+          : baseUrl
+      : baseUrl;
     const patch: ChannelPatch = {
       name: name.trim() || channel.name,
       provider,
@@ -2694,6 +2704,9 @@ function ChannelEditor({
             className={provider === option.value ? "selected" : ""}
             onClick={() => {
               setProvider(option.value);
+              if (option.value === "codex" && !/^https?:\/\//i.test(baseUrl.trim())) {
+                setBaseUrl(defaultCodexBaseURL);
+              }
               if (option.value === "openai" && !/^https?:\/\//i.test(baseUrl.trim())) {
                 setBaseUrl(defaultOpenAIBaseURL);
               }
@@ -2736,7 +2749,7 @@ function ChannelEditor({
         </label>
         <label>
           <span>上游 Key</span>
-          <input type="password" value={upstreamApiKey} onChange={(event) => setUpstreamApiKey(event.target.value)} placeholder="留空表示不修改" autoComplete="new-password" />
+          <input type="password" value={upstreamApiKey} onChange={(event) => setUpstreamApiKey(event.target.value)} placeholder={provider === "codex" ? "Codex 账号池不需要上游 Key" : "留空表示不修改"} autoComplete="new-password" />
         </label>
         <label>
           <span>输入单价 / 1K Token</span>

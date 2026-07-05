@@ -2038,14 +2038,67 @@ func TestNormalizeStateCollectionsAddsImageModelsToOpenAIAccountPools(t *testing
 	if channel == nil {
 		t.Fatal("oauth pool channel missing")
 	}
-	if channel.BaseURL != defaultOpenAIBaseURL {
+	if channel.Provider != "codex" {
+		t.Fatalf("oauth pool provider = %q", channel.Provider)
+	}
+	if channel.BaseURL != defaultChatGPTAPIBaseURL {
 		t.Fatalf("oauth pool base URL = %q", channel.BaseURL)
 	}
-	if !containsString(channel.Models, "gpt-image-2") || !containsString(channel.Models, "gpt-image-1") {
-		t.Fatalf("oauth pool did not gain image models: %#v", channel.Models)
+	for _, modelID := range codexChannelModelIDs() {
+		if !containsString(channel.Models, modelID) {
+			t.Fatalf("oauth pool did not gain Codex model %s: %#v", modelID, channel.Models)
+		}
 	}
-	if server.findModel("gpt-image-2") == nil || server.findModel("gpt-image-1") == nil {
-		t.Fatalf("image models were not imported: %#v", server.state.Models)
+	for _, modelID := range codexChannelModelIDs() {
+		if server.findModel(modelID) == nil {
+			t.Fatalf("Codex model %s was not imported: %#v", modelID, server.state.Models)
+		}
+	}
+}
+
+func TestCodexChannelSyncAndCheckDoNotFetchOpenAIModels(t *testing.T) {
+	upstreamCalled := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		t.Fatalf("codex channel should not call upstream model list: %s", r.URL.Path)
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	channel := server.findChannel("chn_1002")
+	channel.Provider = "openai"
+	channel.BaseURL = upstream.URL + "/v1"
+	channel.Models = []string{}
+	channel.OpenAIAccounts = []OpenAIAccount{
+		{ID: "oaiacc_existing", Email: "existing@example.com", AccessToken: "existing-token", Status: "healthy"},
+	}
+	server.mu.Unlock()
+
+	synced := perform(router, http.MethodPost, "/api/channels/chn_1002/sync-models", `{}`, nil)
+	if synced.Code != http.StatusOK {
+		t.Fatalf("sync codex models status = %d body = %s", synced.Code, synced.Body.String())
+	}
+	checked := perform(router, http.MethodPost, "/api/channels/chn_1002/check", `{}`, nil)
+	if checked.Code != http.StatusOK {
+		t.Fatalf("check codex channel status = %d body = %s", checked.Code, checked.Body.String())
+	}
+	if upstreamCalled {
+		t.Fatal("codex channel called upstream /models")
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel = server.findChannel("chn_1002")
+	if channel.Provider != "codex" {
+		t.Fatalf("codex sync did not migrate provider: %s", channel.Provider)
+	}
+	for _, modelID := range codexChannelModelIDs() {
+		if !containsString(channel.Models, modelID) {
+			t.Fatalf("codex channel missing model %s: %#v", modelID, channel.Models)
+		}
 	}
 }
 

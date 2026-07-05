@@ -35,6 +35,7 @@ import (
 const (
 	defaultUpstreamTimeoutSeconds = 600
 	defaultOpenAIBaseURL          = "https://api.openai.com/v1"
+	defaultChatGPTAPIBaseURL      = "https://chatgpt.com/backend-api"
 	chatGPTCodexUserAgent         = "codex_cli_rs/0.125.0 (Ubuntu 22.4.0; x86_64) xterm-256color"
 	chatGPTCodexVersion           = "0.125.0"
 	chatGPTCodexOriginator        = "codex_cli_rs"
@@ -507,7 +508,7 @@ func NewServer() *Server {
 		upstreamAPIKey:        env("UPSTREAM_API_KEY", ""),
 		upstreamTimeout:       time.Duration(envInt("UPSTREAM_TIMEOUT_SECONDS", defaultUpstreamTimeoutSeconds)) * time.Second,
 		httpClient:            &http.Client{Timeout: time.Duration(envInt("UPSTREAM_TIMEOUT_SECONDS", defaultUpstreamTimeoutSeconds)) * time.Second},
-		chatGPTAPIBase:        env("CHATGPT_API_BASE", "https://chatgpt.com/backend-api"),
+		chatGPTAPIBase:        env("CHATGPT_API_BASE", defaultChatGPTAPIBaseURL),
 		openAIAuthBase:        env("OPENAI_AUTH_BASE", "https://auth.openai.com"),
 		discordClientID:       env("DISCORD_CLIENT_ID", ""),
 		discordClientSecret:   env("DISCORD_CLIENT_SECRET", ""),
@@ -2249,7 +2250,7 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
 		return
 	}
-	s.ensureOpenAIImageModelsLocked(channel)
+	s.ensureCodexChannelLocked(channel)
 	for _, modelID := range models {
 		s.ensureImportedModelLocked(modelID)
 		if !containsString(channel.Models, modelID) {
@@ -2390,7 +2391,7 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 		return
 	}
 	if healthy > 0 {
-		s.ensureOpenAIImageModelsLocked(channel)
+		s.ensureCodexChannelLocked(channel)
 		channel.Status = "healthy"
 		channel.LastCheckedAt = now()
 		channel.LastError = ""
@@ -2532,11 +2533,15 @@ func (s *Server) syncChannelModels(c *gin.Context) {
 		return
 	}
 	channelCopy := *channel
-	upstreamKey, err := s.channelUpstreamKey(channelCopy)
-	if err != nil {
-		s.mu.Unlock()
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": err.Error()}})
-		return
+	upstreamKey := ""
+	if !isCodexChannel(channelCopy) {
+		var err error
+		upstreamKey, err = s.channelUpstreamKey(channelCopy)
+		if err != nil {
+			s.mu.Unlock()
+			c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": err.Error()}})
+			return
+		}
 	}
 	s.mu.Unlock()
 
@@ -2556,6 +2561,9 @@ func (s *Server) syncChannelModels(c *gin.Context) {
 	if channel == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
 		return
+	}
+	if isCodexChannel(*channel) {
+		s.ensureCodexChannelLocked(channel)
 	}
 	channel.Models = mergeStrings(channel.Models, modelIDs)
 	added := []Model{}
@@ -2597,15 +2605,22 @@ func (s *Server) checkChannel(c *gin.Context) {
 		return
 	}
 	channelCopy := *channel
-	upstreamKey, err := s.channelUpstreamKey(channelCopy)
-	if err != nil {
-		s.mu.Unlock()
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": err.Error()}})
-		return
+	upstreamKey := ""
+	if !isCodexChannel(channelCopy) {
+		var err error
+		upstreamKey, err = s.channelUpstreamKey(channelCopy)
+		if err != nil {
+			s.mu.Unlock()
+			c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": err.Error()}})
+			return
+		}
 	}
 	s.mu.Unlock()
 
 	modelIDs, err := s.fetchUpstreamModelIDs(channelCopy, upstreamKey)
+	if err == nil && isCodexChannel(channelCopy) && len(activeOpenAIAccounts(channelCopy.OpenAIAccounts)) == 0 {
+		err = fmt.Errorf("请先导入可用 Codex OAuth 账号")
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2631,6 +2646,9 @@ func (s *Server) checkChannel(c *gin.Context) {
 	channel.LastError = ""
 	if channel.Status != "disabled" {
 		channel.Status = "healthy"
+	}
+	if isCodexChannel(*channel) {
+		s.ensureCodexChannelLocked(channel)
 	}
 	s.saveStateLocked()
 	c.JSON(http.StatusOK, gin.H{"channel": publicChannel(*channel), "ok": true, "models": modelIDs})
@@ -4261,6 +4279,9 @@ func chatCompletionUsageFromCodex(usage gin.H, messages []ChatMessage) gin.H {
 }
 
 func (s *Server) fetchUpstreamModelIDs(channel Channel, upstreamKey string) ([]string, error) {
+	if isCodexChannel(channel) {
+		return codexChannelModelIDs(), nil
+	}
 	if strings.TrimSpace(channel.BaseURL) == "" {
 		return nil, fmt.Errorf("请先填写渠道 Base URL")
 	}
@@ -4949,6 +4970,9 @@ func (s *Server) streamOpenAICompatible(c *gin.Context, call GatewayCall) *Provi
 
 func (s *Server) shouldUseCompatibleProvider(channel Channel) bool {
 	if strings.EqualFold(s.providerMode, "compatible") {
+		return true
+	}
+	if isCodexChannel(channel) && len(channel.OpenAIAccounts) > 0 {
 		return true
 	}
 	return strings.TrimSpace(channel.BaseURL) != "" && (strings.TrimSpace(channel.UpstreamAPIKey) != "" || len(channel.OpenAIAccounts) > 0 || strings.TrimSpace(s.upstreamAPIKey) != "")
@@ -5834,22 +5858,35 @@ func openAIImageModelIDs() []string {
 	return []string{"gpt-image-2", "gpt-image-1"}
 }
 
-func (s *Server) ensureOpenAIImageModelsLocked(channel *Channel) bool {
+func codexChannelModelIDs() []string {
+	return mergeStrings([]string{"gpt-5.5", "gpt-5.4"}, openAIImageModelIDs())
+}
+
+func isCodexChannel(channel Channel) bool {
+	return strings.EqualFold(strings.TrimSpace(channel.Provider), "codex") || len(channel.OpenAIAccounts) > 0
+}
+
+func (s *Server) ensureCodexChannelLocked(channel *Channel) bool {
 	if channel == nil {
 		return false
 	}
 	changed := false
-	if strings.TrimSpace(channel.BaseURL) == "" {
-		channel.BaseURL = defaultOpenAIBaseURL
+	if !strings.EqualFold(strings.TrimSpace(channel.Provider), "codex") {
+		channel.Provider = "codex"
 		changed = true
 	}
-	for _, modelID := range openAIImageModelIDs() {
+	trimmedBaseURL := strings.TrimRight(strings.TrimSpace(channel.BaseURL), "/")
+	if trimmedBaseURL == "" || strings.EqualFold(trimmedBaseURL, strings.TrimRight(defaultOpenAIBaseURL, "/")) {
+		channel.BaseURL = defaultChatGPTAPIBaseURL
+		changed = true
+	}
+	for _, modelID := range codexChannelModelIDs() {
 		if s.ensureImportedModelLocked(modelID) {
 			changed = true
 		}
 	}
 	before := len(channel.Models)
-	channel.Models = mergeStrings(channel.Models, openAIImageModelIDs())
+	channel.Models = mergeStrings(channel.Models, codexChannelModelIDs())
 	if len(channel.Models) != before {
 		changed = true
 	}
@@ -5896,6 +5933,8 @@ func firstNonEmptyString(values ...string) string {
 
 func providerLabel(provider string) string {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex":
+		return "Codex"
 	case "openai":
 		return "OpenAI"
 	case "anthropic":
@@ -6745,8 +6784,8 @@ func (s *Server) normalizeStateCollections() bool {
 			s.state.Channels[i].Models = []string{}
 			changed = true
 		}
-		if len(s.state.Channels[i].OpenAIAccounts) > 0 {
-			if s.ensureOpenAIImageModelsLocked(&s.state.Channels[i]) {
+		if isCodexChannel(s.state.Channels[i]) {
+			if s.ensureCodexChannelLocked(&s.state.Channels[i]) {
 				changed = true
 			}
 		}
