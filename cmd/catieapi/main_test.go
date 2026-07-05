@@ -1337,6 +1337,73 @@ func TestImageGenerationsRetryNextOpenAIAccountOnBillingError(t *testing.T) {
 	}
 }
 
+func TestImageGenerationsRetryNextOpenAIAccountOnMissingImageScope(t *testing.T) {
+	authHeaders := []string{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		authHeaders = append(authHeaders, auth)
+		if r.URL.Path != "/v1/images/generations" {
+			t.Fatalf("upstream image path = %s", r.URL.Path)
+		}
+		if auth == "Bearer no-image-scope-token" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":"upstream_error","message":"You have insufficient permissions for this operation. Missing scopes: api.model.images.request.","type":"invalid_request_error"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"b64_json":"image-after-scope-retry"}]}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":   "memory",
+		"PROVIDER_MODE": "mock",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-1", Name: "GPT Image", Vendor: "OpenAI", Aliases: []string{"image"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image_pool", Name: "Image Pool", Provider: "openai", BaseURL: upstream.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-1"},
+		OpenAIAccounts: []OpenAIAccount{
+			{ID: "oaiacc_no_scope", Email: "no-scope@example.com", AccessToken: "no-image-scope-token", Status: "healthy"},
+			{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "healthy"},
+		},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"image","prompt":"retry image scope"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
+	}
+	if len(authHeaders) != 2 || authHeaders[0] != "Bearer no-image-scope-token" || authHeaders[1] != "Bearer good-token" {
+		t.Fatalf("upstream auth sequence = %#v", authHeaders)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"image-after-scope-retry"`)) {
+		t.Fatalf("image response was not retried successfully: %s", response.Body.String())
+	}
+
+	providerErr := providerErrorFromUpstream(http.StatusForbidden, []byte(`{"error":{"code":"upstream_error","message":"You have insufficient permissions for this operation. Missing scopes: api.model.images.request.","type":"invalid_request_error"}}`))
+	if providerErr.Code != "upstream_missing_image_scope" {
+		t.Fatalf("image scope error code = %s", providerErr.Code)
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel := server.findChannel("chn_image_pool")
+	if channel.OpenAIAccounts[0].Status != "invalid" || !strings.Contains(channel.OpenAIAccounts[0].LastError, "api.model.images.request") {
+		t.Fatalf("missing-scope account was not marked invalid: %#v", channel.OpenAIAccounts[0])
+	}
+	if channel.OpenAIAccounts[1].Status != "healthy" {
+		t.Fatalf("good account status changed: %#v", channel.OpenAIAccounts[1])
+	}
+}
+
 func TestImageGenerationsWorkWithoutV1Prefix(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)
@@ -1722,7 +1789,7 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"object":"usage","capabilities":{}}`))
+		_, _ = w.Write([]byte(`{"object":"usage","limits":[{"name":"5h","used":4,"limit":100,"reset_at":"2026-07-06T05:00:00Z"},{"name":"weekly","remaining":90,"limit":100,"reset_at":"2026-07-13T00:00:00Z"}]}`))
 	}))
 	defer chatgpt.Close()
 
@@ -1761,6 +1828,9 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 		channel.OpenAIAccounts[2].Status != "unchecked" ||
 		channel.OpenAIAccounts[3].Status != "invalid" {
 		t.Fatalf("account statuses = %#v", channel.OpenAIAccounts)
+	}
+	if len(channel.OpenAIAccounts[0].QuotaLimits) != 2 || channel.OpenAIAccounts[0].QuotaLimits[0].Label != "5h" || channel.OpenAIAccounts[0].QuotaLimits[0].PercentRemaining != 96 {
+		t.Fatalf("quota limits were not parsed: %#v", channel.OpenAIAccounts[0].QuotaLimits)
 	}
 }
 

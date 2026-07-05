@@ -95,6 +95,18 @@ type OpenAIAccount = {
   status?: string;
   lastCheckedAt?: string;
   lastError?: string;
+  quotaLimits?: OpenAIQuotaLimit[];
+};
+
+type OpenAIQuotaLimit = {
+  name: string;
+  label: string;
+  window?: string;
+  limit?: number;
+  used?: number;
+  remaining?: number;
+  percentRemaining?: number;
+  resetAt?: string;
 };
 
 type OpenAIAccountImportResult = {
@@ -2402,9 +2414,12 @@ function DrawingView({
                 <div className="account-pool-list">
                   {accounts.slice(0, 12).map((account) => (
                     <div className="account-pool-row" key={account.id}>
-                      <div>
-                        <strong>{account.email || account.name || account.accountId || account.id}</strong>
-                        <span>{account.lastError || (account.lastCheckedAt ? `上次检测 ${formatDate(account.lastCheckedAt)}` : "未检测")}</span>
+                      <div className="account-pool-main">
+                        <div>
+                          <strong>{account.email || account.name || account.accountId || account.id}</strong>
+                          <span>{account.lastError || (account.lastCheckedAt ? `上次检测 ${formatDate(account.lastCheckedAt)}` : "未检测")}</span>
+                        </div>
+                        <QuotaBars limits={account.quotaLimits} />
                       </div>
                       <Badge tone={account.status === "healthy" ? "healthy" : account.status === "invalid" ? "disabled" : "standby"}>
                         {account.status === "healthy" ? "可用" : account.status === "invalid" ? "异常" : "未测"}
@@ -2421,6 +2436,50 @@ function DrawingView({
       </div>
     </Panel>
   );
+}
+
+function QuotaBars({ limits }: { limits?: OpenAIQuotaLimit[] }) {
+  const items = arrayOf(limits).filter((limit) => limit.label || limit.name).slice(0, 3);
+  if (!items.length) return null;
+  return (
+    <div className="quota-bars">
+      {items.map((limit) => {
+        const percent = quotaPercent(limit);
+        return (
+          <div className="quota-bar" key={`${limit.label || limit.name}-${limit.resetAt || ""}`}>
+            <div className="quota-bar-label">
+              <strong>{limit.label || limit.name}</strong>
+              <span>{quotaText(limit, percent)}</span>
+            </div>
+            <div className="quota-bar-track">
+              <span style={{ width: `${percent}%` }} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function quotaPercent(limit: OpenAIQuotaLimit) {
+  if (typeof limit.percentRemaining === "number" && Number.isFinite(limit.percentRemaining)) {
+    return Math.max(0, Math.min(100, limit.percentRemaining));
+  }
+  if (typeof limit.remaining === "number" && typeof limit.limit === "number" && limit.limit > 0) {
+    return Math.max(0, Math.min(100, (limit.remaining / limit.limit) * 100));
+  }
+  if (typeof limit.used === "number" && typeof limit.limit === "number" && limit.limit > 0) {
+    return Math.max(0, Math.min(100, ((limit.limit - limit.used) / limit.limit) * 100));
+  }
+  return 0;
+}
+
+function quotaText(limit: OpenAIQuotaLimit, percent: number) {
+  const reset = limit.resetAt ? ` · ${formatDate(limit.resetAt)}` : "";
+  if (typeof limit.remaining === "number") {
+    return `${Math.round(percent)}% 剩余${reset}`;
+  }
+  return `${Math.round(percent)}%${reset}`;
 }
 
 function ChannelsView({

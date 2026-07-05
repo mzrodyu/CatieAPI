@@ -2167,7 +2167,14 @@ button.table-row:hover {
   background: var(--control);
 }
 
-.account-pool-row div {
+.account-pool-main {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.account-pool-main > div {
   display: grid;
   gap: 3px;
   min-width: 0;
@@ -2183,6 +2190,42 @@ button.table-row:hover {
 .account-pool-row span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.quota-bars {
+  display: grid;
+  gap: 6px;
+}
+
+.quota-bar {
+  display: grid;
+  gap: 4px;
+}
+
+.quota-bar-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.quota-bar-label strong {
+  color: var(--text);
+}
+
+.quota-bar-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--hairline);
+}
+
+.quota-bar-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
 }
 
 .key-editor {

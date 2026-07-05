@@ -181,38 +181,51 @@ type PublicChannel struct {
 }
 
 type OpenAIAccount struct {
-	ID            string `json:"id"`
-	Name          string `json:"name,omitempty"`
-	Email         string `json:"email,omitempty"`
-	AccessToken   string `json:"accessToken,omitempty"`
-	RefreshToken  string `json:"refreshToken,omitempty"`
-	IDToken       string `json:"idToken,omitempty"`
-	AccountID     string `json:"accountId,omitempty"`
-	UserID        string `json:"userId,omitempty"`
-	ExpiresAt     string `json:"expiresAt,omitempty"`
-	LastRefresh   string `json:"lastRefresh,omitempty"`
-	PlanType      string `json:"planType,omitempty"`
-	Source        string `json:"source,omitempty"`
-	ImportedAt    string `json:"importedAt,omitempty"`
-	Status        string `json:"status,omitempty"`
-	LastCheckedAt string `json:"lastCheckedAt,omitempty"`
-	LastError     string `json:"lastError,omitempty"`
+	ID            string             `json:"id"`
+	Name          string             `json:"name,omitempty"`
+	Email         string             `json:"email,omitempty"`
+	AccessToken   string             `json:"accessToken,omitempty"`
+	RefreshToken  string             `json:"refreshToken,omitempty"`
+	IDToken       string             `json:"idToken,omitempty"`
+	AccountID     string             `json:"accountId,omitempty"`
+	UserID        string             `json:"userId,omitempty"`
+	ExpiresAt     string             `json:"expiresAt,omitempty"`
+	LastRefresh   string             `json:"lastRefresh,omitempty"`
+	PlanType      string             `json:"planType,omitempty"`
+	Source        string             `json:"source,omitempty"`
+	ImportedAt    string             `json:"importedAt,omitempty"`
+	Status        string             `json:"status,omitempty"`
+	LastCheckedAt string             `json:"lastCheckedAt,omitempty"`
+	LastError     string             `json:"lastError,omitempty"`
+	QuotaLimits   []OpenAIQuotaLimit `json:"quotaLimits,omitempty"`
 }
 
 type PublicOpenAIAccount struct {
-	ID            string `json:"id"`
-	Name          string `json:"name,omitempty"`
-	Email         string `json:"email,omitempty"`
-	AccountID     string `json:"accountId,omitempty"`
-	UserID        string `json:"userId,omitempty"`
-	ExpiresAt     string `json:"expiresAt,omitempty"`
-	LastRefresh   string `json:"lastRefresh,omitempty"`
-	PlanType      string `json:"planType,omitempty"`
-	Source        string `json:"source,omitempty"`
-	ImportedAt    string `json:"importedAt,omitempty"`
-	Status        string `json:"status,omitempty"`
-	LastCheckedAt string `json:"lastCheckedAt,omitempty"`
-	LastError     string `json:"lastError,omitempty"`
+	ID            string             `json:"id"`
+	Name          string             `json:"name,omitempty"`
+	Email         string             `json:"email,omitempty"`
+	AccountID     string             `json:"accountId,omitempty"`
+	UserID        string             `json:"userId,omitempty"`
+	ExpiresAt     string             `json:"expiresAt,omitempty"`
+	LastRefresh   string             `json:"lastRefresh,omitempty"`
+	PlanType      string             `json:"planType,omitempty"`
+	Source        string             `json:"source,omitempty"`
+	ImportedAt    string             `json:"importedAt,omitempty"`
+	Status        string             `json:"status,omitempty"`
+	LastCheckedAt string             `json:"lastCheckedAt,omitempty"`
+	LastError     string             `json:"lastError,omitempty"`
+	QuotaLimits   []OpenAIQuotaLimit `json:"quotaLimits,omitempty"`
+}
+
+type OpenAIQuotaLimit struct {
+	Name             string  `json:"name"`
+	Label            string  `json:"label"`
+	Window           string  `json:"window,omitempty"`
+	Limit            float64 `json:"limit,omitempty"`
+	Used             float64 `json:"used,omitempty"`
+	Remaining        float64 `json:"remaining,omitempty"`
+	PercentRemaining float64 `json:"percentRemaining,omitempty"`
+	ResetAt          string  `json:"resetAt,omitempty"`
 }
 
 type ImportedOpenAIAccount struct {
@@ -232,6 +245,7 @@ type ImportedOpenAIAccount struct {
 type OpenAIAccountCheckResult struct {
 	Status       string
 	Message      string
+	QuotaLimits  []OpenAIQuotaLimit
 	AccessToken  string
 	RefreshToken string
 	IDToken      string
@@ -2346,6 +2360,9 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 				if result.LastRefresh != "" {
 					liveChannel.OpenAIAccounts[index].LastRefresh = result.LastRefresh
 				}
+				if result.QuotaLimits != nil {
+					liveChannel.OpenAIAccounts[index].QuotaLimits = result.QuotaLimits
+				}
 				publicAccount = publicOpenAIAccount(liveChannel.OpenAIAccounts[index])
 				break
 			}
@@ -3469,7 +3486,7 @@ func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *Provi
 				return body, nil
 			}
 			lastErr = providerErr
-			if isBillingProviderError(providerErr) {
+			if shouldInvalidateOpenAIAccountForImage(providerErr) {
 				s.markOpenAIAccountInvalid(call.Channel.ID, account.ID, providerErr.Message)
 				continue
 			}
@@ -3636,6 +3653,7 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount) OpenAIAccountCheckRes
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
 		result.Status = "healthy"
 		result.Message = ""
+		result.QuotaLimits = parseWhamUsageQuotaLimits(content)
 		return result
 	}
 	providerErr := providerErrorFromUpstream(response.StatusCode, content)
@@ -3659,6 +3677,274 @@ func upstreamBillingError(content []byte) bool {
 	code := strings.ToLower(completionPrompt(payload.Error.Code))
 	errorType := strings.ToLower(strings.TrimSpace(payload.Error.Type))
 	return strings.Contains(code, "billing") || strings.Contains(errorType, "billing")
+}
+
+func parseWhamUsageQuotaLimits(content []byte) []OpenAIQuotaLimit {
+	var payload interface{}
+	if err := json.Unmarshal(content, &payload); err != nil {
+		return nil
+	}
+	limits := []OpenAIQuotaLimit{}
+	collectQuotaLimits(payload, nil, &limits)
+	if len(limits) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	result := []OpenAIQuotaLimit{}
+	for _, limit := range limits {
+		limit = normalizeQuotaLimit(limit)
+		if limit.Label == "" {
+			continue
+		}
+		key := strings.ToLower(limit.Label + "|" + limit.Window + "|" + limit.ResetAt)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, limit)
+		if len(result) >= 8 {
+			break
+		}
+	}
+	sort.SliceStable(result, func(left, right int) bool {
+		return quotaPriority(result[left]) < quotaPriority(result[right])
+	})
+	return result
+}
+
+func collectQuotaLimits(value interface{}, path []string, limits *[]OpenAIQuotaLimit) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		if limit, ok := quotaLimitFromMap(typed, path); ok {
+			*limits = append(*limits, limit)
+		}
+		for key, child := range typed {
+			collectQuotaLimits(child, append(path, key), limits)
+		}
+	case []interface{}:
+		for _, child := range typed {
+			collectQuotaLimits(child, path, limits)
+		}
+	}
+}
+
+func quotaLimitFromMap(values map[string]interface{}, path []string) (OpenAIQuotaLimit, bool) {
+	limit, hasLimit := numberFromAnyKeys(values, "limit", "max", "cap", "quota", "total", "allowed")
+	used, hasUsed := numberFromAnyKeys(values, "used", "num_used", "current", "consumed", "usage")
+	remaining, hasRemaining := numberFromAnyKeys(values, "remaining", "available", "left", "remaining_messages", "remaining_credits")
+	percent, hasPercent := numberFromAnyKeys(values, "percent_remaining", "remaining_percent", "remaining_percentage", "remaining_pct", "percentage", "pct_remaining")
+	resetAt := stringFromAnyKeys(values, "reset_at", "resets_at", "reset_time", "next_reset", "expires_at")
+	if resetAt == "" {
+		if resetAfterSeconds, ok := numberFromAnyKeys(values, "reset_after_seconds", "resets_in_seconds", "reset_in_seconds", "seconds_until_reset"); ok && resetAfterSeconds > 0 {
+			resetAt = time.Now().Add(time.Duration(resetAfterSeconds) * time.Second).UTC().Format(time.RFC3339)
+		}
+	}
+	label := firstNonEmptyString(
+		stringFromAnyKeys(values, "label", "name", "title", "bucket", "window", "period", "model"),
+		quotaLabelFromPath(path),
+	)
+	if !hasLimit && !hasUsed && !hasRemaining && !hasPercent && resetAt == "" {
+		return OpenAIQuotaLimit{}, false
+	}
+	if !quotaLabelLooksUseful(label) && resetAt == "" && !hasPercent {
+		return OpenAIQuotaLimit{}, false
+	}
+	return OpenAIQuotaLimit{
+		Name:             label,
+		Label:            quotaDisplayLabel(label),
+		Window:           quotaWindowFromLabel(label),
+		Limit:            limit,
+		Used:             used,
+		Remaining:        remaining,
+		PercentRemaining: percent,
+		ResetAt:          normalizeQuotaResetAt(resetAt),
+	}, true
+}
+
+func normalizeQuotaLimit(limit OpenAIQuotaLimit) OpenAIQuotaLimit {
+	if limit.Name == "" {
+		limit.Name = limit.Label
+	}
+	if limit.Label == "" {
+		limit.Label = quotaDisplayLabel(limit.Name)
+	}
+	if limit.Window == "" {
+		limit.Window = quotaWindowFromLabel(limit.Name)
+	}
+	if limit.Remaining == 0 && limit.Limit > 0 && limit.Used > 0 {
+		limit.Remaining = math.Max(0, limit.Limit-limit.Used)
+	}
+	if limit.PercentRemaining == 0 && limit.Limit > 0 {
+		if limit.Remaining > 0 {
+			limit.PercentRemaining = clampPercent((limit.Remaining / limit.Limit) * 100)
+		} else if limit.Used > 0 {
+			limit.PercentRemaining = clampPercent(((limit.Limit - limit.Used) / limit.Limit) * 100)
+		}
+	}
+	limit.PercentRemaining = clampPercent(limit.PercentRemaining)
+	return limit
+}
+
+func numberFromAnyKeys(values map[string]interface{}, keys ...string) (float64, bool) {
+	for _, key := range keys {
+		if value, ok := values[key]; ok {
+			if number, ok := numberFromAny(value); ok {
+				return number, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func numberFromAny(value interface{}) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case json.Number:
+		number, err := typed.Float64()
+		return number, err == nil
+	case string:
+		number, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(typed), "%"), 64)
+		return number, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func stringFromAnyKeys(values map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := values[key]; ok {
+			if text := stringFromAny(value); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func stringFromAny(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case float64:
+		if typed > 1000000000 {
+			return time.Unix(int64(typed), 0).UTC().Format(time.RFC3339)
+		}
+		return strconv.FormatFloat(typed, 'f', -1, 64)
+	case int64:
+		if typed > 1000000000 {
+			return time.Unix(typed, 0).UTC().Format(time.RFC3339)
+		}
+		return strconv.FormatInt(typed, 10)
+	case int:
+		if typed > 1000000000 {
+			return time.Unix(int64(typed), 0).UTC().Format(time.RFC3339)
+		}
+		return strconv.Itoa(typed)
+	default:
+		return ""
+	}
+}
+
+func quotaLabelFromPath(path []string) string {
+	for index := len(path) - 1; index >= 0; index-- {
+		label := strings.ToLower(strings.TrimSpace(path[index]))
+		if quotaLabelLooksUseful(label) {
+			return path[index]
+		}
+	}
+	if len(path) > 0 {
+		return path[len(path)-1]
+	}
+	return ""
+}
+
+func quotaLabelLooksUseful(label string) bool {
+	label = strings.ToLower(label)
+	return strings.Contains(label, "5h") ||
+		strings.Contains(label, "5_hour") ||
+		strings.Contains(label, "hour") ||
+		strings.Contains(label, "weekly") ||
+		strings.Contains(label, "week") ||
+		strings.Contains(label, "gpt") ||
+		strings.Contains(label, "message") ||
+		strings.Contains(label, "codex")
+}
+
+func quotaDisplayLabel(label string) string {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(label), "_", " "))
+	switch {
+	case strings.Contains(normalized, "5h") || strings.Contains(normalized, "5 hour"):
+		return "5h"
+	case strings.Contains(normalized, "weekly") || strings.Contains(normalized, "week"):
+		return "Weekly"
+	case strings.Contains(normalized, "gpt"):
+		return "GPT"
+	case strings.Contains(normalized, "codex"):
+		return "Codex"
+	case strings.Contains(normalized, "message"):
+		return "Messages"
+	default:
+		return strings.TrimSpace(label)
+	}
+}
+
+func quotaWindowFromLabel(label string) string {
+	normalized := strings.ToLower(label)
+	switch {
+	case strings.Contains(normalized, "5h") || strings.Contains(normalized, "5_hour") || strings.Contains(normalized, "5 hour"):
+		return "5h"
+	case strings.Contains(normalized, "weekly") || strings.Contains(normalized, "week"):
+		return "weekly"
+	default:
+		return ""
+	}
+}
+
+func normalizeQuotaResetAt(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if number, err := strconv.ParseInt(value, 10, 64); err == nil && number > 1000000000 {
+		return time.Unix(number, 0).UTC().Format(time.RFC3339)
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.UTC().Format(time.RFC3339)
+		}
+	}
+	return value
+}
+
+func clampPercent(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return math.Round(value*10) / 10
+}
+
+func quotaPriority(limit OpenAIQuotaLimit) int {
+	label := strings.ToLower(limit.Label + " " + limit.Name + " " + limit.Window)
+	switch {
+	case strings.Contains(label, "5h"):
+		return 0
+	case strings.Contains(label, "weekly") || strings.Contains(label, "week"):
+		return 1
+	case strings.Contains(label, "gpt"):
+		return 2
+	default:
+		return 10
+	}
 }
 
 type OpenAIRefreshResult struct {
@@ -5129,6 +5415,9 @@ func retryableProviderError(providerErr *ProviderError) bool {
 	if providerErr == nil {
 		return false
 	}
+	if providerErr.Code == "upstream_missing_image_scope" {
+		return true
+	}
 	if providerErr.Code == "stream_not_supported" {
 		return true
 	}
@@ -5175,6 +5464,28 @@ func isBillingProviderError(providerErr *ProviderError) bool {
 		return false
 	}
 	return providerErr.Status == http.StatusPaymentRequired || strings.Contains(strings.ToLower(providerErr.Code), "billing") || strings.Contains(strings.ToLower(providerErr.Type), "billing")
+}
+
+func shouldInvalidateOpenAIAccountForImage(providerErr *ProviderError) bool {
+	return isBillingProviderError(providerErr) || isImagePermissionProviderError(providerErr)
+}
+
+func isImagePermissionProviderError(providerErr *ProviderError) bool {
+	if providerErr == nil {
+		return false
+	}
+	return imagePermissionErrorText(providerErr.Code, providerErr.Message, providerErr.Type)
+}
+
+func imagePermissionErrorText(parts ...string) bool {
+	text := strings.ToLower(strings.Join(parts, " "))
+	if strings.Contains(text, "api.model.images.request") || strings.Contains(text, "api.model.images.") {
+		return true
+	}
+	if strings.Contains(text, "missing scope") && strings.Contains(text, "image") {
+		return true
+	}
+	return strings.Contains(text, "insufficient permissions") && strings.Contains(text, "image")
 }
 
 func (s *Server) checkRateLimitLocked(key *APIKey) bool {
@@ -6040,6 +6351,9 @@ func providerErrorFromUpstream(status int, content []byte) *ProviderError {
 	if message == "" {
 		message = fmt.Sprintf("Upstream returned HTTP %d", status)
 	}
+	if imagePermissionErrorText(code, message, errorType) {
+		code = "upstream_missing_image_scope"
+	}
 	return &ProviderError{Status: status, Code: code, Message: message, Type: errorType}
 }
 
@@ -6144,6 +6458,7 @@ func publicOpenAIAccount(account OpenAIAccount) PublicOpenAIAccount {
 		Status:        firstNonEmptyString(account.Status, "unchecked"),
 		LastCheckedAt: account.LastCheckedAt,
 		LastError:     account.LastError,
+		QuotaLimits:   append([]OpenAIQuotaLimit{}, account.QuotaLimits...),
 	}
 }
 
