@@ -1858,8 +1858,8 @@ func TestImportSub2APIJSONAddsAccountsToExistingChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("channel upstream key: %v", err)
 	}
-	if upstreamKey != "first-access-token" && upstreamKey != "second-access-token" {
-		t.Fatalf("channel did not use imported account token: %s", upstreamKey)
+	if upstreamKey != "" {
+		t.Fatalf("OAuth account token leaked into OpenAI-compatible upstream key: %s", upstreamKey)
 	}
 	if !containsString(channel.Models, "gpt-image-2") {
 		t.Fatalf("import did not add model to target channel: %#v", channel.Models)
@@ -1954,28 +1954,21 @@ func TestImportOpenAIAccountsFromZipAddsAccountsToExistingChannel(t *testing.T) 
 
 func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	var usageAuthHeaders []string
-	var imageAuthHeaders []string
+	var usageAccountIDs []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		switch r.URL.Path {
 		case "/backend-api/wham/usage":
 			usageAuthHeaders = append(usageAuthHeaders, auth)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"object":"usage","limits":[{"name":"5h","used":4,"limit":100,"reset_at":"2026-07-06T05:00:00Z"},{"name":"weekly","remaining":90,"limit":100,"reset_at":"2026-07-13T00:00:00Z"}]}`))
-		case "/backend-api/codex/responses":
-			imageAuthHeaders = append(imageAuthHeaders, auth)
+			usageAccountIDs = append(usageAccountIDs, r.Header.Get("Chatgpt-Account-Id"))
 			switch {
-			case strings.Contains(auth, "good-token"):
-				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = w.Write([]byte(codexImageSSE("ok")))
-			case strings.Contains(auth, "missing-image-scope-token"):
+			case strings.Contains(auth, "good-token"), strings.Contains(auth, "rate-limit-token"):
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusForbidden)
-				_, _ = w.Write([]byte(`{"error":{"code":"upstream_error","message":"You have insufficient permissions for this operation. Missing scopes: api.model.images.request.","type":"invalid_request_error"}}`))
-			case strings.Contains(auth, "invalidated-token"):
+				_, _ = w.Write([]byte(`{"object":"usage","limits":[{"name":"5h","used":4,"limit":100,"reset_at":"2026-07-06T05:00:00Z"},{"name":"weekly","remaining":90,"limit":100,"reset_at":"2026-07-13T00:00:00Z"}]}`))
+			case strings.Contains(auth, "denied-token"):
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = w.Write([]byte(`{"error":{"code":"upstream_token_invalidated","message":"Your authentication token has been invalidated. Please try signing in again.","type":"invalid_request_error"}}`))
+				_, _ = w.Write([]byte(`{"error":{"code":"token_rejected","message":"token rejected for usage","type":"invalid_request_error"}}`))
 			case strings.Contains(auth, "billing-token"):
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusPaymentRequired)
@@ -2000,10 +1993,12 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	channel.BaseURL = upstream.URL + "/v1"
 	channel.Models = []string{"gpt-image-1"}
 	channel.OpenAIAccounts = []OpenAIAccount{
-		{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "unchecked"},
-		{ID: "oaiacc_missing_image_scope", Email: "missing-image-scope@example.com", AccessToken: "missing-image-scope-token", Status: "unchecked"},
-		{ID: "oaiacc_invalidated", Email: "invalidated@example.com", AccessToken: "invalidated-token", Status: "unchecked"},
+		{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", AccountID: "acc-good", Status: "unchecked"},
+		{ID: "oaiacc_rate_limit", Email: "rate-limit@example.com", AccessToken: "rate-limit-token", Status: "unchecked"},
+		{ID: "oaiacc_denied", Email: "denied@example.com", AccessToken: "denied-token", Status: "unchecked"},
 		{ID: "oaiacc_billing", Email: "billing@example.com", AccessToken: "billing-token", Status: "unchecked"},
+		{ID: "oaiacc_expired_no_refresh", Email: "expired@example.com", AccessToken: "expired-no-refresh-token", ExpiresAt: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339), Status: "unchecked"},
+		{ID: "oaiacc_missing_tokens", Email: "missing@example.com", Status: "unchecked"},
 	}
 	server.mu.Unlock()
 
@@ -2011,30 +2006,102 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("check accounts status = %d body = %s", response.Code, response.Body.String())
 	}
-	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":4`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":1`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":3`)) {
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":6`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":2`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":1`)) {
 		t.Fatalf("check response missing summary: %s", response.Body.String())
 	}
 	if len(usageAuthHeaders) != 4 {
 		t.Fatalf("usage auth request count = %d", len(usageAuthHeaders))
 	}
-	if len(imageAuthHeaders) != 4 {
-		t.Fatalf("image auth request count = %d", len(imageAuthHeaders))
+	if usageAccountIDs[0] != "acc-good" {
+		t.Fatalf("ChatGPT account id header was not forwarded: %#v", usageAccountIDs)
 	}
 
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	channel = server.findChannel("chn_1002")
 	if channel.OpenAIAccounts[0].Status != "healthy" ||
-		channel.OpenAIAccounts[1].Status != "invalid" ||
-		channel.OpenAIAccounts[2].Status != "invalid" ||
-		channel.OpenAIAccounts[3].Status != "invalid" {
+		channel.OpenAIAccounts[1].Status != "healthy" ||
+		channel.OpenAIAccounts[2].Status != "unchecked" ||
+		channel.OpenAIAccounts[3].Status != "invalid" ||
+		channel.OpenAIAccounts[4].Status != "unchecked" ||
+		channel.OpenAIAccounts[5].Status != "unchecked" {
 		t.Fatalf("account statuses = %#v", channel.OpenAIAccounts)
 	}
 	if len(channel.OpenAIAccounts[0].QuotaLimits) != 2 || channel.OpenAIAccounts[0].QuotaLimits[0].Label != "5h" || channel.OpenAIAccounts[0].QuotaLimits[0].PercentRemaining != 96 {
 		t.Fatalf("quota limits were not parsed: %#v", channel.OpenAIAccounts[0].QuotaLimits)
 	}
-	if len(channel.OpenAIAccounts[1].QuotaLimits) != 2 || !strings.Contains(channel.OpenAIAccounts[1].LastError, "api.model.images.request") {
-		t.Fatalf("image capability failure did not preserve quota and error: %#v", channel.OpenAIAccounts[1])
+	if !strings.Contains(channel.OpenAIAccounts[2].LastError, "HTTP 401") {
+		t.Fatalf("401 usage failure should be left unchecked: %#v", channel.OpenAIAccounts[2])
+	}
+	if !strings.Contains(channel.OpenAIAccounts[3].LastError, "billing inactive") {
+		t.Fatalf("402 without refresh should be invalid: %#v", channel.OpenAIAccounts[3])
+	}
+	if !strings.Contains(channel.OpenAIAccounts[4].LastError, "expired") {
+		t.Fatalf("expired access without refresh should stay unchecked: %#v", channel.OpenAIAccounts[4])
+	}
+	if !strings.Contains(channel.OpenAIAccounts[5].LastError, "missing access_token and refresh_token") {
+		t.Fatalf("missing tokens should stay unchecked: %#v", channel.OpenAIAccounts[5])
+	}
+}
+
+func TestCheckOpenAIAccountRefreshesExpiredAccessTokenBeforeUsage(t *testing.T) {
+	var refreshPayload map[string]interface{}
+	var usageAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			if err := json.NewDecoder(r.Body).Decode(&refreshPayload); err != nil {
+				t.Fatalf("decode refresh request: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"fresh-token","refresh_token":"fresh-refresh","expires_in":3600}`))
+		case "/backend-api/wham/usage":
+			usageAuth = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"usage","rate_limits":[{"name":"5h","remaining":10,"limit":100,"reset_after_seconds":3600}]}`))
+		default:
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
+		"OPENAI_AUTH_BASE": upstream.URL,
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	channel := server.findChannel("chn_1002")
+	channel.OpenAIAccounts = []OpenAIAccount{
+		{
+			ID:           "oaiacc_refresh",
+			Email:        "refresh@example.com",
+			AccessToken:  "expired-token",
+			RefreshToken: "refresh-token",
+			ExpiresAt:    time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+			Status:       "unchecked",
+		},
+	}
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/api/channels/chn_1002/openai-accounts/check", `{}`, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("check accounts status = %d body = %s", response.Code, response.Body.String())
+	}
+	if refreshPayload["client_id"] != openAIAuthClientID || refreshPayload["grant_type"] != "refresh_token" || refreshPayload["refresh_token"] != "refresh-token" {
+		t.Fatalf("unexpected refresh payload = %#v", refreshPayload)
+	}
+	if usageAuth != "Bearer fresh-token" {
+		t.Fatalf("usage auth = %s", usageAuth)
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel = server.findChannel("chn_1002")
+	if channel.OpenAIAccounts[0].Status != "healthy" || channel.OpenAIAccounts[0].AccessToken != "fresh-token" || channel.OpenAIAccounts[0].RefreshToken != "fresh-refresh" {
+		t.Fatalf("refreshed account was not stored healthy: %#v", channel.OpenAIAccounts[0])
 	}
 }
 

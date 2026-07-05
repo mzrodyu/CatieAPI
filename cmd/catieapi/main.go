@@ -38,6 +38,7 @@ const (
 	chatGPTCodexVersion           = "0.125.0"
 	chatGPTCodexOriginator        = "codex_cli_rs"
 	chatGPTCodexImageModel        = "gpt-5.4-mini"
+	openAIAuthClientID            = "app_EMoamEEZ73f0CkXaXp7hrann"
 )
 
 type AppState struct {
@@ -2330,9 +2331,6 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 	failed := 0
 	results := []PublicOpenAIAccount{}
 	for _, account := range channelCopy.OpenAIAccounts {
-		if strings.TrimSpace(account.AccessToken) == "" {
-			continue
-		}
 		checked++
 		result := s.checkOpenAIAccount(account, channelCopy)
 		status := result.Status
@@ -4351,41 +4349,113 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 		}
 	}
 	if strings.TrimSpace(accessToken) == "" {
-		result.Message = "missing access_token"
-		return result
+		if strings.TrimSpace(refreshToken) == "" {
+			result.Message = "missing access_token and refresh_token"
+			return result
+		}
+		refreshed, err := s.refreshOpenAIAccount(refreshToken)
+		if err != nil || strings.TrimSpace(refreshed.AccessToken) == "" {
+			if err != nil {
+				result.Message = "refresh failed: " + err.Error()
+			} else {
+				result.Message = "refresh returned empty access_token"
+			}
+			return result
+		}
+		accessToken = refreshed.AccessToken
+		if protectedAccess, err := s.protectSecret(refreshed.AccessToken); err == nil {
+			result.AccessToken = protectedAccess
+		}
+		if strings.TrimSpace(refreshed.RefreshToken) != "" {
+			if protectedRefresh, err := s.protectSecret(refreshed.RefreshToken); err == nil {
+				result.RefreshToken = protectedRefresh
+				refreshToken = refreshed.RefreshToken
+			}
+		}
+		if strings.TrimSpace(refreshed.IDToken) != "" {
+			if protectedID, err := s.protectSecret(refreshed.IDToken); err == nil {
+				result.IDToken = protectedID
+			}
+		}
+		if refreshed.ExpiresAt != "" {
+			result.ExpiresAt = refreshed.ExpiresAt
+		}
+		result.LastRefresh = now()
+		hasRefreshToken = strings.TrimSpace(refreshToken) != ""
 	}
-	if quotaLimits := s.fetchOpenAIAccountQuotaLimits(accessToken); quotaLimits != nil {
-		result.QuotaLimits = quotaLimits
+	if openAIAccountAccessTokenExpiring(accessToken, firstNonEmptyString(result.ExpiresAt, account.ExpiresAt), 5*time.Minute) {
+		if strings.TrimSpace(refreshToken) == "" {
+			result.Message = "access_token expired, missing refresh_token"
+			return result
+		}
+		refreshed, err := s.refreshOpenAIAccount(refreshToken)
+		if err != nil || strings.TrimSpace(refreshed.AccessToken) == "" {
+			if err != nil {
+				result.Message = "refresh failed: " + err.Error()
+			} else {
+				result.Message = "refresh returned empty access_token"
+			}
+			return result
+		}
+		accessToken = refreshed.AccessToken
+		if protectedAccess, err := s.protectSecret(refreshed.AccessToken); err == nil {
+			result.AccessToken = protectedAccess
+		}
+		if strings.TrimSpace(refreshed.RefreshToken) != "" {
+			if protectedRefresh, err := s.protectSecret(refreshed.RefreshToken); err == nil {
+				result.RefreshToken = protectedRefresh
+				refreshToken = refreshed.RefreshToken
+			}
+		}
+		if strings.TrimSpace(refreshed.IDToken) != "" {
+			if protectedID, err := s.protectSecret(refreshed.IDToken); err == nil {
+				result.IDToken = protectedID
+			}
+		}
+		if refreshed.ExpiresAt != "" {
+			result.ExpiresAt = refreshed.ExpiresAt
+		}
+		result.LastRefresh = now()
+		hasRefreshToken = strings.TrimSpace(refreshToken) != ""
 	}
-	if providerErr := s.checkOpenAIAccountImageGeneration(channel, accessToken); providerErr != nil {
-		result.Message = providerErr.Message
-		if shouldInvalidateOpenAIAccountForImage(providerErr) {
+	quotaLimits, providerErr := s.checkOpenAIAccountUsage(accessToken, account)
+	if providerErr != nil {
+		result.Message = fmt.Sprintf("HTTP %d: %s", providerErr.Status, truncateString(providerErr.Message, 300))
+		if providerErr.Status == http.StatusPaymentRequired && !hasRefreshToken {
 			result.Status = "invalid"
 		}
 		return result
 	}
+	if len(quotaLimits) == 0 {
+		result.Message = "usage response missing rate_limit"
+		return result
+	}
+	result.QuotaLimits = quotaLimits
 	result.Status = "healthy"
 	result.Message = ""
 	return result
 }
 
-func (s *Server) fetchOpenAIAccountQuotaLimits(accessToken string) []OpenAIQuotaLimit {
+func (s *Server) checkOpenAIAccountUsage(accessToken string, account OpenAIAccount) ([]OpenAIQuotaLimit, *ProviderError) {
 	request, err := http.NewRequest(http.MethodGet, joinURL(s.chatGPTAPIBase, "wham/usage"), nil)
 	if err != nil {
-		return nil
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
 	}
 	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
 	request.Header.Set("Accept", "application/json")
+	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
+		request.Header.Set("ChatGPT-Account-Id", accountID)
+	}
 	response, err := s.httpClient.Do(request)
 	if err != nil {
-		return nil
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
 	}
 	defer response.Body.Close()
 	content, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
-		return parseWhamUsageQuotaLimits(content)
+		return parseWhamUsageQuotaLimits(content), nil
 	}
-	return nil
+	return nil, providerErrorFromUpstream(response.StatusCode, content)
 }
 
 func (s *Server) checkOpenAIAccountImageGeneration(channel Channel, accessToken string) *ProviderError {
@@ -4727,8 +4797,54 @@ func openAIAccountAccessExpired(value string) bool {
 	return false
 }
 
+func openAIAccountAccessTokenExpiring(accessToken string, expiresAt string, leeway time.Duration) bool {
+	if openAIAccountAccessExpiredWithLeeway(expiresAt, leeway) {
+		return true
+	}
+	if jwtExpiresAt, ok := jwtExpiry(accessToken); ok {
+		return time.Now().UTC().After(jwtExpiresAt.Add(-leeway))
+	}
+	return false
+}
+
+func openAIAccountAccessExpiredWithLeeway(value string, leeway time.Duration) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		expiresAt, err := time.Parse(layout, value)
+		if err == nil {
+			return time.Now().UTC().After(expiresAt.Add(-leeway))
+		}
+	}
+	return false
+}
+
+func jwtExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) < 2 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		payload, err = base64.RawStdEncoding.DecodeString(parts[1])
+		if err != nil {
+			return time.Time{}, false
+		}
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Exp, 0).UTC(), true
+}
+
 func (s *Server) refreshOpenAIAccount(refreshToken string) (OpenAIRefreshResult, error) {
 	payload := gin.H{
+		"client_id":     openAIAuthClientID,
 		"grant_type":    "refresh_token",
 		"refresh_token": refreshToken,
 	}
@@ -4909,23 +5025,6 @@ func (s *Server) newOpenAICompatibleImageRequestWithKey(call ImageGatewayCall, u
 }
 
 func (s *Server) channelUpstreamKey(channel Channel) (string, error) {
-	protectedKeys := []string{}
-	for _, account := range activeOpenAIAccounts(channel.OpenAIAccounts) {
-		if strings.TrimSpace(account.AccessToken) != "" {
-			protectedKeys = append(protectedKeys, account.AccessToken)
-		}
-	}
-	if len(protectedKeys) > 0 {
-		protected := protectedKeys[int(time.Now().UnixNano()%int64(len(protectedKeys)))]
-		key, err := s.revealSecret(protected)
-		if err != nil {
-			return "", err
-		}
-		if strings.TrimSpace(key) != "" {
-			return key, nil
-		}
-	}
-
 	upstreamKey, err := s.revealSecret(channel.UpstreamAPIKey)
 	if err != nil {
 		return "", err

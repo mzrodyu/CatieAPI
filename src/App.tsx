@@ -756,7 +756,7 @@ function App() {
       body: JSON.stringify({})
     });
     setChannels((current) => current.map((channel) => (channel.id === result.channel.id ? normalizeChannel(result.channel) : channel)));
-    setToast(`账号测活完成：${result.healthy}/${result.checked} 可用${result.failed ? `，失败 ${result.failed}` : ""}`);
+    setToast(`账号测活完成：${result.healthy}/${result.checked} 可用${result.failed ? `，无效 ${result.failed}` : ""}`);
     window.setTimeout(() => setToast(""), 3000);
   }
 
@@ -2386,15 +2386,15 @@ function DrawingView({
                 <div>
                   <strong>{channel.name}</strong>
                   <span>{channel.baseUrl || defaultOpenAIBaseURL}</span>
-                  <small>账号 {accounts.length} 个，可用 {healthy}，失败 {invalid}，未测 {unchecked}</small>
+                  <small>账号 {accounts.length} 个，可用 {healthy}，无效 {invalid}，未验证 {unchecked}</small>
                 </div>
                 <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
               </div>
               <div className="metrics-grid">
                 <Metric label="账号总数" value={accounts.length} />
                 <Metric label="可用账号" value={healthy} />
-                <Metric label="异常账号" value={invalid} />
-                <Metric label="未测账号" value={unchecked} />
+                <Metric label="无效账号" value={invalid} />
+                <Metric label="未验证账号" value={unchecked} />
               </div>
               <div className="channel-card-actions">
                 <label className="secondary-button">
@@ -2430,7 +2430,7 @@ function DrawingView({
                       </div>
                       <div className="account-pool-meta">
                         <Badge tone={account.status === "healthy" ? "healthy" : account.status === "invalid" ? "disabled" : "standby"}>
-                          {account.status === "healthy" ? "可用" : account.status === "invalid" ? "异常" : "未测"}
+                          {account.status === "healthy" ? "可用" : account.status === "invalid" ? "无效" : "未验证"}
                         </Badge>
                       </div>
                     </div>
