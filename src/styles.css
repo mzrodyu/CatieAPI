@@ -432,6 +432,7 @@ h3 {
   background: var(--green);
   border-radius: 50%;
   box-shadow: 0 0 0 5px color-mix(in srgb, var(--green) 20%, transparent);
+  animation: status-pulse 1.8s ease-out infinite;
 }
 
 .quick-actions {
@@ -2694,14 +2695,30 @@ button.table-row:hover {
 }
 
 .gateway-card {
+  position: relative;
   display: grid;
   gap: 14px;
+  overflow: hidden;
   padding: 18px;
   background: var(--surface);
   border: 1px solid var(--hairline);
   border-radius: 28px;
   box-shadow: var(--shadow);
   backdrop-filter: blur(22px) saturate(180%);
+  animation: gateway-float 7s ease-in-out infinite;
+  isolation: isolate;
+}
+
+.gateway-card::before {
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  content: "";
+  background:
+    radial-gradient(circle at 18% 18%, color-mix(in srgb, var(--green) 20%, transparent), transparent 30%),
+    radial-gradient(circle at 86% 22%, color-mix(in srgb, var(--blue) 16%, transparent), transparent 28%);
+  opacity: 0.72;
+  animation: gateway-ambient 8s ease-in-out infinite alternate;
 }
 
 .gateway-card-head {
@@ -2713,14 +2730,31 @@ button.table-row:hover {
 }
 
 .endpoint-box {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
+  overflow: hidden;
   min-height: 58px;
   padding: 0 14px;
   background: var(--surface-solid);
   border: 1px solid var(--hairline);
   border-radius: 18px;
+}
+
+.endpoint-box::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  background: linear-gradient(105deg, transparent 0%, color-mix(in srgb, var(--green) 18%, transparent) 46%, transparent 72%);
+  opacity: 0;
+  transform: translateX(-120%);
+  animation: endpoint-scan 4.2s ease-in-out infinite;
+}
+
+.endpoint-box > * {
+  position: relative;
+  z-index: 1;
 }
 
 .endpoint-box span {
@@ -2742,17 +2776,35 @@ button.table-row:hover {
 }
 
 .home-flow div {
+  position: relative;
   display: grid;
   place-items: center;
+  overflow: hidden;
   min-height: 48px;
   color: var(--text);
   background: var(--surface-solid);
   border: 1px solid var(--hairline);
   border-radius: 16px;
   font-weight: 700;
+  animation: flow-step 4.2s ease-in-out infinite;
+  animation-delay: calc(var(--step) * 0.42s);
+}
+
+.home-flow div::after {
+  width: 6px;
+  height: 6px;
+  margin-top: 2px;
+  content: "";
+  background: var(--green);
+  border-radius: 50%;
+  opacity: 0;
+  box-shadow: 0 0 12px color-mix(in srgb, var(--green) 70%, transparent);
+  animation: flow-dot 4.2s ease-in-out infinite;
+  animation-delay: calc(var(--step) * 0.42s);
 }
 
 .gateway-card pre {
+  position: relative;
   overflow-x: auto;
   margin: 0;
   padding: 16px;
@@ -2762,6 +2814,119 @@ button.table-row:hover {
   border-radius: 18px;
   font-size: 13px;
   line-height: 1.6;
+}
+
+.request-trace {
+  position: absolute;
+  top: 0;
+  left: 18px;
+  width: 76px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--green), transparent);
+  border-radius: 999px;
+  opacity: 0.9;
+  animation: trace-slide 3.4s ease-in-out infinite;
+}
+
+@keyframes status-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 42%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 9px color-mix(in srgb, var(--green) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 0%, transparent);
+  }
+}
+
+@keyframes gateway-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes gateway-ambient {
+  from {
+    transform: translate3d(-8px, -4px, 0) scale(1);
+  }
+  to {
+    transform: translate3d(8px, 6px, 0) scale(1.04);
+  }
+}
+
+@keyframes endpoint-scan {
+  0%,
+  34% {
+    opacity: 0;
+    transform: translateX(-120%);
+  }
+  48% {
+    opacity: 1;
+  }
+  72%,
+  100% {
+    opacity: 0;
+    transform: translateX(120%);
+  }
+}
+
+@keyframes flow-step {
+  0%,
+  56%,
+  100% {
+    border-color: var(--hairline);
+    box-shadow: none;
+    transform: translateY(0);
+  }
+  18% {
+    border-color: color-mix(in srgb, var(--green) 52%, var(--hairline));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--green) 18%, transparent);
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes flow-dot {
+  0%,
+  55%,
+  100% {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  18% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes trace-slide {
+  0% {
+    transform: translateX(-80px);
+  }
+  58%,
+  100% {
+    transform: translateX(420px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gateway-card,
+  .gateway-card::before,
+  .endpoint-box::after,
+  .home-flow div,
+  .home-flow div::after,
+  .pulse-dot,
+  .request-trace {
+    animation: none;
+  }
+
+  .request-trace {
+    display: none;
+  }
 }
 
 .home-grid {

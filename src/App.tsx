@@ -1,4 +1,4 @@
-import type { FormEvent } from "react";
+import type { CSSProperties, FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
 
 type Overview = {
@@ -1290,7 +1290,7 @@ function PublicHome({
           </div>
         </div>
 
-        <div className="gateway-card">
+        <div className="gateway-card" aria-label="网关实时请求示意">
           <div className="gateway-card-head">
             <span>Gateway Status</span>
             <div className="live-island">
@@ -1303,12 +1303,12 @@ function PublicHome({
             <strong>/v1/chat/completions</strong>
           </div>
           <div className="home-flow">
-            <div>认证</div>
-            <div>额度</div>
-            <div>路由</div>
-            <div>响应</div>
+            <div style={{ "--step": 0 } as CSSProperties}>认证</div>
+            <div style={{ "--step": 1 } as CSSProperties}>额度</div>
+            <div style={{ "--step": 2 } as CSSProperties}>路由</div>
+            <div style={{ "--step": 3 } as CSSProperties}>响应</div>
           </div>
-          <pre>{`curl /v1/chat/completions
+          <pre><span className="request-trace" aria-hidden="true" />{`curl /v1/chat/completions
   -H "Authorization: Bearer cat_..."
   -d '{"model":"你的模型ID"}'`}</pre>
         </div>
