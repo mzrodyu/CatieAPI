@@ -4575,6 +4575,9 @@ func parseWhamUsageQuotaLimits(content []byte) []OpenAIQuotaLimit {
 		return nil
 	}
 	limits := []OpenAIQuotaLimit{}
+	if root, ok := payload.(map[string]interface{}); ok {
+		limits = append(limits, whamRateLimitWindows(root)...)
+	}
 	collectQuotaLimits(payload, nil, &limits)
 	if len(limits) == 0 {
 		return nil
@@ -4602,6 +4605,56 @@ func parseWhamUsageQuotaLimits(content []byte) []OpenAIQuotaLimit {
 	return result
 }
 
+func whamRateLimitWindows(payload map[string]interface{}) []OpenAIQuotaLimit {
+	rateLimit, _ := payload["rate_limit"].(map[string]interface{})
+	if rateLimit == nil {
+		rateLimit = payload
+	}
+	windows := []struct {
+		Key   string
+		Label string
+	}{
+		{Key: "primary_window", Label: "5h"},
+		{Key: "secondary_window", Label: "Weekly"},
+		{Key: "monthly_window", Label: "Monthly"},
+	}
+	limits := []OpenAIQuotaLimit{}
+	for _, window := range windows {
+		values, _ := rateLimit[window.Key].(map[string]interface{})
+		if values == nil {
+			continue
+		}
+		if limit, ok := whamQuotaLimitFromWindow(window.Key, window.Label, values); ok {
+			limits = append(limits, limit)
+		}
+	}
+	return limits
+}
+
+func whamQuotaLimitFromWindow(name string, label string, values map[string]interface{}) (OpenAIQuotaLimit, bool) {
+	usedPercent, hasUsedPercent := percentFromAnyKeys(values, "used_percent")
+	if !hasUsedPercent {
+		return OpenAIQuotaLimit{}, false
+	}
+	usedPercent = clampPercent(usedPercent)
+	resetAt := stringFromAnyKeys(values, "reset_at", "reset_time", "resets_at")
+	if resetAt == "" {
+		if resetAfterSeconds, ok := numberFromAnyKeys(values, "reset_after_seconds", "reset_after_sec", "reset_after", "resets_in_seconds", "reset_in_seconds", "seconds_until_reset"); ok && resetAfterSeconds > 0 {
+			resetAt = time.Now().Add(time.Duration(resetAfterSeconds) * time.Second).UTC().Format(time.RFC3339)
+		}
+	}
+	return OpenAIQuotaLimit{
+		Name:             firstNonEmptyString(stringFromAnyKeys(values, "name", "window_name", "window_key"), name),
+		Label:            label,
+		Window:           quotaWindowFromLabel(label),
+		Limit:            100,
+		Used:             usedPercent,
+		Remaining:        math.Max(0, 100-usedPercent),
+		PercentRemaining: math.Max(0, 100-usedPercent),
+		ResetAt:          normalizeQuotaResetAt(resetAt),
+	}, true
+}
+
 func collectQuotaLimits(value interface{}, path []string, limits *[]OpenAIQuotaLimit) {
 	switch typed := value.(type) {
 	case map[string]interface{}:
@@ -4619,10 +4672,33 @@ func collectQuotaLimits(value interface{}, path []string, limits *[]OpenAIQuotaL
 }
 
 func quotaLimitFromMap(values map[string]interface{}, path []string) (OpenAIQuotaLimit, bool) {
+	if whamUsageWindowPath(path) {
+		if _, ok := values["used_percent"]; ok {
+			return OpenAIQuotaLimit{}, false
+		}
+	}
 	limit, hasLimit := numberFromAnyKeys(values, "limit", "max", "cap", "quota", "total", "allowed", "maximum", "capacity")
 	used, hasUsed := numberFromAnyKeys(values, "used", "num_used", "current", "consumed", "usage", "used_count", "count")
 	remaining, hasRemaining := numberFromAnyKeys(values, "remaining", "available", "left", "remaining_messages", "remaining_credits", "remaining_count", "remaining_uses")
 	percent, hasPercent := percentFromAnyKeys(values, "percent_remaining", "remaining_percent", "remaining_percentage", "remaining_pct", "percentage", "pct_remaining")
+	if !hasPercent {
+		if usedPercent, ok := percentFromAnyKeys(values, "used_percent", "used_percentage", "used_pct"); ok {
+			percent = math.Max(0, 100-usedPercent)
+			hasPercent = true
+			if !hasRemaining {
+				remaining = percent
+				hasRemaining = true
+			}
+			if !hasLimit {
+				limit = 100
+				hasLimit = true
+			}
+			if !hasUsed {
+				used = usedPercent
+				hasUsed = true
+			}
+		}
+	}
 	if !hasRemaining && hasLimit {
 		if hasUsed {
 			remaining = math.Max(0, limit-used)
@@ -4664,6 +4740,15 @@ func quotaLimitFromMap(values map[string]interface{}, path []string) (OpenAIQuot
 	}, true
 }
 
+func whamUsageWindowPath(path []string) bool {
+	if len(path) < 2 {
+		return false
+	}
+	parent := strings.ToLower(strings.TrimSpace(path[len(path)-2]))
+	name := strings.ToLower(strings.TrimSpace(path[len(path)-1]))
+	return parent == "rate_limit" && (name == "primary_window" || name == "secondary_window" || name == "monthly_window")
+}
+
 func normalizeQuotaLimit(limit OpenAIQuotaLimit) OpenAIQuotaLimit {
 	if limit.Name == "" {
 		limit.Name = limit.Label
@@ -4689,15 +4774,32 @@ func normalizeQuotaLimit(limit OpenAIQuotaLimit) OpenAIQuotaLimit {
 }
 
 func openAIQuotaLimitsHaveRemaining(limits []OpenAIQuotaLimit) bool {
+	hasPrimaryWindow := false
+	primaryWindowHasRemaining := false
 	for _, limit := range limits {
-		if limit.Remaining > 0 || limit.PercentRemaining > 0 {
-			return true
+		if quotaPriority(limit) == 0 {
+			hasPrimaryWindow = true
+			if openAIQuotaLimitHasRemaining(limit) {
+				primaryWindowHasRemaining = true
+			}
 		}
-		if limit.Limit > 0 && limit.Used > 0 && limit.Used < limit.Limit {
+	}
+	if hasPrimaryWindow {
+		return primaryWindowHasRemaining
+	}
+	for _, limit := range limits {
+		if openAIQuotaLimitHasRemaining(limit) {
 			return true
 		}
 	}
 	return false
+}
+
+func openAIQuotaLimitHasRemaining(limit OpenAIQuotaLimit) bool {
+	if limit.Remaining > 0 || limit.PercentRemaining > 0 {
+		return true
+	}
+	return limit.Limit > 0 && limit.Used > 0 && limit.Used < limit.Limit
 }
 
 func numberFromAnyKeys(values map[string]interface{}, keys ...string) (float64, bool) {
@@ -5731,13 +5833,16 @@ func parseOpenAIAccountImport(payload map[string]interface{}) []ImportedOpenAIAc
 				continue
 			}
 			credentials, _ := item["credentials"].(map[string]interface{})
-			codexAuth, _ := item["codex_auth"].(map[string]interface{})
+			codexAuth, _ := firstMapFromAnyKeys(item, "codex_auth", "codexAuthJson", "auth")
 			tokens, _ := codexAuth["tokens"].(map[string]interface{})
+			if tokens == nil {
+				tokens, _ = item["tokens"].(map[string]interface{})
+			}
 			metadata, _ := item["metadata"].(map[string]interface{})
 			account := ImportedOpenAIAccount{
 				Name: firstNonEmptyString(
-					stringFromMap(item, "name"),
-					stringFromMap(credentials, "name"),
+					stringFromMapAnyKeys(item, "name", "account_name", "label", "username"),
+					stringFromMapAnyKeys(credentials, "name", "account_name", "label", "username"),
 				),
 				Email: firstNonEmptyString(
 					stringFromMap(credentials, "email"),
@@ -5746,52 +5851,45 @@ func parseOpenAIAccountImport(payload map[string]interface{}) []ImportedOpenAIAc
 					stringFromMap(metadata, "email"),
 				),
 				AccessToken: firstNonEmptyString(
-					stringFromMap(credentials, "access_token"),
-					stringFromMap(tokens, "access_token"),
-					stringFromMap(item, "access_token"),
+					stringFromMapAnyKeys(credentials, "access_token", "accessToken"),
+					stringFromMapAnyKeys(tokens, "access_token", "accessToken"),
+					stringFromMapAnyKeys(item, "access_token", "accessToken"),
 				),
 				RefreshToken: firstNonEmptyString(
-					stringFromMap(credentials, "refresh_token"),
-					stringFromMap(tokens, "refresh_token"),
-					stringFromMap(item, "refresh_token"),
+					stringFromMapAnyKeys(credentials, "refresh_token", "refreshToken", "chatgpt_refresh_token"),
+					stringFromMapAnyKeys(tokens, "refresh_token", "refreshToken", "chatgpt_refresh_token"),
+					stringFromMapAnyKeys(item, "refresh_token", "refreshToken", "chatgpt_refresh_token"),
 				),
 				IDToken: firstNonEmptyString(
-					stringFromMap(credentials, "id_token"),
-					stringFromMap(tokens, "id_token"),
-					stringFromMap(item, "id_token"),
+					stringFromMapAnyKeys(credentials, "id_token", "idToken"),
+					stringFromMapAnyKeys(tokens, "id_token", "idToken"),
+					stringFromMapAnyKeys(item, "id_token", "idToken"),
 				),
 				AccountID: firstNonEmptyString(
-					stringFromMap(credentials, "chatgpt_account_id"),
-					stringFromMap(credentials, "account_id"),
-					stringFromMap(tokens, "chatgpt_account_id"),
-					stringFromMap(tokens, "account_id"),
-					stringFromMap(item, "chatgpt_account_id"),
-					stringFromMap(item, "account_id"),
-					stringFromMap(metadata, "chatgpt_account_id"),
-					stringFromMap(metadata, "account_id"),
+					stringFromMapAnyKeys(credentials, "chatgpt_account_id", "account_id", "accountId"),
+					stringFromMapAnyKeys(tokens, "chatgpt_account_id", "account_id", "accountId"),
+					stringFromMapAnyKeys(item, "chatgpt_account_id", "account_id", "accountId"),
+					stringFromMapAnyKeys(metadata, "chatgpt_account_id", "account_id", "accountId"),
 				),
 				UserID: firstNonEmptyString(
-					stringFromMap(credentials, "chatgpt_user_id"),
-					stringFromMap(credentials, "user_id"),
-					stringFromMap(tokens, "chatgpt_user_id"),
-					stringFromMap(tokens, "user_id"),
-					stringFromMap(item, "chatgpt_user_id"),
-					stringFromMap(item, "user_id"),
+					stringFromMapAnyKeys(credentials, "chatgpt_user_id", "user_id", "userId"),
+					stringFromMapAnyKeys(tokens, "chatgpt_user_id", "user_id", "userId"),
+					stringFromMapAnyKeys(item, "chatgpt_user_id", "user_id", "userId"),
 				),
 				ExpiresAt: firstNonEmptyString(
-					stringFromMap(credentials, "expires_at"),
-					stringFromMap(tokens, "expires_at"),
-					stringFromMap(item, "expires_at"),
+					stringFromMapAnyKeys(credentials, "expires_at", "expiresAt", "expired"),
+					stringFromMapAnyKeys(tokens, "expires_at", "expiresAt", "expired"),
+					stringFromMapAnyKeys(item, "expires_at", "expiresAt", "expired"),
 				),
 				LastRefresh: firstNonEmptyString(
-					stringFromMap(credentials, "last_refresh"),
-					stringFromMap(tokens, "last_refresh"),
-					stringFromMap(item, "last_refresh"),
+					stringFromMapAnyKeys(credentials, "last_refresh", "lastRefresh"),
+					stringFromMapAnyKeys(tokens, "last_refresh", "lastRefresh"),
+					stringFromMapAnyKeys(item, "last_refresh", "lastRefresh"),
 				),
 				PlanType: firstNonEmptyString(
-					stringFromMap(credentials, "plan_type"),
-					stringFromMap(tokens, "plan_type"),
-					stringFromMap(item, "plan_type"),
+					stringFromMapAnyKeys(credentials, "plan_type", "planType"),
+					stringFromMapAnyKeys(tokens, "plan_type", "planType"),
+					stringFromMapAnyKeys(item, "plan_type", "planType"),
 				),
 				Source: "sub2api",
 			}
@@ -5802,18 +5900,20 @@ func parseOpenAIAccountImport(payload map[string]interface{}) []ImportedOpenAIAc
 		}
 		return accounts
 	}
-	if stringFromMap(payload, "access_token") != "" || stringFromMap(payload, "refresh_token") != "" || stringFromMap(payload, "id_token") != "" {
+	if stringFromMapAnyKeys(payload, "access_token", "accessToken") != "" ||
+		stringFromMapAnyKeys(payload, "refresh_token", "refreshToken", "chatgpt_refresh_token") != "" ||
+		stringFromMapAnyKeys(payload, "id_token", "idToken") != "" {
 		account := ImportedOpenAIAccount{
-			Name:         stringFromMap(payload, "email"),
+			Name:         stringFromMapAnyKeys(payload, "email", "name", "username"),
 			Email:        stringFromMap(payload, "email"),
-			AccessToken:  stringFromMap(payload, "access_token"),
-			RefreshToken: stringFromMap(payload, "refresh_token"),
-			IDToken:      stringFromMap(payload, "id_token"),
-			AccountID:    stringFromMap(payload, "account_id"),
-			UserID:       firstNonEmptyString(stringFromMap(payload, "chatgpt_user_id"), stringFromMap(payload, "user_id")),
-			ExpiresAt:    firstNonEmptyString(stringFromMap(payload, "expired"), stringFromMap(payload, "expires_at")),
-			LastRefresh:  stringFromMap(payload, "last_refresh"),
-			PlanType:     stringFromMap(payload, "plan_type"),
+			AccessToken:  stringFromMapAnyKeys(payload, "access_token", "accessToken"),
+			RefreshToken: stringFromMapAnyKeys(payload, "refresh_token", "refreshToken", "chatgpt_refresh_token"),
+			IDToken:      stringFromMapAnyKeys(payload, "id_token", "idToken"),
+			AccountID:    stringFromMapAnyKeys(payload, "account_id", "accountId", "chatgpt_account_id"),
+			UserID:       stringFromMapAnyKeys(payload, "chatgpt_user_id", "user_id", "userId"),
+			ExpiresAt:    stringFromMapAnyKeys(payload, "expired", "expires_at", "expiresAt"),
+			LastRefresh:  stringFromMapAnyKeys(payload, "last_refresh", "lastRefresh"),
+			PlanType:     stringFromMapAnyKeys(payload, "plan_type", "planType"),
 			Source:       "cpa",
 		}
 		return []ImportedOpenAIAccount{account}
@@ -6009,6 +6109,30 @@ func stringFromMap(values map[string]interface{}, key string) string {
 		return ""
 	}
 	return stringFromAny(value)
+}
+
+func stringFromMapAnyKeys(values map[string]interface{}, keys ...string) string {
+	if values == nil {
+		return ""
+	}
+	for _, key := range keys {
+		if text := stringFromMap(values, key); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func firstMapFromAnyKeys(values map[string]interface{}, keys ...string) (map[string]interface{}, bool) {
+	if values == nil {
+		return nil, false
+	}
+	for _, key := range keys {
+		if nested, ok := values[key].(map[string]interface{}); ok {
+			return nested, true
+		}
+	}
+	return nil, false
 }
 
 func stringSliceFromAny(value interface{}) []string {

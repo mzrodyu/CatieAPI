@@ -2046,6 +2046,59 @@ func TestImportSub2APIJSONAddsAccountsToExistingChannel(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIAccountImportSupportsCamelCaseCPAAndSub2API(t *testing.T) {
+	accounts, _, invalid, err := parseOpenAIAccountImportJSON([]byte(`{
+		"accounts":[
+			{
+				"name":"camel-sub@example.com",
+				"platform":"openai",
+				"type":"oauth",
+				"credentials":{
+					"accessToken":"sub-access-token",
+					"refreshToken":"sub-refresh-token",
+					"accountId":"acc_sub_camel",
+					"userId":"user_sub_camel",
+					"expiresAt":"2026-07-06T02:00:00Z",
+					"planType":"pro"
+				}
+			}
+		],
+		"type":"sub2api-data"
+	}`))
+	if err != nil || invalid != 0 || len(accounts) != 1 {
+		t.Fatalf("camel Sub2API import accounts=%#v invalid=%d err=%v", accounts, invalid, err)
+	}
+	if accounts[0].AccessToken != "sub-access-token" ||
+		accounts[0].RefreshToken != "sub-refresh-token" ||
+		accounts[0].AccountID != "acc_sub_camel" ||
+		accounts[0].UserID != "user_sub_camel" ||
+		accounts[0].PlanType != "pro" {
+		t.Fatalf("camel Sub2API fields were not parsed: %#v", accounts[0])
+	}
+
+	accounts, _, invalid, err = parseOpenAIAccountImportJSON([]byte(`{
+		"accessToken":"cpa-access-token",
+		"refreshToken":"cpa-refresh-token",
+		"idToken":"cpa-id-token",
+		"accountId":"acc_cpa_camel",
+		"userId":"user_cpa_camel",
+		"expiresAt":"2026-07-06T03:00:00Z",
+		"planType":"plus",
+		"email":"camel-cpa@example.com"
+	}`))
+	if err != nil || invalid != 0 || len(accounts) != 1 {
+		t.Fatalf("camel CPA import accounts=%#v invalid=%d err=%v", accounts, invalid, err)
+	}
+	if accounts[0].AccessToken != "cpa-access-token" ||
+		accounts[0].RefreshToken != "cpa-refresh-token" ||
+		accounts[0].IDToken != "cpa-id-token" ||
+		accounts[0].AccountID != "acc_cpa_camel" ||
+		accounts[0].UserID != "user_cpa_camel" ||
+		accounts[0].ExpiresAt != "2026-07-06T03:00:00Z" {
+		t.Fatalf("camel CPA fields were not parsed: %#v", accounts[0])
+	}
+}
+
 func TestImportOpenAIAccountsFromZipAddsAccountsToExistingChannel(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)
@@ -2366,6 +2419,26 @@ func TestActiveOpenAIAccountsOrdersUsageLimitedLast(t *testing.T) {
 	}
 }
 
+func TestOpenAIQuotaLimitsRequirePrimaryWindowWhenPresent(t *testing.T) {
+	if openAIQuotaLimitsHaveRemaining([]OpenAIQuotaLimit{
+		{Label: "5h", Window: "5h", Limit: 100, Used: 100, Remaining: 0, PercentRemaining: 0},
+		{Label: "Weekly", Window: "weekly", Limit: 100, Used: 10, Remaining: 90, PercentRemaining: 90},
+	}) {
+		t.Fatal("weekly remaining quota should not make an exhausted 5h window usable")
+	}
+	if !openAIQuotaLimitsHaveRemaining([]OpenAIQuotaLimit{
+		{Label: "5h", Window: "5h", Limit: 100, Used: 99, Remaining: 1, PercentRemaining: 1},
+		{Label: "Weekly", Window: "weekly", Limit: 100, Used: 100, Remaining: 0, PercentRemaining: 0},
+	}) {
+		t.Fatal("5h remaining quota should be usable even when weekly is exhausted")
+	}
+	if !openAIQuotaLimitsHaveRemaining([]OpenAIQuotaLimit{
+		{Label: "Weekly", Window: "weekly", Limit: 100, Used: 10, Remaining: 90, PercentRemaining: 90},
+	}) {
+		t.Fatal("non-Codex quota payloads without 5h should still use any remaining window")
+	}
+}
+
 func TestParseWhamUsageQuotaLimitsDerivesRemainingFromCapAndUsed(t *testing.T) {
 	limits := parseWhamUsageQuotaLimits([]byte(`{
 		"primary_window":{"cap":100,"num_used":0,"reset_time":"2026-07-06T05:46:00Z"},
@@ -2390,6 +2463,36 @@ func TestParseWhamUsageQuotaLimitsDerivesRemainingFromCapAndUsed(t *testing.T) {
 	fractional := byName["fractional"]
 	if fractional.PercentRemaining != 42 {
 		t.Fatalf("fractional percent not converted: %#v", fractional)
+	}
+}
+
+func TestParseWhamUsageQuotaLimitsUsesCodexRateLimitWindows(t *testing.T) {
+	limits := parseWhamUsageQuotaLimits([]byte(`{
+		"rate_limit":{
+			"primary_window":{"used_percent":25,"limit_window_seconds":18000,"reset_after_seconds":3600},
+			"secondary_window":{"used_percent":100,"limit_window_seconds":604800,"reset_at":1783353600},
+			"monthly_window":{"used_percent":10,"limit_window_seconds":2592000}
+		},
+		"plan_type":"pro"
+	}`))
+	if len(limits) != 3 {
+		t.Fatalf("limits len = %d: %#v", len(limits), limits)
+	}
+	byLabel := map[string]OpenAIQuotaLimit{}
+	for _, limit := range limits {
+		byLabel[limit.Label] = limit
+	}
+	primary := byLabel["5h"]
+	if primary.Remaining != 75 || primary.PercentRemaining != 75 || primary.Window != "5h" {
+		t.Fatalf("primary used_percent not converted: %#v", primary)
+	}
+	weekly := byLabel["Weekly"]
+	if weekly.Remaining != 0 || weekly.PercentRemaining != 0 || weekly.Window != "weekly" || weekly.ResetAt == "" {
+		t.Fatalf("weekly used_percent/reset not converted: %#v", weekly)
+	}
+	monthly := byLabel["Monthly"]
+	if monthly.Remaining != 90 || monthly.PercentRemaining != 90 {
+		t.Fatalf("monthly used_percent not converted: %#v", monthly)
 	}
 }
 
