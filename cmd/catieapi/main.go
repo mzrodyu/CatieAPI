@@ -2325,7 +2325,7 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 			continue
 		}
 		checked++
-		result := s.checkOpenAIAccount(account)
+		result := s.checkOpenAIAccount(account, channelCopy)
 		status := result.Status
 		errorMessage := result.Message
 		if status == "healthy" {
@@ -3598,7 +3598,7 @@ func (s *Server) fetchUpstreamModelIDs(channel Channel, upstreamKey string) ([]s
 	return mergeStrings(nil, ids), nil
 }
 
-func (s *Server) checkOpenAIAccount(account OpenAIAccount) OpenAIAccountCheckResult {
+func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) OpenAIAccountCheckResult {
 	result := OpenAIAccountCheckResult{Status: "unchecked"}
 	accessToken, err := s.revealSecret(account.AccessToken)
 	if err != nil {
@@ -3648,32 +3648,84 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount) OpenAIAccountCheckRes
 		result.Message = "missing access_token"
 		return result
 	}
+	if quotaLimits := s.fetchOpenAIAccountQuotaLimits(accessToken); quotaLimits != nil {
+		result.QuotaLimits = quotaLimits
+	}
+	if providerErr := s.checkOpenAIAccountImageGeneration(channel, accessToken); providerErr != nil {
+		result.Message = providerErr.Message
+		if shouldInvalidateOpenAIAccountForImage(providerErr) {
+			result.Status = "invalid"
+		}
+		return result
+	}
+	result.Status = "healthy"
+	result.Message = ""
+	return result
+}
+
+func (s *Server) fetchOpenAIAccountQuotaLimits(accessToken string) []OpenAIQuotaLimit {
 	request, err := http.NewRequest(http.MethodGet, joinURL(s.chatGPTAPIBase, "wham/usage"), nil)
 	if err != nil {
-		result.Message = err.Error()
-		return result
+		return nil
 	}
 	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
 	request.Header.Set("Accept", "application/json")
 	response, err := s.httpClient.Do(request)
 	if err != nil {
-		result.Message = err.Error()
-		return result
+		return nil
 	}
 	defer response.Body.Close()
 	content, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
-		result.Status = "healthy"
-		result.Message = ""
-		result.QuotaLimits = parseWhamUsageQuotaLimits(content)
-		return result
+		return parseWhamUsageQuotaLimits(content)
 	}
-	providerErr := providerErrorFromUpstream(response.StatusCode, content)
-	result.Message = providerErr.Message
-	if response.StatusCode == http.StatusPaymentRequired && !hasRefreshToken {
-		result.Status = "invalid"
+	return nil
+}
+
+func (s *Server) checkOpenAIAccountImageGeneration(channel Channel, accessToken string) *ProviderError {
+	if strings.TrimSpace(channel.BaseURL) == "" {
+		return &ProviderError{Status: http.StatusBadRequest, Code: "upstream_not_configured", Message: "Channel Base URL is required before checking image accounts", Type: "invalid_request_error"}
 	}
-	return result
+	payload := gin.H{
+		"model":  imageHealthCheckModelID(channel),
+		"prompt": "health check",
+		"n":      1,
+		"size":   "1024x1024",
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "Failed to encode image health check request", Type: "invalid_request_error"}
+	}
+	request, err := http.NewRequest(http.MethodPost, joinURL(channel.BaseURL, "images/generations"), bytes.NewReader(encoded))
+	if err != nil {
+		return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	}
+	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	defer response.Body.Close()
+	content, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		return nil
+	}
+	return providerErrorFromUpstream(response.StatusCode, content)
+}
+
+func imageHealthCheckModelID(channel Channel) string {
+	for _, candidate := range channel.Models {
+		if strings.EqualFold(strings.TrimSpace(candidate), "gpt-image-1") {
+			return "gpt-image-1"
+		}
+	}
+	for _, candidate := range channel.Models {
+		if strings.Contains(strings.ToLower(candidate), "image") {
+			return strings.TrimSpace(candidate)
+		}
+	}
+	return "gpt-image-1"
 }
 
 func upstreamBillingError(content []byte) bool {
@@ -4186,14 +4238,19 @@ func (s *Server) channelUpstreamKey(channel Channel) (string, error) {
 }
 
 func activeOpenAIAccounts(accounts []OpenAIAccount) []OpenAIAccount {
-	active := []OpenAIAccount{}
+	healthy := []OpenAIAccount{}
+	standby := []OpenAIAccount{}
 	for _, account := range accounts {
 		if strings.TrimSpace(account.AccessToken) == "" || account.Status == "invalid" {
 			continue
 		}
-		active = append(active, account)
+		if account.Status == "healthy" {
+			healthy = append(healthy, account)
+			continue
+		}
+		standby = append(standby, account)
 	}
-	return active
+	return append(healthy, standby...)
 }
 
 func (s *Server) markOpenAIAccountInvalid(channelID string, accountID string, message string) {

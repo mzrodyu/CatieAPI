@@ -1882,45 +1882,54 @@ func TestImportOpenAIAccountsFromZipAddsAccountsToExistingChannel(t *testing.T) 
 }
 
 func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
-	var authHeaders []string
-	chatgpt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
-		if r.URL.Path != "/backend-api/wham/usage" {
+	var usageAuthHeaders []string
+	var imageAuthHeaders []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		switch r.URL.Path {
+		case "/backend-api/wham/usage":
+			usageAuthHeaders = append(usageAuthHeaders, auth)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"usage","limits":[{"name":"5h","used":4,"limit":100,"reset_at":"2026-07-06T05:00:00Z"},{"name":"weekly","remaining":90,"limit":100,"reset_at":"2026-07-13T00:00:00Z"}]}`))
+		case "/v1/images/generations":
+			imageAuthHeaders = append(imageAuthHeaders, auth)
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case strings.Contains(auth, "good-token"):
+				_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"b64_json":"ok"}]}`))
+			case strings.Contains(auth, "missing-image-scope-token"):
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":{"code":"upstream_error","message":"You have insufficient permissions for this operation. Missing scopes: api.model.images.request.","type":"invalid_request_error"}}`))
+			case strings.Contains(auth, "invalidated-token"):
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":{"code":"upstream_token_invalidated","message":"Your authentication token has been invalidated. Please try signing in again.","type":"invalid_request_error"}}`))
+			case strings.Contains(auth, "billing-token"):
+				w.WriteHeader(http.StatusPaymentRequired)
+				_, _ = w.Write([]byte(`{"error":{"code":"billing_not_active","message":"billing inactive","type":"billing_not_active"}}`))
+			default:
+				t.Fatalf("unexpected image auth = %s", auth)
+			}
+		default:
 			t.Fatalf("upstream path = %s", r.URL.Path)
 		}
-		if strings.Contains(r.Header.Get("Authorization"), "no-refresh-402-token") {
-			w.WriteHeader(http.StatusPaymentRequired)
-			_, _ = w.Write([]byte(`{"error":{"code":"billing_not_active","message":"billing inactive","type":"billing_not_active"}}`))
-			return
-		}
-		if strings.Contains(r.Header.Get("Authorization"), "missing-scope-token") {
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"error":{"code":"missing_scope","message":"Missing scopes: api.model.read","type":"invalid_request_error"}}`))
-			return
-		}
-		if strings.Contains(r.Header.Get("Authorization"), "has-refresh-402-token") {
-			w.WriteHeader(http.StatusPaymentRequired)
-			_, _ = w.Write([]byte(`{"error":{"code":"billing_not_active","message":"billing inactive but refresh exists","type":"billing_not_active"}}`))
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"object":"usage","limits":[{"name":"5h","used":4,"limit":100,"reset_at":"2026-07-06T05:00:00Z"},{"name":"weekly","remaining":90,"limit":100,"reset_at":"2026-07-13T00:00:00Z"}]}`))
 	}))
-	defer chatgpt.Close()
+	defer upstream.Close()
 
 	withEnv(t, map[string]string{
 		"PERSISTENCE":      "memory",
-		"CHATGPT_API_BASE": chatgpt.URL + "/backend-api",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
 	})
 	server, router := testServerRouter(t)
 	seedGatewayFixtures(server)
 	server.mu.Lock()
 	channel := server.findChannel("chn_1002")
+	channel.BaseURL = upstream.URL + "/v1"
+	channel.Models = []string{"gpt-image-1"}
 	channel.OpenAIAccounts = []OpenAIAccount{
 		{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "unchecked"},
-		{ID: "oaiacc_missing_scope", Email: "missing-scope@example.com", AccessToken: "missing-scope-token", Status: "unchecked"},
-		{ID: "oaiacc_has_refresh_402", Email: "has-refresh-402@example.com", AccessToken: "has-refresh-402-token", RefreshToken: "some-refresh-token", Status: "unchecked"},
-		{ID: "oaiacc_no_refresh_402", Email: "no-refresh-402@example.com", AccessToken: "no-refresh-402-token", Status: "unchecked"},
+		{ID: "oaiacc_missing_image_scope", Email: "missing-image-scope@example.com", AccessToken: "missing-image-scope-token", Status: "unchecked"},
+		{ID: "oaiacc_invalidated", Email: "invalidated@example.com", AccessToken: "invalidated-token", Status: "unchecked"},
+		{ID: "oaiacc_billing", Email: "billing@example.com", AccessToken: "billing-token", Status: "unchecked"},
 	}
 	server.mu.Unlock()
 
@@ -1928,24 +1937,30 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("check accounts status = %d body = %s", response.Code, response.Body.String())
 	}
-	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":4`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":1`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":1`)) {
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":4`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":1`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":3`)) {
 		t.Fatalf("check response missing summary: %s", response.Body.String())
 	}
-	if len(authHeaders) != 4 {
-		t.Fatalf("upstream auth request count = %d", len(authHeaders))
+	if len(usageAuthHeaders) != 4 {
+		t.Fatalf("usage auth request count = %d", len(usageAuthHeaders))
+	}
+	if len(imageAuthHeaders) != 4 {
+		t.Fatalf("image auth request count = %d", len(imageAuthHeaders))
 	}
 
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	channel = server.findChannel("chn_1002")
 	if channel.OpenAIAccounts[0].Status != "healthy" ||
-		channel.OpenAIAccounts[1].Status != "unchecked" ||
-		channel.OpenAIAccounts[2].Status != "unchecked" ||
+		channel.OpenAIAccounts[1].Status != "invalid" ||
+		channel.OpenAIAccounts[2].Status != "invalid" ||
 		channel.OpenAIAccounts[3].Status != "invalid" {
 		t.Fatalf("account statuses = %#v", channel.OpenAIAccounts)
 	}
 	if len(channel.OpenAIAccounts[0].QuotaLimits) != 2 || channel.OpenAIAccounts[0].QuotaLimits[0].Label != "5h" || channel.OpenAIAccounts[0].QuotaLimits[0].PercentRemaining != 96 {
 		t.Fatalf("quota limits were not parsed: %#v", channel.OpenAIAccounts[0].QuotaLimits)
+	}
+	if len(channel.OpenAIAccounts[1].QuotaLimits) != 2 || !strings.Contains(channel.OpenAIAccounts[1].LastError, "api.model.images.request") {
+		t.Fatalf("image capability failure did not preserve quota and error: %#v", channel.OpenAIAccounts[1])
 	}
 }
 
