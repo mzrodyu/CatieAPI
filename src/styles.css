@@ -840,6 +840,12 @@ h3 {
   box-shadow: inset 3px 0 0 var(--blue);
 }
 
+.app-shell[data-theme="dark"] .users-layout .panel:first-child .table-row.selected {
+  background: rgba(118, 118, 128, 0.16);
+  border-color: transparent;
+  box-shadow: none;
+}
+
 .user-summary-strip {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1055,6 +1061,14 @@ h3 {
   background: var(--surface-solid);
   border-color: color-mix(in srgb, var(--blue) 46%, var(--hairline));
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 28%, transparent);
+}
+
+.app-shell[data-theme="dark"] .model-provider-filter button.selected,
+.app-shell[data-theme="dark"] .provider-chip-grid button.selected,
+.app-shell[data-theme="dark"] .stream-mode-grid button.selected {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .model-provider-filter strong,
@@ -1631,6 +1645,13 @@ button.table-row:hover {
   background: var(--surface-solid);
   border-color: color-mix(in srgb, var(--blue) 42%, var(--hairline));
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 30%, transparent);
+}
+
+.app-shell[data-theme="dark"] .provider-chip-grid button.selected,
+.app-shell[data-theme="dark"] .stream-mode-grid button.selected {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .channel-form-grid {
