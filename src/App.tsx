@@ -45,6 +45,9 @@ type Channel = {
   name: string;
   provider: string;
   baseUrl: string;
+  upstreamKeySet?: boolean;
+  openaiAccountCount?: number;
+  openaiAccounts?: OpenAIAccount[];
   status: string;
   streamMode: "auto" | "real" | "fake" | "disabled";
   priority: number;
@@ -78,10 +81,24 @@ type ChannelSyncResult = {
   addedModels: ModelItem[];
 };
 
+type OpenAIAccount = {
+  id: string;
+  name?: string;
+  email?: string;
+  accountId?: string;
+  userId?: string;
+  expiresAt?: string;
+  lastRefresh?: string;
+  planType?: string;
+  source?: string;
+  importedAt?: string;
+};
+
 type OpenAIAccountImportResult = {
   imported: number;
   skipped: number;
-  channels: Channel[];
+  accounts: OpenAIAccount[];
+  channel: Channel;
 };
 
 type ModelItem = {
@@ -178,7 +195,7 @@ function arrayOf<T>(value: T[] | null | undefined): T[] {
 
 function normalizeChannel(channel: Channel): Channel {
   const streamMode = streamModeOptions.some((option) => option.value === channel.streamMode) ? channel.streamMode : "auto";
-  return { ...channel, streamMode, models: arrayOf(channel.models) };
+  return { ...channel, streamMode, models: arrayOf(channel.models), openaiAccounts: arrayOf(channel.openaiAccounts) };
 }
 
 function normalizeModel(model: ModelItem): ModelItem {
@@ -672,7 +689,7 @@ function App() {
     window.setTimeout(() => setToast(""), 2400);
   }
 
-  async function importOpenAIAccounts(file: File) {
+  async function importOpenAIAccounts(channelId: string, file: File) {
     let data: unknown;
     try {
       data = JSON.parse(await file.text());
@@ -681,11 +698,11 @@ function App() {
       window.setTimeout(() => setToast(""), 2400);
       return;
     }
-    const result = await fetchJson<OpenAIAccountImportResult>("/api/channels/import-openai-accounts", {
+    const result = await fetchJson<OpenAIAccountImportResult>(`/api/channels/${encodeURIComponent(channelId)}/import-openai-accounts`, {
       method: "POST",
       body: JSON.stringify(data)
     });
-    await loadAll();
+    setChannels((current) => current.map((channel) => (channel.id === result.channel.id ? normalizeChannel(result.channel) : channel)));
     setActive("channels");
     setToast(`已导入 ${result.imported} 个账号${result.skipped ? `，跳过 ${result.skipped} 个` : ""}`);
     window.setTimeout(() => setToast(""), 2600);
@@ -2255,48 +2272,22 @@ function ChannelsView({
   channels: Channel[];
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
   onCreate: () => void;
-  onImport: (file: File) => Promise<void>;
+  onImport: (channelId: string, file: File) => Promise<void>;
   onDelete: (id: string) => void;
   onSyncModels: (id: string) => Promise<void>;
   onCheck: (id: string) => Promise<void>;
 }) {
-  const [importing, setImporting] = useState(false);
-
-  async function importFile(file: File) {
-    setImporting(true);
-    try {
-      await onImport(file);
-    } finally {
-      setImporting(false);
-    }
-  }
-
   return (
     <Panel title="渠道管理">
       <div className="panel-toolbar">
-        <span className="muted-inline">新增渠道默认禁用；导入 CPA/Sub2API JSON 会生成 OpenAI 渠道。</span>
-        <div className="channel-import-actions">
-          <label className="secondary-button">
-            {importing ? "导入中" : "导入账号 JSON"}
-            <input
-              type="file"
-              accept="application/json,.json"
-              disabled={importing}
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file) importFile(file);
-                event.target.value = "";
-              }}
-            />
-          </label>
-          <button className="primary-button" onClick={onCreate}>
-            新增渠道
-          </button>
-        </div>
+        <span className="muted-inline">新增渠道默认禁用；CPA/Sub2API JSON 请在目标 OpenAI 渠道内导入。</span>
+        <button className="primary-button" onClick={onCreate}>
+          新增渠道
+        </button>
       </div>
       <div className="channels-stack">
         {channels.map((channel) => (
-          <ChannelEditor key={channel.id} channel={channel} onUpdate={onUpdate} onDelete={onDelete} onSyncModels={onSyncModels} onCheck={onCheck} />
+          <ChannelEditor key={channel.id} channel={channel} onUpdate={onUpdate} onImport={onImport} onDelete={onDelete} onSyncModels={onSyncModels} onCheck={onCheck} />
         ))}
         {channels.length === 0 && <Empty text="暂无渠道，先在后端添加渠道接口或导入配置" />}
       </div>
@@ -2307,12 +2298,14 @@ function ChannelsView({
 function ChannelEditor({
   channel,
   onUpdate,
+  onImport,
   onDelete,
   onSyncModels,
   onCheck
 }: {
   channel: Channel;
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
+  onImport: (channelId: string, file: File) => Promise<void>;
   onDelete: (id: string) => void;
   onSyncModels: (id: string) => Promise<void>;
   onCheck: (id: string) => Promise<void>;
@@ -2326,6 +2319,7 @@ function ChannelEditor({
   const [outputPrice, setOutputPrice] = useState(String(channel.outputPricePer1K || 0));
   const [upstreamApiKey, setUpstreamApiKey] = useState("");
   const [busy, setBusy] = useState("");
+  const accountCount = channel.openaiAccountCount ?? channel.openaiAccounts?.length ?? 0;
 
   useEffect(() => {
     setName(channel.name);
@@ -2383,12 +2377,22 @@ function ChannelEditor({
     }
   }
 
+  async function importFile(file: File) {
+    setBusy("import");
+    try {
+      await onImport(channel.id, file);
+    } finally {
+      setBusy("");
+    }
+  }
+
   return (
     <div className="channel-card">
       <div className="channel-card-head">
         <div>
           <strong>{channel.name}</strong>
           <span>{channel.baseUrl || "未配置上游地址"}</span>
+          {accountCount > 0 && <small>OpenAI 账号池：{accountCount} 个账号</small>}
           {(channel.lastCheckedAt || channel.lastError) && (
             <small>{channel.lastError ? `检测失败：${channel.lastError}` : `上次检测 ${formatDate(channel.lastCheckedAt)}`}</small>
           )}
@@ -2450,6 +2454,19 @@ function ChannelEditor({
       </div>
 
       <div className="channel-card-actions">
+        <label className="secondary-button">
+          {busy === "import" ? "导入中" : "导入账号 JSON"}
+          <input
+            type="file"
+            accept="application/json,.json"
+            disabled={busy !== ""}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) importFile(file);
+              event.target.value = "";
+            }}
+          />
+        </label>
         <button className="secondary-button" onClick={check} disabled={busy !== ""}>
           {busy === "check" ? "检测中" : "检测渠道"}
         </button>

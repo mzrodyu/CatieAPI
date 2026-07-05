@@ -141,39 +141,71 @@ type PublicAPIKey struct {
 }
 
 type Channel struct {
-	ID                string   `json:"id"`
-	Name              string   `json:"name"`
-	Provider          string   `json:"provider"`
-	BaseURL           string   `json:"baseUrl"`
-	UpstreamAPIKey    string   `json:"upstreamApiKey,omitempty"`
-	Status            string   `json:"status"`
-	StreamMode        string   `json:"streamMode"`
-	Priority          int      `json:"priority"`
-	Weight            int      `json:"weight"`
-	Models            []string `json:"models"`
-	InputPricePer1K   float64  `json:"inputPricePer1K"`
-	OutputPricePer1K  float64  `json:"outputPricePer1K"`
-	PricingConfigured bool     `json:"pricingConfigured"`
-	LastCheckedAt     string   `json:"lastCheckedAt,omitempty"`
-	LastError         string   `json:"lastError,omitempty"`
+	ID                string          `json:"id"`
+	Name              string          `json:"name"`
+	Provider          string          `json:"provider"`
+	BaseURL           string          `json:"baseUrl"`
+	UpstreamAPIKey    string          `json:"upstreamApiKey,omitempty"`
+	OpenAIAccounts    []OpenAIAccount `json:"openaiAccounts,omitempty"`
+	Status            string          `json:"status"`
+	StreamMode        string          `json:"streamMode"`
+	Priority          int             `json:"priority"`
+	Weight            int             `json:"weight"`
+	Models            []string        `json:"models"`
+	InputPricePer1K   float64         `json:"inputPricePer1K"`
+	OutputPricePer1K  float64         `json:"outputPricePer1K"`
+	PricingConfigured bool            `json:"pricingConfigured"`
+	LastCheckedAt     string          `json:"lastCheckedAt,omitempty"`
+	LastError         string          `json:"lastError,omitempty"`
 }
 
 type PublicChannel struct {
-	ID                string   `json:"id"`
-	Name              string   `json:"name"`
-	Provider          string   `json:"provider"`
-	BaseURL           string   `json:"baseUrl"`
-	UpstreamKeySet    bool     `json:"upstreamKeySet"`
-	Status            string   `json:"status"`
-	StreamMode        string   `json:"streamMode"`
-	Priority          int      `json:"priority"`
-	Weight            int      `json:"weight"`
-	Models            []string `json:"models"`
-	InputPricePer1K   float64  `json:"inputPricePer1K"`
-	OutputPricePer1K  float64  `json:"outputPricePer1K"`
-	PricingConfigured bool     `json:"pricingConfigured"`
-	LastCheckedAt     string   `json:"lastCheckedAt"`
-	LastError         string   `json:"lastError"`
+	ID                 string                `json:"id"`
+	Name               string                `json:"name"`
+	Provider           string                `json:"provider"`
+	BaseURL            string                `json:"baseUrl"`
+	UpstreamKeySet     bool                  `json:"upstreamKeySet"`
+	OpenAIAccountCount int                   `json:"openaiAccountCount"`
+	OpenAIAccounts     []PublicOpenAIAccount `json:"openaiAccounts,omitempty"`
+	Status             string                `json:"status"`
+	StreamMode         string                `json:"streamMode"`
+	Priority           int                   `json:"priority"`
+	Weight             int                   `json:"weight"`
+	Models             []string              `json:"models"`
+	InputPricePer1K    float64               `json:"inputPricePer1K"`
+	OutputPricePer1K   float64               `json:"outputPricePer1K"`
+	PricingConfigured  bool                  `json:"pricingConfigured"`
+	LastCheckedAt      string                `json:"lastCheckedAt"`
+	LastError          string                `json:"lastError"`
+}
+
+type OpenAIAccount struct {
+	ID           string `json:"id"`
+	Name         string `json:"name,omitempty"`
+	Email        string `json:"email,omitempty"`
+	AccessToken  string `json:"accessToken,omitempty"`
+	RefreshToken string `json:"refreshToken,omitempty"`
+	IDToken      string `json:"idToken,omitempty"`
+	AccountID    string `json:"accountId,omitempty"`
+	UserID       string `json:"userId,omitempty"`
+	ExpiresAt    string `json:"expiresAt,omitempty"`
+	LastRefresh  string `json:"lastRefresh,omitempty"`
+	PlanType     string `json:"planType,omitempty"`
+	Source       string `json:"source,omitempty"`
+	ImportedAt   string `json:"importedAt,omitempty"`
+}
+
+type PublicOpenAIAccount struct {
+	ID          string `json:"id"`
+	Name        string `json:"name,omitempty"`
+	Email       string `json:"email,omitempty"`
+	AccountID   string `json:"accountId,omitempty"`
+	UserID      string `json:"userId,omitempty"`
+	ExpiresAt   string `json:"expiresAt,omitempty"`
+	LastRefresh string `json:"lastRefresh,omitempty"`
+	PlanType    string `json:"planType,omitempty"`
+	Source      string `json:"source,omitempty"`
+	ImportedAt  string `json:"importedAt,omitempty"`
 }
 
 type ImportedOpenAIAccount struct {
@@ -488,7 +520,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.DELETE("/api-keys/:id", s.deleteAPIKey)
 	admin.GET("/channels", s.listChannels)
 	admin.POST("/channels", s.createChannel)
-	admin.POST("/channels/import-openai-accounts", s.importOpenAIAccounts)
+	admin.POST("/channels/:id/import-openai-accounts", s.importOpenAIAccounts)
 	admin.PATCH("/channels/:id", s.updateChannel)
 	admin.DELETE("/channels/:id", s.deleteChannel)
 	admin.POST("/channels/:id/check", s.checkChannel)
@@ -1103,6 +1135,16 @@ func (s *Server) validateBackupState(state AppState) error {
 		if strings.TrimSpace(channel.UpstreamAPIKey) != "" {
 			if _, err := s.revealSecret(channel.UpstreamAPIKey); err != nil {
 				return fmt.Errorf("渠道密钥无法解密，请使用导出备份时的 SECRET_KEY")
+			}
+		}
+		for _, account := range channel.OpenAIAccounts {
+			for _, secret := range []string{account.AccessToken, account.RefreshToken, account.IDToken} {
+				if strings.TrimSpace(secret) == "" {
+					continue
+				}
+				if _, err := s.revealSecret(secret); err != nil {
+					return fmt.Errorf("OpenAI 账号凭证无法解密，请使用导出备份时的 SECRET_KEY")
+				}
 			}
 		}
 	}
@@ -2148,39 +2190,7 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 		return
 	}
 
-	baseURL := "https://api.openai.com/v1"
-	if value := stringFromMap(payload, "baseUrl"); value != "" {
-		baseURL = strings.TrimRight(value, "/")
-	}
-	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
-		validationError(c, "Base URL must start with http:// or https://")
-		return
-	}
 	models := stringSliceFromAny(payload["models"])
-	if len(models) == 0 {
-		models = []string{"gpt-5.6", "gpt-image-2", "gpt-image-1"}
-	}
-	status := stringFromMap(payload, "status")
-	if status == "" {
-		status = "standby"
-	}
-	if !allowedString(status, "healthy", "standby", "disabled") {
-		validationError(c, "Invalid channel status")
-		return
-	}
-	priority := 10
-	if value, ok := asInt(payload["priority"]); ok && value > 0 {
-		priority = value
-	}
-	weight := 10
-	if value, ok := asInt(payload["weight"]); ok && value >= 0 {
-		weight = value
-	}
-	namePrefix := stringFromMap(payload, "namePrefix")
-	if namePrefix == "" {
-		namePrefix = "OpenAI Account"
-	}
-
 	importData := payload
 	if nested, ok := payload["data"].(map[string]interface{}); ok {
 		importData = nested
@@ -2191,12 +2201,20 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 		return
 	}
 
-	channels := []PublicChannel{}
+	importedAccounts := []PublicOpenAIAccount{}
 	invalid := 0
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	channel := s.findChannel(c.Param("id"))
+	if channel == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
+		return
+	}
 	for _, modelID := range models {
 		s.ensureImportedModelLocked(modelID)
+		if !containsString(channel.Models, modelID) {
+			channel.Models = append(channel.Models, modelID)
+		}
 	}
 	for _, account := range accounts {
 		if strings.TrimSpace(account.AccessToken) == "" {
@@ -2208,43 +2226,52 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "Failed to protect imported access token"}})
 			return
 		}
-		display := account.Email
-		if display == "" {
-			display = account.Name
+		protectedRefresh := ""
+		if strings.TrimSpace(account.RefreshToken) != "" {
+			var err error
+			protectedRefresh, err = s.protectSecret(strings.TrimSpace(account.RefreshToken))
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "Failed to protect imported refresh token"}})
+				return
+			}
 		}
-		if display == "" {
-			display = account.AccountID
+		protectedID := ""
+		if strings.TrimSpace(account.IDToken) != "" {
+			var err error
+			protectedID, err = s.protectSecret(strings.TrimSpace(account.IDToken))
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "Failed to protect imported id token"}})
+				return
+			}
 		}
-		if display == "" {
-			display = account.UserID
+		stored := OpenAIAccount{
+			ID:           newID("oaiacc"),
+			Name:         account.Name,
+			Email:        account.Email,
+			AccessToken:  protectedKey,
+			RefreshToken: protectedRefresh,
+			IDToken:      protectedID,
+			AccountID:    account.AccountID,
+			UserID:       account.UserID,
+			ExpiresAt:    account.ExpiresAt,
+			LastRefresh:  account.LastRefresh,
+			PlanType:     account.PlanType,
+			Source:       account.Source,
+			ImportedAt:   time.Now().UTC().Format(time.RFC3339),
 		}
-		if display == "" {
-			display = fmt.Sprintf("account-%d", len(channels)+1)
-		}
-		channel := Channel{
-			ID:             newID("chn"),
-			Name:           strings.TrimSpace(namePrefix + " - " + display),
-			Provider:       "openai",
-			BaseURL:        baseURL,
-			UpstreamAPIKey: protectedKey,
-			Status:         status,
-			StreamMode:     "auto",
-			Priority:       priority,
-			Weight:         weight,
-			Models:         append([]string{}, models...),
-		}
-		s.state.Channels = append(s.state.Channels, channel)
-		channels = append(channels, publicChannel(channel))
+		channel.OpenAIAccounts = append(channel.OpenAIAccounts, stored)
+		importedAccounts = append(importedAccounts, publicOpenAIAccount(stored))
 	}
-	if len(channels) == 0 {
+	if len(importedAccounts) == 0 {
 		validationError(c, "Imported accounts do not contain access_token")
 		return
 	}
 	s.saveStateLocked()
 	c.JSON(http.StatusCreated, gin.H{
-		"imported": len(channels),
+		"imported": len(importedAccounts),
 		"skipped":  invalid,
-		"channels": channels,
+		"accounts": importedAccounts,
+		"channel":  publicChannel(*channel),
 	})
 }
 
@@ -2372,14 +2399,11 @@ func (s *Server) syncChannelModels(c *gin.Context) {
 		return
 	}
 	channelCopy := *channel
-	upstreamKey, err := s.revealSecret(channelCopy.UpstreamAPIKey)
+	upstreamKey, err := s.channelUpstreamKey(channelCopy)
 	if err != nil {
 		s.mu.Unlock()
 		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": err.Error()}})
 		return
-	}
-	if strings.TrimSpace(upstreamKey) == "" {
-		upstreamKey = s.upstreamAPIKey
 	}
 	s.mu.Unlock()
 
@@ -2440,14 +2464,11 @@ func (s *Server) checkChannel(c *gin.Context) {
 		return
 	}
 	channelCopy := *channel
-	upstreamKey, err := s.revealSecret(channelCopy.UpstreamAPIKey)
+	upstreamKey, err := s.channelUpstreamKey(channelCopy)
 	if err != nil {
 		s.mu.Unlock()
 		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": err.Error()}})
 		return
-	}
-	if strings.TrimSpace(upstreamKey) == "" {
-		upstreamKey = s.upstreamAPIKey
 	}
 	s.mu.Unlock()
 
@@ -3436,11 +3457,11 @@ func (s *Server) shouldUseCompatibleProvider(channel Channel) bool {
 	if strings.EqualFold(s.providerMode, "compatible") {
 		return true
 	}
-	return strings.TrimSpace(channel.BaseURL) != "" && (strings.TrimSpace(channel.UpstreamAPIKey) != "" || strings.TrimSpace(s.upstreamAPIKey) != "")
+	return strings.TrimSpace(channel.BaseURL) != "" && (strings.TrimSpace(channel.UpstreamAPIKey) != "" || len(channel.OpenAIAccounts) > 0 || strings.TrimSpace(s.upstreamAPIKey) != "")
 }
 
 func (s *Server) newOpenAICompatibleRequest(call GatewayCall, stream bool) (*http.Request, *ProviderError) {
-	upstreamKey, err := s.revealSecret(call.Channel.UpstreamAPIKey)
+	upstreamKey, err := s.channelUpstreamKey(call.Channel)
 	if err != nil {
 		return nil, &ProviderError{
 			Status:  http.StatusBadGateway,
@@ -3486,7 +3507,7 @@ func (s *Server) newOpenAICompatibleRequest(call GatewayCall, stream bool) (*htt
 }
 
 func (s *Server) newOpenAICompatibleImageRequest(call ImageGatewayCall) (*http.Request, *ProviderError) {
-	upstreamKey, err := s.revealSecret(call.Channel.UpstreamAPIKey)
+	upstreamKey, err := s.channelUpstreamKey(call.Channel)
 	if err != nil {
 		return nil, &ProviderError{
 			Status:  http.StatusBadGateway,
@@ -3528,6 +3549,34 @@ func (s *Server) newOpenAICompatibleImageRequest(call ImageGatewayCall) (*http.R
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Request-ID", call.RequestID)
 	return request, nil
+}
+
+func (s *Server) channelUpstreamKey(channel Channel) (string, error) {
+	protectedKeys := []string{}
+	for _, account := range channel.OpenAIAccounts {
+		if strings.TrimSpace(account.AccessToken) != "" {
+			protectedKeys = append(protectedKeys, account.AccessToken)
+		}
+	}
+	if len(protectedKeys) > 0 {
+		protected := protectedKeys[int(time.Now().UnixNano()%int64(len(protectedKeys)))]
+		key, err := s.revealSecret(protected)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(key) != "" {
+			return key, nil
+		}
+	}
+
+	upstreamKey, err := s.revealSecret(channel.UpstreamAPIKey)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(upstreamKey) == "" {
+		upstreamKey = s.upstreamAPIKey
+	}
+	return strings.TrimSpace(upstreamKey), nil
 }
 
 func (s *Server) writeProviderStream(c *gin.Context, call GatewayCall) *ProviderError {
@@ -5583,22 +5632,43 @@ func publicAPIKey(key APIKey) PublicAPIKey {
 }
 
 func publicChannel(channel Channel) PublicChannel {
+	accounts := make([]PublicOpenAIAccount, 0, len(channel.OpenAIAccounts))
+	for _, account := range channel.OpenAIAccounts {
+		accounts = append(accounts, publicOpenAIAccount(account))
+	}
 	return PublicChannel{
-		ID:                channel.ID,
-		Name:              channel.Name,
-		Provider:          channel.Provider,
-		BaseURL:           channel.BaseURL,
-		UpstreamKeySet:    strings.TrimSpace(channel.UpstreamAPIKey) != "",
-		Status:            channel.Status,
-		StreamMode:        normalizeStreamMode(channel.StreamMode),
-		Priority:          channel.Priority,
-		Weight:            channel.Weight,
-		Models:            append([]string{}, channel.Models...),
-		InputPricePer1K:   channel.InputPricePer1K,
-		OutputPricePer1K:  channel.OutputPricePer1K,
-		PricingConfigured: channel.PricingConfigured,
-		LastCheckedAt:     channel.LastCheckedAt,
-		LastError:         channel.LastError,
+		ID:                 channel.ID,
+		Name:               channel.Name,
+		Provider:           channel.Provider,
+		BaseURL:            channel.BaseURL,
+		UpstreamKeySet:     strings.TrimSpace(channel.UpstreamAPIKey) != "",
+		OpenAIAccountCount: len(channel.OpenAIAccounts),
+		OpenAIAccounts:     accounts,
+		Status:             channel.Status,
+		StreamMode:         normalizeStreamMode(channel.StreamMode),
+		Priority:           channel.Priority,
+		Weight:             channel.Weight,
+		Models:             append([]string{}, channel.Models...),
+		InputPricePer1K:    channel.InputPricePer1K,
+		OutputPricePer1K:   channel.OutputPricePer1K,
+		PricingConfigured:  channel.PricingConfigured,
+		LastCheckedAt:      channel.LastCheckedAt,
+		LastError:          channel.LastError,
+	}
+}
+
+func publicOpenAIAccount(account OpenAIAccount) PublicOpenAIAccount {
+	return PublicOpenAIAccount{
+		ID:          account.ID,
+		Name:        account.Name,
+		Email:       account.Email,
+		AccountID:   account.AccountID,
+		UserID:      account.UserID,
+		ExpiresAt:   account.ExpiresAt,
+		LastRefresh: account.LastRefresh,
+		PlanType:    account.PlanType,
+		Source:      account.Source,
+		ImportedAt:  account.ImportedAt,
 	}
 }
 

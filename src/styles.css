@@ -2146,6 +2146,10 @@ button.table-row:hover {
   display: none;
 }
 
+.channel-card-actions input[type="file"] {
+  display: none;
+}
+
 .key-editor {
   display: grid;
   gap: 14px;

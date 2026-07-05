@@ -1422,7 +1422,7 @@ func TestChannelUpstreamKeyIsEncryptedAtRestAndUsable(t *testing.T) {
 	}
 }
 
-func TestImportCPAJSONCreatesEncryptedOpenAIChannel(t *testing.T) {
+func TestImportCPAJSONAddsEncryptedAccountToChannel(t *testing.T) {
 	dataFile := filepath.Join(t.TempDir(), "state.json")
 	accessToken := "cpa-access-token-secret"
 	withEnv(t, map[string]string{
@@ -1430,7 +1430,8 @@ func TestImportCPAJSONCreatesEncryptedOpenAIChannel(t *testing.T) {
 		"DATA_FILE":   dataFile,
 		"SECRET_KEY":  "import-secret-key",
 	})
-	router := testRouter(t)
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
 
 	body := `{
 		"id_token":"cpa-id-token-secret",
@@ -1442,15 +1443,18 @@ func TestImportCPAJSONCreatesEncryptedOpenAIChannel(t *testing.T) {
 		"type":"codex",
 		"expired":"2026-07-06T01:00:00.000Z"
 	}`
-	response := perform(router, http.MethodPost, "/api/channels/import-openai-accounts", body, nil)
+	response := perform(router, http.MethodPost, "/api/channels/chn_1002/import-openai-accounts", body, nil)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("CPA import status = %d body = %s", response.Code, response.Body.String())
 	}
 	if bytes.Contains(response.Body.Bytes(), []byte(accessToken)) || bytes.Contains(response.Body.Bytes(), []byte("cpa-refresh-token-secret")) {
 		t.Fatalf("import response leaked token: %s", response.Body.String())
 	}
-	if !bytes.Contains(response.Body.Bytes(), []byte(`"imported":1`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"upstreamKeySet":true`)) {
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"imported":1`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"openaiAccountCount":1`)) {
 		t.Fatalf("import response missing summary: %s", response.Body.String())
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte(`"accessToken"`)) || bytes.Contains(response.Body.Bytes(), []byte(`"refreshToken"`)) {
+		t.Fatalf("import response exposed protected fields: %s", response.Body.String())
 	}
 
 	stateContent, err := os.ReadFile(dataFile)
@@ -1463,9 +1467,15 @@ func TestImportCPAJSONCreatesEncryptedOpenAIChannel(t *testing.T) {
 	if !bytes.Contains(stateContent, []byte("enc:v1:")) {
 		t.Fatalf("encrypted token marker missing from state: %s", string(stateContent))
 	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel := server.findChannel("chn_1002")
+	if channel == nil || len(channel.OpenAIAccounts) != 1 {
+		t.Fatalf("channel account count = %#v", channel)
+	}
 }
 
-func TestImportSub2APIJSONCreatesMultipleChannels(t *testing.T) {
+func TestImportSub2APIJSONAddsAccountsToExistingChannel(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)
 	seedGatewayFixtures(server)
@@ -1507,7 +1517,7 @@ func TestImportSub2APIJSONCreatesMultipleChannels(t *testing.T) {
 			"version":1
 		}
 	}`
-	response := perform(router, http.MethodPost, "/api/channels/import-openai-accounts", body, nil)
+	response := perform(router, http.MethodPost, "/api/channels/chn_1002/import-openai-accounts", body, nil)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("Sub2 import status = %d body = %s", response.Code, response.Body.String())
 	}
@@ -1520,17 +1530,22 @@ func TestImportSub2APIJSONCreatesMultipleChannels(t *testing.T) {
 
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	imageChannels := 0
-	for _, channel := range server.state.Channels {
-		if channel.Name == "OpenAI Account - first@example.com" || channel.Name == "OpenAI Account - second@example.com" {
-			imageChannels++
-			if !containsString(channel.Models, "gpt-image-2") || channel.UpstreamAPIKey == "" {
-				t.Fatalf("bad imported channel: %#v", channel)
-			}
-		}
+	channel := server.findChannel("chn_1002")
+	if channel == nil {
+		t.Fatal("target channel missing")
 	}
-	if imageChannels != 2 {
-		t.Fatalf("imported channel count = %d", imageChannels)
+	if len(channel.OpenAIAccounts) != 2 {
+		t.Fatalf("imported account count = %d", len(channel.OpenAIAccounts))
+	}
+	upstreamKey, err := server.channelUpstreamKey(*channel)
+	if err != nil {
+		t.Fatalf("channel upstream key: %v", err)
+	}
+	if upstreamKey != "first-access-token" && upstreamKey != "second-access-token" {
+		t.Fatalf("channel did not use imported account token: %s", upstreamKey)
+	}
+	if !containsString(channel.Models, "gpt-image-2") {
+		t.Fatalf("import did not add model to target channel: %#v", channel.Models)
 	}
 	if server.findModel("gpt-image-2") == nil {
 		t.Fatal("import did not create missing model")
