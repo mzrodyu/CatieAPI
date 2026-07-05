@@ -202,6 +202,7 @@ type RequestLog struct {
 	Cost         float64 `json:"cost"`
 	InputTokens  int     `json:"inputTokens"`
 	OutputTokens int     `json:"outputTokens"`
+	Attempts     int     `json:"attempts"`
 	LatencyMS    int64   `json:"latencyMs"`
 	ErrorCode    string  `json:"errorCode,omitempty"`
 	CreatedAt    string  `json:"createdAt"`
@@ -2771,6 +2772,7 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 		var selectedChannel Channel
 		var providerErr *ProviderError
 		var responseBody gin.H
+		attempts := 0
 		streamMode := ""
 		for index, channel := range channels {
 			selectedChannel = channel
@@ -2779,6 +2781,7 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 			if streamMode == "disabled" {
 				providerErr = &ProviderError{Status: http.StatusBadRequest, Code: "stream_not_supported", Message: "Channel streaming is disabled", Type: "invalid_request_error"}
 			} else if streamMode == "fake" {
+				attempts++
 				nonStreamCall := call
 				nonStreamCall.Body.Stream = false
 				if nonStreamCall.Body.Payload != nil {
@@ -2794,6 +2797,7 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 					s.writeFakeProviderStream(c, call, responseBody)
 				}
 			} else {
+				attempts++
 				providerErr = s.writeProviderStream(c, call)
 			}
 			if providerErr == nil {
@@ -2801,28 +2805,32 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 				s.updateChannelRuntimeHealth(channel.ID, true, "")
 				break
 			}
-			s.updateChannelRuntimeHealth(channel.ID, false, providerErr.Message)
+			if shouldMarkChannelUnhealthy(providerErr) {
+				s.updateChannelRuntimeHealth(channel.ID, false, providerErr.Message)
+			}
 			if !retryableProviderError(providerErr) || index == len(channels)-1 {
 				break
 			}
 		}
 		if providerErr != nil {
-			s.recordFailedCall(authUserID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, providerErr.Code, startedAt)
+			s.recordFailedCall(authUserID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, providerErr.Code, attempts, startedAt)
 			writeOpenAIError(c, providerErr.Status, providerErr.Code, providerErr.Message, providerErr.Type, stringPtr("model"))
 			return
 		}
 		billingModel = modelWithChannelPricing(modelCopy, selectedChannel)
 		inputTokens, outputTokens := callTokenUsage(responseBody, body.Messages, streamMode != "fake")
 		streamCost := calculateCallCost(billingModel, responseBody, body.Messages, streamMode != "fake")
-		s.recordSuccessfulCall(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, streamCost, inputTokens, outputTokens, startedAt)
+		s.recordSuccessfulCall(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, streamCost, inputTokens, outputTokens, attempts, startedAt)
 		return
 	}
 
 	var responseBody gin.H
 	var providerErr *ProviderError
 	var selectedChannel Channel
+	attempts := 0
 	for index, channel := range channels {
 		call := GatewayCall{RequestID: requestID, Model: modelCopy, Channel: channel, Body: body}
+		attempts++
 		responseBody, providerErr = s.callProvider(call)
 		if providerErr == nil {
 			selectedChannel = channel
@@ -2830,13 +2838,15 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 			break
 		}
 		selectedChannel = channel
-		s.updateChannelRuntimeHealth(channel.ID, false, providerErr.Message)
+		if shouldMarkChannelUnhealthy(providerErr) {
+			s.updateChannelRuntimeHealth(channel.ID, false, providerErr.Message)
+		}
 		if !retryableProviderError(providerErr) || index == len(channels)-1 {
 			break
 		}
 	}
 	if providerErr != nil {
-		s.recordFailedCall(authUserID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, providerErr.Code, startedAt)
+		s.recordFailedCall(authUserID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, providerErr.Code, attempts, startedAt)
 		writeOpenAIError(c, providerErr.Status, providerErr.Code, providerErr.Message, providerErr.Type, stringPtr("model"))
 		return
 	}
@@ -2849,7 +2859,7 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 		outputBody = transform(responseBody, modelCopy)
 	}
 	s.mu.Lock()
-	s.recordSuccessfulCallLocked(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, cost, inputTokens, outputTokens, startedAt)
+	s.recordSuccessfulCallLocked(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, cost, inputTokens, outputTokens, attempts, startedAt)
 	if idempotencyKey != "" {
 		s.idempotencyCache[idempotencyKey] = CachedResponse{Status: http.StatusOK, Body: outputBody, CreatedAt: now()}
 	}
@@ -2857,13 +2867,13 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 	c.JSON(http.StatusOK, outputBody)
 }
 
-func (s *Server) recordSuccessfulCall(userID string, keyID string, keyPrefix string, modelID string, channelName string, requestID string, cost float64, inputTokens int, outputTokens int, startedAt time.Time) {
+func (s *Server) recordSuccessfulCall(userID string, keyID string, keyPrefix string, modelID string, channelName string, requestID string, cost float64, inputTokens int, outputTokens int, attempts int, startedAt time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.recordSuccessfulCallLocked(userID, keyID, keyPrefix, modelID, channelName, requestID, cost, inputTokens, outputTokens, startedAt)
+	s.recordSuccessfulCallLocked(userID, keyID, keyPrefix, modelID, channelName, requestID, cost, inputTokens, outputTokens, attempts, startedAt)
 }
 
-func (s *Server) recordSuccessfulCallLocked(userID string, keyID string, keyPrefix string, modelID string, channelName string, requestID string, cost float64, inputTokens int, outputTokens int, startedAt time.Time) {
+func (s *Server) recordSuccessfulCallLocked(userID string, keyID string, keyPrefix string, modelID string, channelName string, requestID string, cost float64, inputTokens int, outputTokens int, attempts int, startedAt time.Time) {
 	user := s.findUser(userID)
 	key := s.findAPIKeyByID(keyID)
 	if user == nil || key == nil {
@@ -2898,13 +2908,14 @@ func (s *Server) recordSuccessfulCallLocked(userID string, keyID string, keyPref
 		Cost:         cost,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
+		Attempts:     attempts,
 		LatencyMS:    time.Since(startedAt).Milliseconds(),
 		CreatedAt:    now(),
 	})
 	s.saveStateLocked()
 }
 
-func (s *Server) recordFailedCall(userID string, keyPrefix string, modelID string, channelName string, requestID string, errorCode string, startedAt time.Time) {
+func (s *Server) recordFailedCall(userID string, keyPrefix string, modelID string, channelName string, requestID string, errorCode string, attempts int, startedAt time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.state.Logs = append(s.state.Logs, RequestLog{
@@ -2915,6 +2926,7 @@ func (s *Server) recordFailedCall(userID string, keyPrefix string, modelID strin
 		Channel:      &channelName,
 		Status:       "failed",
 		Cost:         0,
+		Attempts:     attempts,
 		LatencyMS:    time.Since(startedAt).Milliseconds(),
 		ErrorCode:    errorCode,
 		CreatedAt:    now(),
@@ -4094,15 +4106,44 @@ func retryableProviderError(providerErr *ProviderError) bool {
 	if providerErr == nil {
 		return false
 	}
-	if providerErr.Status == http.StatusTooManyRequests || providerErr.Status >= http.StatusInternalServerError {
+	if providerErr.Code == "stream_not_supported" {
 		return true
 	}
-	return allowedString(providerErr.Code,
+	if allowedString(providerErr.Code,
 		"stream_not_supported",
 		"upstream_unreachable",
 		"upstream_read_error",
 		"upstream_invalid_json",
 		"upstream_timeout",
+	) {
+		return true
+	}
+	if providerErr.Status == http.StatusTooManyRequests {
+		return true
+	}
+	if providerErr.Status >= http.StatusInternalServerError && strings.HasPrefix(providerErr.Code, "upstream_") {
+		return !allowedString(providerErr.Code,
+			"upstream_key_unavailable",
+			"upstream_not_configured",
+			"upstream_request_error",
+		)
+	}
+	return false
+}
+
+func shouldMarkChannelUnhealthy(providerErr *ProviderError) bool {
+	if providerErr == nil || providerErr.Code == "stream_not_supported" {
+		return false
+	}
+	if retryableProviderError(providerErr) {
+		return true
+	}
+	return allowedString(providerErr.Code,
+		"upstream_authentication_error",
+		"upstream_invalid_api_key",
+		"upstream_key_unavailable",
+		"upstream_not_configured",
+		"upstream_request_error",
 	)
 }
 

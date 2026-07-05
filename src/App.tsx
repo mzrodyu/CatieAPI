@@ -101,6 +101,7 @@ type RequestLog = {
   cost: number;
   inputTokens?: number;
   outputTokens?: number;
+  attempts?: number;
   latencyMs: number;
   errorCode?: string;
   createdAt: string;
@@ -2538,6 +2539,7 @@ function LogDetail({ log, loading, onCopy }: { log: RequestLog | null; loading: 
   }
   const inputTokens = Number(log.inputTokens || 0);
   const outputTokens = Number(log.outputTokens || 0);
+  const attempts = typeof log.attempts === "number" ? Math.max(0, log.attempts) : null;
   const details = [
     ["请求 ID", log.id],
     ["状态", statusLabel(log.status)],
@@ -2547,6 +2549,8 @@ function LogDetail({ log, loading, onCopy }: { log: RequestLog | null; loading: 
     ["模型", log.model || "未提供"],
     ["渠道", log.channel || "未选择"],
     ["响应耗时", `${log.latencyMs} ms`],
+    ["尝试次数", attempts === null ? "未记录" : String(attempts)],
+    ["是否重试", attempts === null ? "未记录" : attempts > 1 ? "是" : "否"],
     ["输入 Tokens", formatTokenCount(inputTokens)],
     ["输出 Tokens", formatTokenCount(outputTokens)],
     ["总 Tokens", formatTokenCount(inputTokens + outputTokens)],
