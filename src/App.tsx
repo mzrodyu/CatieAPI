@@ -92,11 +92,22 @@ type OpenAIAccount = {
   planType?: string;
   source?: string;
   importedAt?: string;
+  status?: string;
+  lastCheckedAt?: string;
+  lastError?: string;
 };
 
 type OpenAIAccountImportResult = {
   imported: number;
   skipped: number;
+  accounts: OpenAIAccount[];
+  channel: Channel;
+};
+
+type OpenAIAccountCheckResult = {
+  checked: number;
+  healthy: number;
+  failed: number;
   accounts: OpenAIAccount[];
   channel: Channel;
 };
@@ -226,6 +237,7 @@ type IconName =
   | "users"
   | "key"
   | "models"
+  | "image"
   | "route"
   | "logs"
   | "settings"
@@ -242,6 +254,7 @@ const iconPaths: Record<IconName, string> = {
   users: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75",
   key: "M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78ZM14 8l7-7M21 8h-5V3",
   models: "M12 2 4 6v12l8 4 8-4V6zM4 6l8 4 8-4M12 10v12",
+  image: "M21 19V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2ZM8.5 11a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM21 16l-5-5L5 21",
   route: "M4 19a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM20 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM7 16h3a4 4 0 0 0 4-4V8h3",
   logs: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M8 13h8M8 17h6",
   settings: "M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7ZM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 8.92 4a1.65 1.65 0 0 0 1-1.51V2a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.31.39.57.71.71.23.1.49.18.8.2H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z",
@@ -301,6 +314,7 @@ const navItems = [
   { id: "users", label: "用户", icon: "users" },
   { id: "keys", label: "密钥", icon: "key" },
   { id: "models", label: "模型", icon: "models" },
+  { id: "drawing", label: "绘图", icon: "image" },
   { id: "channels", label: "渠道", icon: "route" },
   { id: "logs", label: "日志", icon: "logs" },
   { id: "settings", label: "设置", icon: "settings" }
@@ -724,6 +738,16 @@ function App() {
     window.setTimeout(() => setToast(""), 2600);
   }
 
+  async function checkOpenAIAccounts(channelId: string) {
+    const result = await fetchJson<OpenAIAccountCheckResult>(`/api/channels/${encodeURIComponent(channelId)}/openai-accounts/check`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    setChannels((current) => current.map((channel) => (channel.id === result.channel.id ? normalizeChannel(result.channel) : channel)));
+    setToast(`账号测活完成：${result.healthy}/${result.checked} 可用${result.failed ? `，失败 ${result.failed}` : ""}`);
+    window.setTimeout(() => setToast(""), 3000);
+  }
+
   async function createModel(model: ModelCreate) {
     const data = await fetchJson<{ model: ModelItem }>("/api/models", {
       method: "POST",
@@ -936,6 +960,7 @@ function App() {
         )}
         {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} onUpdateKey={updateAPIKey} onDeleteKey={deleteAPIKey} />}
         {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} onUpdate={updateModel} onDelete={deleteModel} />}
+        {active === "drawing" && <DrawingView channels={channels} onCreate={createChannel} onImport={importOpenAIAccounts} onCheckAccounts={checkOpenAIAccounts} onUpdate={updateChannel} />}
         {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onImport={importOpenAIAccounts} onDelete={deleteChannel} onSyncModels={syncChannelModels} onCheck={checkChannel} />}
         {active === "logs" && <LogsView logs={logs} onCopy={copyAndToast} />}
         {active === "settings" && <SettingsView models={models} channels={channels} />}
@@ -2273,6 +2298,128 @@ function ModelCard({
         </div>
       )}
     </article>
+  );
+}
+
+function DrawingView({
+  channels,
+  onCreate,
+  onImport,
+  onCheckAccounts,
+  onUpdate
+}: {
+  channels: Channel[];
+  onCreate: () => Promise<void>;
+  onImport: (channelId: string, file: File) => Promise<void>;
+  onCheckAccounts: (channelId: string) => Promise<void>;
+  onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
+}) {
+  const drawingChannels = channels.filter((channel) => channel.provider === "openai" || arrayOf(channel.models).some((model) => model.includes("image")));
+  const [busy, setBusy] = useState("");
+
+  async function importFile(channelId: string, file: File) {
+    setBusy(`import:${channelId}`);
+    try {
+      await onImport(channelId, file);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function checkAccounts(channelId: string) {
+    setBusy(`check:${channelId}`);
+    try {
+      await onCheckAccounts(channelId);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function toggleChannel(channel: Channel) {
+    setBusy(`status:${channel.id}`);
+    try {
+      await onUpdate(channel.id, {
+        status: channel.status === "disabled" ? "healthy" : "disabled",
+        baseUrl: channel.baseUrl || defaultOpenAIBaseURL,
+        provider: channel.provider || "openai",
+        models: arrayOf(channel.models).length ? channel.models : defaultOpenAIModels.split(",").map((model) => model.trim())
+      });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return (
+    <Panel title="绘图账号池">
+      <div className="panel-toolbar">
+        <span className="muted-inline">OpenAI 生图渠道集中管理；ZIP/JSON 导入后可批量测活。</span>
+        <button className="primary-button" onClick={onCreate}>新增绘图渠道</button>
+      </div>
+      <div className="channels-stack">
+        {drawingChannels.map((channel) => {
+          const accounts = arrayOf(channel.openaiAccounts);
+          const healthy = accounts.filter((account) => account.status === "healthy").length;
+          const invalid = accounts.filter((account) => account.status === "invalid").length;
+          const unchecked = Math.max(0, accounts.length - healthy - invalid);
+          return (
+            <div className="channel-card" key={channel.id}>
+              <div className="channel-card-head">
+                <div>
+                  <strong>{channel.name}</strong>
+                  <span>{channel.baseUrl || defaultOpenAIBaseURL}</span>
+                  <small>账号 {accounts.length} 个，可用 {healthy}，失败 {invalid}，未测 {unchecked}</small>
+                </div>
+                <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
+              </div>
+              <div className="metrics-grid">
+                <Metric label="账号总数" value={accounts.length} />
+                <Metric label="可用账号" value={healthy} />
+                <Metric label="异常账号" value={invalid} />
+                <Metric label="未测账号" value={unchecked} />
+              </div>
+              <div className="channel-card-actions">
+                <label className="secondary-button">
+                  {busy === `import:${channel.id}` ? "导入中" : "导入 ZIP/JSON"}
+                  <input
+                    type="file"
+                    accept="application/json,application/zip,.json,.zip"
+                    disabled={busy !== ""}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) importFile(channel.id, file);
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
+                <button className="secondary-button" onClick={() => checkAccounts(channel.id)} disabled={busy !== "" || accounts.length === 0}>
+                  {busy === `check:${channel.id}` ? "测活中" : "批量测活"}
+                </button>
+                <button className="status-button" onClick={() => toggleChannel(channel)} disabled={busy !== ""}>
+                  <Badge tone={channel.status}>{channel.status === "disabled" ? "启用" : "禁用"}</Badge>
+                </button>
+              </div>
+              {accounts.length > 0 && (
+                <div className="account-pool-list">
+                  {accounts.slice(0, 12).map((account) => (
+                    <div className="account-pool-row" key={account.id}>
+                      <div>
+                        <strong>{account.email || account.name || account.accountId || account.id}</strong>
+                        <span>{account.lastError || (account.lastCheckedAt ? `上次检测 ${formatDate(account.lastCheckedAt)}` : "未检测")}</span>
+                      </div>
+                      <Badge tone={account.status === "healthy" ? "healthy" : account.status === "invalid" ? "disabled" : "standby"}>
+                        {account.status === "healthy" ? "可用" : account.status === "invalid" ? "异常" : "未测"}
+                      </Badge>
+                    </div>
+                  ))}
+                  {accounts.length > 12 && <span className="muted-inline">还有 {accounts.length - 12} 个账号未展开显示</span>}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {drawingChannels.length === 0 && <Empty text="暂无绘图渠道，先新增一个 OpenAI 账号池渠道" />}
+      </div>
+    </Panel>
   );
 }
 

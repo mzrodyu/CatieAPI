@@ -2150,6 +2150,41 @@ button.table-row:hover {
   display: none;
 }
 
+.account-pool-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.account-pool-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: var(--control);
+}
+
+.account-pool-row div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.account-pool-row strong,
+.account-pool-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-pool-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .key-editor {
   display: grid;
   gap: 14px;

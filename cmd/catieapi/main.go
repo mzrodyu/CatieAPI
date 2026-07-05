@@ -181,32 +181,38 @@ type PublicChannel struct {
 }
 
 type OpenAIAccount struct {
-	ID           string `json:"id"`
-	Name         string `json:"name,omitempty"`
-	Email        string `json:"email,omitempty"`
-	AccessToken  string `json:"accessToken,omitempty"`
-	RefreshToken string `json:"refreshToken,omitempty"`
-	IDToken      string `json:"idToken,omitempty"`
-	AccountID    string `json:"accountId,omitempty"`
-	UserID       string `json:"userId,omitempty"`
-	ExpiresAt    string `json:"expiresAt,omitempty"`
-	LastRefresh  string `json:"lastRefresh,omitempty"`
-	PlanType     string `json:"planType,omitempty"`
-	Source       string `json:"source,omitempty"`
-	ImportedAt   string `json:"importedAt,omitempty"`
+	ID            string `json:"id"`
+	Name          string `json:"name,omitempty"`
+	Email         string `json:"email,omitempty"`
+	AccessToken   string `json:"accessToken,omitempty"`
+	RefreshToken  string `json:"refreshToken,omitempty"`
+	IDToken       string `json:"idToken,omitempty"`
+	AccountID     string `json:"accountId,omitempty"`
+	UserID        string `json:"userId,omitempty"`
+	ExpiresAt     string `json:"expiresAt,omitempty"`
+	LastRefresh   string `json:"lastRefresh,omitempty"`
+	PlanType      string `json:"planType,omitempty"`
+	Source        string `json:"source,omitempty"`
+	ImportedAt    string `json:"importedAt,omitempty"`
+	Status        string `json:"status,omitempty"`
+	LastCheckedAt string `json:"lastCheckedAt,omitempty"`
+	LastError     string `json:"lastError,omitempty"`
 }
 
 type PublicOpenAIAccount struct {
-	ID          string `json:"id"`
-	Name        string `json:"name,omitempty"`
-	Email       string `json:"email,omitempty"`
-	AccountID   string `json:"accountId,omitempty"`
-	UserID      string `json:"userId,omitempty"`
-	ExpiresAt   string `json:"expiresAt,omitempty"`
-	LastRefresh string `json:"lastRefresh,omitempty"`
-	PlanType    string `json:"planType,omitempty"`
-	Source      string `json:"source,omitempty"`
-	ImportedAt  string `json:"importedAt,omitempty"`
+	ID            string `json:"id"`
+	Name          string `json:"name,omitempty"`
+	Email         string `json:"email,omitempty"`
+	AccountID     string `json:"accountId,omitempty"`
+	UserID        string `json:"userId,omitempty"`
+	ExpiresAt     string `json:"expiresAt,omitempty"`
+	LastRefresh   string `json:"lastRefresh,omitempty"`
+	PlanType      string `json:"planType,omitempty"`
+	Source        string `json:"source,omitempty"`
+	ImportedAt    string `json:"importedAt,omitempty"`
+	Status        string `json:"status,omitempty"`
+	LastCheckedAt string `json:"lastCheckedAt,omitempty"`
+	LastError     string `json:"lastError,omitempty"`
 }
 
 type ImportedOpenAIAccount struct {
@@ -522,6 +528,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.GET("/channels", s.listChannels)
 	admin.POST("/channels", s.createChannel)
 	admin.POST("/channels/:id/import-openai-accounts", s.importOpenAIAccounts)
+	admin.POST("/channels/:id/openai-accounts/check", s.checkOpenAIAccounts)
 	admin.PATCH("/channels/:id", s.updateChannel)
 	admin.DELETE("/channels/:id", s.deleteChannel)
 	admin.POST("/channels/:id/check", s.checkChannel)
@@ -2251,6 +2258,7 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 			PlanType:     account.PlanType,
 			Source:       account.Source,
 			ImportedAt:   time.Now().UTC().Format(time.RFC3339),
+			Status:       "unchecked",
 		}
 		channel.OpenAIAccounts = append(channel.OpenAIAccounts, stored)
 		importedAccounts = append(importedAccounts, publicOpenAIAccount(stored))
@@ -2265,6 +2273,89 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 		"skipped":  invalid,
 		"accounts": importedAccounts,
 		"channel":  publicChannel(*channel),
+	})
+}
+
+func (s *Server) checkOpenAIAccounts(c *gin.Context) {
+	s.mu.Lock()
+	channel := s.findChannel(c.Param("id"))
+	if channel == nil {
+		s.mu.Unlock()
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
+		return
+	}
+	if strings.TrimSpace(channel.BaseURL) == "" {
+		s.mu.Unlock()
+		validationError(c, "Base URL is required before checking accounts")
+		return
+	}
+	channelCopy := *channel
+	channelCopy.OpenAIAccounts = append([]OpenAIAccount{}, channel.OpenAIAccounts...)
+	s.mu.Unlock()
+
+	checked := 0
+	healthy := 0
+	failed := 0
+	results := []PublicOpenAIAccount{}
+	for _, account := range channelCopy.OpenAIAccounts {
+		if strings.TrimSpace(account.AccessToken) == "" {
+			continue
+		}
+		checked++
+		status := "healthy"
+		errorMessage := ""
+		token, err := s.revealSecret(account.AccessToken)
+		if err != nil {
+			status = "invalid"
+			errorMessage = err.Error()
+		} else if err := s.checkOpenAIAccountToken(channelCopy, token); err != nil {
+			status = "invalid"
+			errorMessage = err.Error()
+		}
+		if status == "healthy" {
+			healthy++
+		} else {
+			failed++
+		}
+		nowValue := now()
+		s.mu.Lock()
+		liveChannel := s.findChannel(channelCopy.ID)
+		var publicAccount PublicOpenAIAccount
+		if liveChannel != nil {
+			for index := range liveChannel.OpenAIAccounts {
+				if liveChannel.OpenAIAccounts[index].ID != account.ID {
+					continue
+				}
+				liveChannel.OpenAIAccounts[index].Status = status
+				liveChannel.OpenAIAccounts[index].LastCheckedAt = nowValue
+				liveChannel.OpenAIAccounts[index].LastError = truncateString(errorMessage, 500)
+				publicAccount = publicOpenAIAccount(liveChannel.OpenAIAccounts[index])
+				break
+			}
+		}
+		s.mu.Unlock()
+		if publicAccount.ID != "" {
+			results = append(results, publicAccount)
+		}
+	}
+
+	s.mu.Lock()
+	channel = s.findChannel(channelCopy.ID)
+	if channel == nil {
+		s.mu.Unlock()
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
+		return
+	}
+	s.saveStateLocked()
+	public := publicChannel(*channel)
+	s.mu.Unlock()
+
+	c.JSON(http.StatusOK, gin.H{
+		"checked":  checked,
+		"healthy":  healthy,
+		"failed":   failed,
+		"accounts": results,
+		"channel":  public,
 	})
 }
 
@@ -3419,6 +3510,14 @@ func (s *Server) fetchUpstreamModelIDs(channel Channel, upstreamKey string) ([]s
 		}
 	}
 	return mergeStrings(nil, ids), nil
+}
+
+func (s *Server) checkOpenAIAccountToken(channel Channel, accessToken string) error {
+	if strings.TrimSpace(accessToken) == "" {
+		return fmt.Errorf("missing access_token")
+	}
+	_, err := s.fetchUpstreamModelIDs(channel, accessToken)
+	return err
 }
 
 func (s *Server) streamOpenAICompatible(c *gin.Context, call GatewayCall) *ProviderError {
@@ -5779,16 +5878,19 @@ func publicChannel(channel Channel) PublicChannel {
 
 func publicOpenAIAccount(account OpenAIAccount) PublicOpenAIAccount {
 	return PublicOpenAIAccount{
-		ID:          account.ID,
-		Name:        account.Name,
-		Email:       account.Email,
-		AccountID:   account.AccountID,
-		UserID:      account.UserID,
-		ExpiresAt:   account.ExpiresAt,
-		LastRefresh: account.LastRefresh,
-		PlanType:    account.PlanType,
-		Source:      account.Source,
-		ImportedAt:  account.ImportedAt,
+		ID:            account.ID,
+		Name:          account.Name,
+		Email:         account.Email,
+		AccountID:     account.AccountID,
+		UserID:        account.UserID,
+		ExpiresAt:     account.ExpiresAt,
+		LastRefresh:   account.LastRefresh,
+		PlanType:      account.PlanType,
+		Source:        account.Source,
+		ImportedAt:    account.ImportedAt,
+		Status:        firstNonEmptyString(account.Status, "unchecked"),
+		LastCheckedAt: account.LastCheckedAt,
+		LastError:     account.LastError,
 	}
 }
 

@@ -1637,6 +1637,54 @@ func TestImportOpenAIAccountsFromZipAddsAccountsToExistingChannel(t *testing.T) 
 	}
 }
 
+func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
+	var authHeaders []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		if strings.Contains(r.Header.Get("Authorization"), "bad-token") {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"message":"bad token"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-image-2"}]}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	channel := server.findChannel("chn_1002")
+	channel.BaseURL = upstream.URL + "/v1"
+	channel.OpenAIAccounts = []OpenAIAccount{
+		{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "unchecked"},
+		{ID: "oaiacc_bad", Email: "bad@example.com", AccessToken: "bad-token", Status: "unchecked"},
+	}
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/api/channels/chn_1002/openai-accounts/check", `{}`, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("check accounts status = %d body = %s", response.Code, response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":2`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":1`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":1`)) {
+		t.Fatalf("check response missing summary: %s", response.Body.String())
+	}
+	if len(authHeaders) != 2 {
+		t.Fatalf("upstream auth request count = %d", len(authHeaders))
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel = server.findChannel("chn_1002")
+	if channel.OpenAIAccounts[0].Status != "healthy" || channel.OpenAIAccounts[1].Status != "invalid" {
+		t.Fatalf("account statuses = %#v", channel.OpenAIAccounts)
+	}
+}
+
 func TestDiscordOAuthRoleGateCreatesSessionForAdminRoutes(t *testing.T) {
 	var tokenForm url.Values
 	var memberPath string
