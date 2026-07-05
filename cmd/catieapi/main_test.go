@@ -1864,8 +1864,14 @@ func TestImportSub2APIJSONAddsAccountsToExistingChannel(t *testing.T) {
 	if !containsString(channel.Models, "gpt-image-2") {
 		t.Fatalf("import did not add model to target channel: %#v", channel.Models)
 	}
+	if !containsString(channel.Models, "gpt-image-1") {
+		t.Fatalf("import did not add default image model to target channel: %#v", channel.Models)
+	}
 	if server.findModel("gpt-image-2") == nil {
 		t.Fatal("import did not create missing model")
+	}
+	if server.findModel("gpt-image-1") == nil {
+		t.Fatal("import did not create default image model")
 	}
 }
 
@@ -1950,11 +1956,15 @@ func TestImportOpenAIAccountsFromZipAddsAccountsToExistingChannel(t *testing.T) 
 	if channel.OpenAIAccounts[0].RefreshToken != "" {
 		t.Fatal("missing refresh_token should be stored as empty and still imported")
 	}
+	if !containsString(channel.Models, "gpt-image-2") || !containsString(channel.Models, "gpt-image-1") {
+		t.Fatalf("ZIP import did not add default image models: %#v", channel.Models)
+	}
 }
 
 func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	var usageAuthHeaders []string
 	var usageAccountIDs []string
+	var codexImageAuth string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		switch r.URL.Path {
@@ -1965,6 +1975,9 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 			case strings.Contains(auth, "good-token"), strings.Contains(auth, "rate-limit-token"):
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"object":"usage","limits":[{"name":"5h","used":4,"limit":100,"reset_at":"2026-07-06T05:00:00Z"},{"name":"weekly","remaining":90,"limit":100,"reset_at":"2026-07-13T00:00:00Z"}]}`))
+			case strings.Contains(auth, "exhausted-token"):
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"object":"usage","limits":[{"name":"5h","used":100,"limit":100,"reset_at":"2026-07-06T05:00:00Z"},{"name":"weekly","remaining":0,"limit":100,"reset_at":"2026-07-13T00:00:00Z"}]}`))
 			case strings.Contains(auth, "denied-token"):
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
@@ -1976,6 +1989,10 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 			default:
 				t.Fatalf("unexpected image auth = %s", auth)
 			}
+		case "/backend-api/codex/responses":
+			codexImageAuth = auth
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(codexImageSSE("image-after-check")))
 		default:
 			t.Fatalf("upstream path = %s", r.URL.Path)
 		}
@@ -1991,10 +2008,12 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	server.mu.Lock()
 	channel := server.findChannel("chn_1002")
 	channel.BaseURL = upstream.URL + "/v1"
-	channel.Models = []string{"gpt-image-1"}
+	channel.Status = "disabled"
+	channel.Models = []string{}
 	channel.OpenAIAccounts = []OpenAIAccount{
 		{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", AccountID: "acc-good", Status: "unchecked"},
 		{ID: "oaiacc_rate_limit", Email: "rate-limit@example.com", AccessToken: "rate-limit-token", Status: "unchecked"},
+		{ID: "oaiacc_exhausted", Email: "exhausted@example.com", AccessToken: "exhausted-token", Status: "unchecked"},
 		{ID: "oaiacc_denied", Email: "denied@example.com", AccessToken: "denied-token", Status: "unchecked"},
 		{ID: "oaiacc_billing", Email: "billing@example.com", AccessToken: "billing-token", Status: "unchecked"},
 		{ID: "oaiacc_expired_no_refresh", Email: "expired@example.com", AccessToken: "expired-no-refresh-token", ExpiresAt: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339), Status: "unchecked"},
@@ -2006,10 +2025,10 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("check accounts status = %d body = %s", response.Code, response.Body.String())
 	}
-	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":6`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":2`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":1`)) {
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":7`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":2`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":1`)) {
 		t.Fatalf("check response missing summary: %s", response.Body.String())
 	}
-	if len(usageAuthHeaders) != 4 {
+	if len(usageAuthHeaders) != 5 {
 		t.Fatalf("usage auth request count = %d", len(usageAuthHeaders))
 	}
 	if usageAccountIDs[0] != "acc-good" {
@@ -2017,30 +2036,50 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	}
 
 	server.mu.Lock()
-	defer server.mu.Unlock()
 	channel = server.findChannel("chn_1002")
 	if channel.OpenAIAccounts[0].Status != "healthy" ||
 		channel.OpenAIAccounts[1].Status != "healthy" ||
 		channel.OpenAIAccounts[2].Status != "unchecked" ||
-		channel.OpenAIAccounts[3].Status != "invalid" ||
-		channel.OpenAIAccounts[4].Status != "unchecked" ||
-		channel.OpenAIAccounts[5].Status != "unchecked" {
+		channel.OpenAIAccounts[3].Status != "unchecked" ||
+		channel.OpenAIAccounts[4].Status != "invalid" ||
+		channel.OpenAIAccounts[5].Status != "unchecked" ||
+		channel.OpenAIAccounts[6].Status != "unchecked" {
 		t.Fatalf("account statuses = %#v", channel.OpenAIAccounts)
+	}
+	if channel.Status != "healthy" || !containsString(channel.Models, "gpt-image-2") || !containsString(channel.Models, "gpt-image-1") {
+		t.Fatalf("healthy check did not enable image pool: status=%s models=%#v", channel.Status, channel.Models)
 	}
 	if len(channel.OpenAIAccounts[0].QuotaLimits) != 2 || channel.OpenAIAccounts[0].QuotaLimits[0].Label != "5h" || channel.OpenAIAccounts[0].QuotaLimits[0].PercentRemaining != 96 {
 		t.Fatalf("quota limits were not parsed: %#v", channel.OpenAIAccounts[0].QuotaLimits)
 	}
-	if !strings.Contains(channel.OpenAIAccounts[2].LastError, "HTTP 401") {
-		t.Fatalf("401 usage failure should be left unchecked: %#v", channel.OpenAIAccounts[2])
+	if !strings.Contains(channel.OpenAIAccounts[2].LastError, "usage limit reached") {
+		t.Fatalf("exhausted usage should stay unchecked: %#v", channel.OpenAIAccounts[2])
 	}
-	if !strings.Contains(channel.OpenAIAccounts[3].LastError, "billing inactive") {
-		t.Fatalf("402 without refresh should be invalid: %#v", channel.OpenAIAccounts[3])
+	if !strings.Contains(channel.OpenAIAccounts[3].LastError, "HTTP 401") {
+		t.Fatalf("401 usage failure should be left unchecked: %#v", channel.OpenAIAccounts[3])
 	}
-	if !strings.Contains(channel.OpenAIAccounts[4].LastError, "expired") {
-		t.Fatalf("expired access without refresh should stay unchecked: %#v", channel.OpenAIAccounts[4])
+	if !strings.Contains(channel.OpenAIAccounts[4].LastError, "billing inactive") {
+		t.Fatalf("402 without refresh should be invalid: %#v", channel.OpenAIAccounts[4])
 	}
-	if !strings.Contains(channel.OpenAIAccounts[5].LastError, "missing access_token and refresh_token") {
-		t.Fatalf("missing tokens should stay unchecked: %#v", channel.OpenAIAccounts[5])
+	if !strings.Contains(channel.OpenAIAccounts[5].LastError, "expired") {
+		t.Fatalf("expired access without refresh should stay unchecked: %#v", channel.OpenAIAccounts[5])
+	}
+	if !strings.Contains(channel.OpenAIAccounts[6].LastError, "missing access_token and refresh_token") {
+		t.Fatalf("missing tokens should stay unchecked: %#v", channel.OpenAIAccounts[6])
+	}
+	server.mu.Unlock()
+
+	imageResponse := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"gpt-image-2","prompt":"after check"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if imageResponse.Code != http.StatusOK {
+		t.Fatalf("image generation after check status = %d body = %s", imageResponse.Code, imageResponse.Body.String())
+	}
+	if codexImageAuth != "Bearer good-token" {
+		t.Fatalf("image generation did not use first healthy account: %s", codexImageAuth)
+	}
+	if !bytes.Contains(imageResponse.Body.Bytes(), []byte(`"b64_json":"image-after-check"`)) {
+		t.Fatalf("image response was not proxied after check: %s", imageResponse.Body.String())
 	}
 }
 

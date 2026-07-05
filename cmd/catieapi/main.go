@@ -34,6 +34,7 @@ import (
 
 const (
 	defaultUpstreamTimeoutSeconds = 600
+	defaultOpenAIBaseURL          = "https://api.openai.com/v1"
 	chatGPTCodexUserAgent         = "codex_cli_rs/0.125.0 (Ubuntu 22.4.0; x86_64) xterm-256color"
 	chatGPTCodexVersion           = "0.125.0"
 	chatGPTCodexOriginator        = "codex_cli_rs"
@@ -2248,6 +2249,7 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
 		return
 	}
+	s.ensureOpenAIImageModelsLocked(channel)
 	for _, modelID := range models {
 		s.ensureImportedModelLocked(modelID)
 		if !containsString(channel.Models, modelID) {
@@ -2386,6 +2388,12 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 		s.mu.Unlock()
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
 		return
+	}
+	if healthy > 0 {
+		s.ensureOpenAIImageModelsLocked(channel)
+		channel.Status = "healthy"
+		channel.LastCheckedAt = now()
+		channel.LastError = ""
 	}
 	s.saveStateLocked()
 	public := publicChannel(*channel)
@@ -4431,6 +4439,10 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 		return result
 	}
 	result.QuotaLimits = quotaLimits
+	if !openAIQuotaLimitsHaveRemaining(quotaLimits) {
+		result.Message = "usage limit reached"
+		return result
+	}
 	result.Status = "healthy"
 	result.Message = ""
 	return result
@@ -4612,6 +4624,18 @@ func normalizeQuotaLimit(limit OpenAIQuotaLimit) OpenAIQuotaLimit {
 	}
 	limit.PercentRemaining = clampPercent(limit.PercentRemaining)
 	return limit
+}
+
+func openAIQuotaLimitsHaveRemaining(limits []OpenAIQuotaLimit) bool {
+	for _, limit := range limits {
+		if limit.Remaining > 0 || limit.PercentRemaining > 0 {
+			return true
+		}
+		if limit.Limit > 0 && limit.Used > 0 && limit.Used < limit.Limit {
+			return true
+		}
+	}
+	return false
 }
 
 func numberFromAnyKeys(values map[string]interface{}, keys ...string) (float64, bool) {
@@ -5040,6 +5064,9 @@ func activeOpenAIAccounts(accounts []OpenAIAccount) []OpenAIAccount {
 	standby := []OpenAIAccount{}
 	for _, account := range accounts {
 		if strings.TrimSpace(account.AccessToken) == "" || account.Status == "invalid" {
+			continue
+		}
+		if len(account.QuotaLimits) > 0 && !openAIQuotaLimitsHaveRemaining(account.QuotaLimits) {
 			continue
 		}
 		if account.Status == "healthy" {
@@ -5749,6 +5776,23 @@ func (s *Server) ensureImportedModelLocked(modelID string) {
 		Context:     "未配置上下文",
 		Status:      "available",
 	})
+}
+
+func openAIImageModelIDs() []string {
+	return []string{"gpt-image-2", "gpt-image-1"}
+}
+
+func (s *Server) ensureOpenAIImageModelsLocked(channel *Channel) {
+	if channel == nil {
+		return
+	}
+	if strings.TrimSpace(channel.BaseURL) == "" {
+		channel.BaseURL = defaultOpenAIBaseURL
+	}
+	for _, modelID := range openAIImageModelIDs() {
+		s.ensureImportedModelLocked(modelID)
+	}
+	channel.Models = mergeStrings(channel.Models, openAIImageModelIDs())
 }
 
 func stringFromMap(values map[string]interface{}, key string) string {
