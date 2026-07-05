@@ -53,14 +53,14 @@ button {
 
 .app-shell[data-theme="dark"] {
   --bg: #000000;
-  --surface: rgba(12, 17, 24, 0.92);
-  --surface-solid: #101720;
-  --group: #070b11;
+  --surface: rgba(28, 28, 30, 0.66);
+  --surface-solid: rgba(28, 28, 30, 0.86);
+  --group: rgba(118, 118, 128, 0.12);
   --text: #f5f5f7;
-  --muted: #8f9aaa;
-  --hairline: rgba(255, 255, 255, 0.09);
-  --hairline-strong: rgba(255, 255, 255, 0.16);
-  --shadow: 0 24px 68px rgba(0, 0, 0, 0.48);
+  --muted: #98989f;
+  --hairline: rgba(255, 255, 255, 0.07);
+  --hairline-strong: rgba(255, 255, 255, 0.12);
+  --shadow: 0 22px 54px rgba(0, 0, 0, 0.38);
   background: var(--bg);
   color-scheme: dark;
 }
@@ -80,9 +80,9 @@ button {
 }
 
 .app-shell[data-theme="dark"] .sidebar {
-  background: #05080d;
-  border-right-color: rgba(255, 255, 255, 0.08);
-  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.02);
+  background: rgba(12, 12, 14, 0.78);
+  border-right-color: rgba(255, 255, 255, 0.06);
+  box-shadow: none;
 }
 
 .ios-window-dots {
@@ -130,8 +130,8 @@ button {
 
 .app-shell[data-theme="dark"] .brand-mark {
   color: #fff;
-  background: #111821;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(118, 118, 128, 0.2);
+  border: 0;
 }
 
 .brand strong,
@@ -176,13 +176,13 @@ nav {
 }
 
 .app-shell[data-theme="dark"] .nav-item:hover {
-  background: #0d131d;
+  background: rgba(118, 118, 128, 0.1);
 }
 
 .app-shell[data-theme="dark"] .nav-item.active {
   color: #ffffff;
-  background: #101720;
-  box-shadow: inset 3px 0 0 var(--blue), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  background: rgba(118, 118, 128, 0.18);
+  box-shadow: none;
 }
 
 .sidebar-footer {
@@ -341,6 +341,14 @@ h3 {
   border: 1px solid var(--hairline);
 }
 
+.app-shell[data-theme="dark"] .secondary-button,
+.app-shell[data-theme="dark"] .icon-button,
+.app-shell[data-theme="dark"] .theme-toggle,
+.app-shell[data-theme="dark"] .compact-button {
+  background: rgba(118, 118, 128, 0.14);
+  border-color: transparent;
+}
+
 .primary-button:disabled,
 .secondary-button:disabled,
 .danger-button:disabled,
@@ -380,8 +388,8 @@ h3 {
 .app-shell[data-theme="dark"] .log-status-filter,
 .app-shell[data-theme="dark"] .settings-tabs,
 .app-shell[data-theme="dark"] .registration-mode-control {
-  background: #070b11;
-  border-color: rgba(255, 255, 255, 0.09);
+  background: rgba(118, 118, 128, 0.12);
+  border-color: transparent;
 }
 
 .segmented-control button {
@@ -406,8 +414,8 @@ h3 {
 .app-shell[data-theme="dark"] .log-status-filter button.selected,
 .app-shell[data-theme="dark"] .settings-tabs button.selected,
 .app-shell[data-theme="dark"] .registration-mode-control button.selected {
-  background: #101720;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: none;
 }
 
 .page-stack {
@@ -535,9 +543,9 @@ h3 {
 }
 
 .app-shell[data-theme="dark"] .quick-action {
-  background: #0c1118;
-  border-color: rgba(255, 255, 255, 0.09);
-  backdrop-filter: none;
+  background: rgba(28, 28, 30, 0.72);
+  border-color: transparent;
+  backdrop-filter: blur(24px) saturate(180%);
 }
 
 .app-shell[data-theme="dark"] .metric,
@@ -545,32 +553,16 @@ h3 {
 .app-shell[data-theme="dark"] .hero-strip,
 .app-shell[data-theme="dark"] .flow-panel,
 .app-shell[data-theme="dark"] .model-hero {
-  background: #0c1118;
-  border-color: rgba(255, 255, 255, 0.09);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
-  backdrop-filter: none;
+  background: rgba(28, 28, 30, 0.72);
+  border-color: rgba(255, 255, 255, 0.06);
+  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(26px) saturate(180%);
 }
 
 .metric {
   min-height: 118px;
   padding: 18px;
   border-radius: 22px;
-}
-
-.app-shell[data-theme="dark"] .metric {
-  position: relative;
-  overflow: hidden;
-}
-
-.app-shell[data-theme="dark"] .metric::before {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 2px;
-  content: "";
-  background: var(--blue);
-  opacity: 0.72;
 }
 
 .metric strong {
@@ -669,7 +661,7 @@ h3 {
 }
 
 .app-shell[data-theme="dark"] .panel {
-  border-radius: 20px;
+  border-radius: 22px;
 }
 
 .panel-title {
@@ -682,7 +674,7 @@ h3 {
 
 .app-shell[data-theme="dark"] .panel-title {
   padding-bottom: 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .list-row,
@@ -766,8 +758,8 @@ h3 {
 }
 
 .app-shell[data-theme="dark"] .badge {
-  background: #111821;
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(118, 118, 128, 0.14);
+  border: 0;
 }
 
 .tone-active,
@@ -818,8 +810,8 @@ h3 {
 }
 
 .app-shell[data-theme="dark"] .users-layout .panel:first-child .table-head {
-  background: #070b11;
-  border-color: rgba(255, 255, 255, 0.09);
+  background: rgba(118, 118, 128, 0.1);
+  border-color: transparent;
 }
 
 .users-layout .panel:first-child .table-row {
@@ -831,8 +823,8 @@ h3 {
 }
 
 .app-shell[data-theme="dark"] .users-layout .panel:first-child .table-row {
-  background: #101720;
-  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(28, 28, 30, 0.78);
+  border-color: rgba(255, 255, 255, 0.05);
 }
 
 .users-layout .panel:first-child .table-row:hover {
@@ -840,7 +832,7 @@ h3 {
 }
 
 .app-shell[data-theme="dark"] .users-layout .panel:first-child .table-row:hover {
-  background: #141c27;
+  background: rgba(44, 44, 46, 0.88);
 }
 
 .users-layout .panel:first-child .table-row.selected {
@@ -1411,8 +1403,8 @@ h3 {
 .app-shell[data-theme="dark"] .maintenance-control input,
 .app-shell[data-theme="dark"] .bulk-action-bar input,
 .app-shell[data-theme="dark"] .auth-default-balance input {
-  background: #070b11;
-  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(118, 118, 128, 0.12);
+  border-color: transparent;
 }
 
 .search-box input {
@@ -1436,8 +1428,8 @@ h3 {
 }
 
 .app-shell[data-theme="dark"] .table {
-  background: #0c1118;
-  border-color: rgba(255, 255, 255, 0.09);
+  background: rgba(28, 28, 30, 0.72);
+  border-color: rgba(255, 255, 255, 0.05);
 }
 
 .table:has(.channel-editor) {
@@ -1463,8 +1455,8 @@ h3 {
 }
 
 .app-shell[data-theme="dark"] .table-head {
-  background: #070b11;
-  border-bottom-color: rgba(255, 255, 255, 0.09);
+  background: rgba(118, 118, 128, 0.1);
+  border-bottom-color: rgba(255, 255, 255, 0.05);
 }
 
 .table-row {
@@ -1475,7 +1467,7 @@ h3 {
 }
 
 .app-shell[data-theme="dark"] .table-row {
-  border-bottom-color: rgba(255, 255, 255, 0.07);
+  border-bottom-color: rgba(255, 255, 255, 0.05);
 }
 
 .table-row small {
@@ -1497,7 +1489,7 @@ button.table-row:hover {
 .app-shell[data-theme="dark"] button.table-row:hover,
 .app-shell[data-theme="dark"] .log-entry .table-row:hover,
 .app-shell[data-theme="dark"] .log-entry .table-row.selected {
-  background: #111821;
+  background: rgba(118, 118, 128, 0.12);
 }
 
 .users-table {
@@ -1548,8 +1540,8 @@ button.table-row:hover {
 .app-shell[data-theme="dark"] .log-inspector,
 .app-shell[data-theme="dark"] .settings-group,
 .app-shell[data-theme="dark"] .provider-picker-menu {
-  background: #101720;
-  border-color: rgba(255, 255, 255, 0.09);
+  background: rgba(28, 28, 30, 0.72);
+  border-color: rgba(255, 255, 255, 0.06);
 }
 
 .channel-card-head {
@@ -1862,8 +1854,8 @@ button.table-row:hover {
 }
 
 .app-shell[data-theme="dark"] .flow-step {
-  background: #101720;
-  border-color: rgba(255, 255, 255, 0.09);
+  background: rgba(118, 118, 128, 0.1);
+  border-color: transparent;
 }
 
 .log-inspector header {
@@ -1888,8 +1880,8 @@ button.table-row:hover {
 }
 
 .app-shell[data-theme="dark"] .sidebar-footer {
-  background: #0b1017;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(118, 118, 128, 0.12);
+  border: 0;
 }
 
 .log-inspector header strong {
@@ -1926,8 +1918,8 @@ button.table-row:hover {
 .app-shell[data-theme="dark"] .model-id,
 .app-shell[data-theme="dark"] .alias-row span,
 .app-shell[data-theme="dark"] .model-meta span {
-  background: #070b11;
-  border-color: rgba(255, 255, 255, 0.09);
+  background: rgba(118, 118, 128, 0.1);
+  border-color: transparent;
 }
 
 .log-detail span {
@@ -2128,8 +2120,8 @@ button.table-row:hover {
 }
 
 .app-shell[data-theme="dark"] .key-editor {
-  background: #101720;
-  border-color: rgba(255, 255, 255, 0.09);
+  background: rgba(28, 28, 30, 0.72);
+  border-color: rgba(255, 255, 255, 0.06);
 }
 
 .key-editor + .key-editor {
