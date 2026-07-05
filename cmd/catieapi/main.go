@@ -1595,6 +1595,9 @@ func (s *Server) overview(c *gin.Context) {
 	totalBalance := 0.0
 	requestsToday := 0
 	successLogs := 0
+	todayInputTokens := 0
+	todayOutputTokens := 0
+	todayCost := 0.0
 	timezoneOffset, err := strconv.Atoi(c.DefaultQuery("timezoneOffset", "0"))
 	if err != nil || timezoneOffset < -840 || timezoneOffset > 840 {
 		timezoneOffset = 0
@@ -1613,6 +1616,9 @@ func (s *Server) overview(c *gin.Context) {
 			continue
 		}
 		requestsToday++
+		todayInputTokens += log.InputTokens
+		todayOutputTokens += log.OutputTokens
+		todayCost += log.Cost
 		if log.Status == "success" {
 			successLogs++
 		}
@@ -1624,11 +1630,14 @@ func (s *Server) overview(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"activeUsers":   activeUsers,
-		"channels":      len(s.state.Channels),
-		"requestsToday": requestsToday,
-		"totalBalance":  round4(totalBalance),
-		"successRate":   successRate,
+		"activeUsers":       activeUsers,
+		"channels":          len(s.state.Channels),
+		"requestsToday":     requestsToday,
+		"totalBalance":      round4(totalBalance),
+		"successRate":       successRate,
+		"todayInputTokens":  todayInputTokens,
+		"todayOutputTokens": todayOutputTokens,
+		"todayCost":         round4(todayCost),
 	})
 }
 

@@ -473,7 +473,7 @@ h3 {
 
 .metrics-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 12px;
 }
 
@@ -492,8 +492,12 @@ h3 {
 }
 
 .metric strong {
+  display: block;
+  overflow: hidden;
   font-size: 31px;
   letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .split-grid {

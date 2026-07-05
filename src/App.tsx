@@ -7,6 +7,9 @@ type Overview = {
   requestsToday: number;
   totalBalance: number;
   successRate: number;
+  todayInputTokens: number;
+  todayOutputTokens: number;
+  todayCost: number;
 };
 
 type User = {
@@ -1353,9 +1356,12 @@ function OverviewView({
         <QuickAction icon="logs" label="查看异常" onClick={() => onNavigate("logs")} />
       </div>
       <div className="metrics-grid">
-        <Metric label="活跃用户" value={overview?.activeUsers ?? "-"} />
-        <Metric label="今日请求" value={overview?.requestsToday ?? "-"} />
-        <Metric label="账户余额" value={overview ? overview.totalBalance.toFixed(2) : "-"} />
+        <Metric label="活跃用户" value={overview ? formatTokenCount(overview.activeUsers) : "-"} />
+        <Metric label="今日请求" value={overview ? formatTokenCount(overview.requestsToday) : "-"} />
+        <Metric label="今日输入" value={overview ? formatTokenCount(overview.todayInputTokens) : "-"} />
+        <Metric label="今日输出" value={overview ? formatTokenCount(overview.todayOutputTokens) : "-"} />
+        <Metric label="今日扣费" value={overview ? formatAmount(overview.todayCost, 4) : "-"} />
+        <Metric label="账户余额" value={overview ? formatAmount(overview.totalBalance) : "-"} />
         <Metric label="成功率" value={overview ? `${overview.successRate}%` : "-"} />
       </div>
       <GatewayFlow />
