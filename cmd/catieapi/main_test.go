@@ -1344,12 +1344,18 @@ func TestImageGenerationsForwardToOpenAICompatibleUpstream(t *testing.T) {
 
 func TestImageGenerationsRetryNextOpenAIAccountOnBillingError(t *testing.T) {
 	authHeaders := []string{}
+	upstreamPayloads := []map[string]interface{}{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		authHeaders = append(authHeaders, auth)
 		if r.URL.Path != "/backend-api/codex/responses" {
 			t.Fatalf("upstream image path = %s", r.URL.Path)
 		}
+		var upstreamPayload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamPayload); err != nil {
+			t.Fatalf("decode codex image request: %v", err)
+		}
+		upstreamPayloads = append(upstreamPayloads, upstreamPayload)
 		if auth == "Bearer billing-token" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusPaymentRequired)
@@ -1389,6 +1395,23 @@ func TestImageGenerationsRetryNextOpenAIAccountOnBillingError(t *testing.T) {
 	}
 	if len(authHeaders) != 2 || authHeaders[0] != "Bearer billing-token" || authHeaders[1] != "Bearer good-token" {
 		t.Fatalf("upstream auth sequence = %#v", authHeaders)
+	}
+	if len(upstreamPayloads) != 2 {
+		t.Fatalf("upstream payload count = %d", len(upstreamPayloads))
+	}
+	tools, ok := upstreamPayloads[1]["tools"].([]interface{})
+	if !ok || len(tools) != 1 {
+		t.Fatalf("unexpected codex image tools = %#v", upstreamPayloads[1]["tools"])
+	}
+	tool, ok := tools[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected codex image tool = %#v", tools[0])
+	}
+	if tool["type"] != "image_generation" || tool["model"] != "gpt-image-1" || tool["output_format"] != "png" {
+		t.Fatalf("unexpected codex image tool payload = %#v", tool)
+	}
+	if _, ok := tool["action"]; ok {
+		t.Fatalf("codex image tool should not include action: %#v", tool)
 	}
 	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"image-after-retry"`)) {
 		t.Fatalf("image response was not retried successfully: %s", response.Body.String())
@@ -1984,6 +2007,45 @@ func TestImportOpenAIAccountsFromZipAddsAccountsToExistingChannel(t *testing.T) 
 	}
 	if !containsString(channel.Models, "gpt-image-2") || !containsString(channel.Models, "gpt-image-1") {
 		t.Fatalf("ZIP import did not add default image models: %#v", channel.Models)
+	}
+}
+
+func TestNormalizeStateCollectionsAddsImageModelsToOpenAIAccountPools(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, _ := testServerRouter(t)
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.state.Models = []Model{
+		{ID: "gpt-5.4", Name: "GPT-5.4", Vendor: "OpenAI", Status: "available"},
+	}
+	server.state.Channels = []Channel{
+		{
+			ID:       "chn_oauth_pool",
+			Name:     "OpenAI OAuth Pool",
+			Provider: "openai",
+			Status:   "healthy",
+			Models:   []string{"gpt-5.4"},
+			OpenAIAccounts: []OpenAIAccount{
+				{ID: "oaiacc_existing", Email: "existing@example.com", AccessToken: "existing-token", Status: "healthy"},
+			},
+		},
+	}
+
+	if !server.normalizeStateCollections() {
+		t.Fatal("normalizeStateCollections did not report image model migration")
+	}
+	channel := server.findChannel("chn_oauth_pool")
+	if channel == nil {
+		t.Fatal("oauth pool channel missing")
+	}
+	if channel.BaseURL != defaultOpenAIBaseURL {
+		t.Fatalf("oauth pool base URL = %q", channel.BaseURL)
+	}
+	if !containsString(channel.Models, "gpt-image-2") || !containsString(channel.Models, "gpt-image-1") {
+		t.Fatalf("oauth pool did not gain image models: %#v", channel.Models)
+	}
+	if server.findModel("gpt-image-2") == nil || server.findModel("gpt-image-1") == nil {
+		t.Fatalf("image models were not imported: %#v", server.state.Models)
 	}
 }
 

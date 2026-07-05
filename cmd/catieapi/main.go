@@ -3840,6 +3840,7 @@ func (s *Server) newChatGPTCodexRequest(encoded []byte, accessToken string, acco
 	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "text/event-stream")
+	request.Header.Set("Connection", "Keep-Alive")
 	request.Header.Set("OpenAI-Beta", "responses=experimental")
 	request.Header.Set("Originator", chatGPTCodexOriginator)
 	request.Header.Set("User-Agent", chatGPTCodexUserAgent)
@@ -3891,9 +3892,9 @@ func buildChatGPTCodexChatPayload(call GatewayCall, stream bool) ([]byte, *Provi
 
 func buildChatGPTCodexImagePayload(call ImageGatewayCall) ([]byte, *ProviderError) {
 	tool := gin.H{
-		"type":   "image_generation",
-		"action": "generate",
-		"model":  call.Model.ID,
+		"type":          "image_generation",
+		"model":         call.Model.ID,
+		"output_format": "png",
 	}
 	for _, key := range []string{"size", "quality", "background", "output_format", "moderation", "style"} {
 		if value, ok := call.Body.Payload[key]; ok && strings.TrimSpace(completionPrompt(value)) != "" {
@@ -4456,7 +4457,7 @@ func (s *Server) checkOpenAIAccountUsage(accessToken string, account OpenAIAccou
 	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
 	request.Header.Set("Accept", "application/json")
 	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
-		request.Header.Set("ChatGPT-Account-Id", accountID)
+		request.Header.Set("Chatgpt-Account-Id", accountID)
 	}
 	response, err := s.httpClient.Do(request)
 	if err != nil {
@@ -5810,10 +5811,10 @@ func isZipContent(content []byte) bool {
 	return len(content) >= 4 && content[0] == 'P' && content[1] == 'K' && content[2] == 0x03 && content[3] == 0x04
 }
 
-func (s *Server) ensureImportedModelLocked(modelID string) {
+func (s *Server) ensureImportedModelLocked(modelID string) bool {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" || s.findModel(modelID) != nil {
-		return
+		return false
 	}
 	s.state.Models = append(s.state.Models, Model{
 		ID:          modelID,
@@ -5826,23 +5827,33 @@ func (s *Server) ensureImportedModelLocked(modelID string) {
 		Context:     "未配置上下文",
 		Status:      "available",
 	})
+	return true
 }
 
 func openAIImageModelIDs() []string {
 	return []string{"gpt-image-2", "gpt-image-1"}
 }
 
-func (s *Server) ensureOpenAIImageModelsLocked(channel *Channel) {
+func (s *Server) ensureOpenAIImageModelsLocked(channel *Channel) bool {
 	if channel == nil {
-		return
+		return false
 	}
+	changed := false
 	if strings.TrimSpace(channel.BaseURL) == "" {
 		channel.BaseURL = defaultOpenAIBaseURL
+		changed = true
 	}
 	for _, modelID := range openAIImageModelIDs() {
-		s.ensureImportedModelLocked(modelID)
+		if s.ensureImportedModelLocked(modelID) {
+			changed = true
+		}
 	}
+	before := len(channel.Models)
 	channel.Models = mergeStrings(channel.Models, openAIImageModelIDs())
+	if len(channel.Models) != before {
+		changed = true
+	}
+	return changed
 }
 
 func stringFromMap(values map[string]interface{}, key string) string {
@@ -6733,6 +6744,11 @@ func (s *Server) normalizeStateCollections() bool {
 		if s.state.Channels[i].Models == nil {
 			s.state.Channels[i].Models = []string{}
 			changed = true
+		}
+		if len(s.state.Channels[i].OpenAIAccounts) > 0 {
+			if s.ensureOpenAIImageModelsLocked(&s.state.Channels[i]) {
+				changed = true
+			}
 		}
 	}
 	for i := range s.state.Models {
