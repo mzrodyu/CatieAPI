@@ -229,6 +229,16 @@ type ImportedOpenAIAccount struct {
 	Source       string
 }
 
+type OpenAIAccountCheckResult struct {
+	Status       string
+	Message      string
+	AccessToken  string
+	RefreshToken string
+	IDToken      string
+	ExpiresAt    string
+	LastRefresh  string
+}
+
 type Model struct {
 	ID                string   `json:"id"`
 	Name              string   `json:"name"`
@@ -287,6 +297,8 @@ type Server struct {
 	upstreamAPIKey        string
 	upstreamTimeout       time.Duration
 	httpClient            *http.Client
+	chatGPTAPIBase        string
+	openAIAuthBase        string
 	discordClientID       string
 	discordClientSecret   string
 	discordRedirectURI    string
@@ -470,6 +482,8 @@ func NewServer() *Server {
 		upstreamAPIKey:        env("UPSTREAM_API_KEY", ""),
 		upstreamTimeout:       time.Duration(envInt("UPSTREAM_TIMEOUT_SECONDS", 60)) * time.Second,
 		httpClient:            &http.Client{Timeout: time.Duration(envInt("UPSTREAM_TIMEOUT_SECONDS", 60)) * time.Second},
+		chatGPTAPIBase:        env("CHATGPT_API_BASE", "https://chatgpt.com/backend-api"),
+		openAIAuthBase:        env("OPENAI_AUTH_BASE", "https://auth.openai.com"),
 		discordClientID:       env("DISCORD_CLIENT_ID", ""),
 		discordClientSecret:   env("DISCORD_CLIENT_SECRET", ""),
 		discordRedirectURI:    env("DISCORD_REDIRECT_URI", ""),
@@ -2284,11 +2298,6 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
 		return
 	}
-	if strings.TrimSpace(channel.BaseURL) == "" {
-		s.mu.Unlock()
-		validationError(c, "Base URL is required before checking accounts")
-		return
-	}
 	channelCopy := *channel
 	channelCopy.OpenAIAccounts = append([]OpenAIAccount{}, channel.OpenAIAccounts...)
 	s.mu.Unlock()
@@ -2302,19 +2311,12 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 			continue
 		}
 		checked++
-		status := "healthy"
-		errorMessage := ""
-		token, err := s.revealSecret(account.AccessToken)
-		if err != nil {
-			status = "invalid"
-			errorMessage = err.Error()
-		} else if err := s.checkOpenAIAccountToken(channelCopy, token); err != nil {
-			status = "invalid"
-			errorMessage = err.Error()
-		}
+		result := s.checkOpenAIAccount(account)
+		status := result.Status
+		errorMessage := result.Message
 		if status == "healthy" {
 			healthy++
-		} else {
+		} else if status == "invalid" {
 			failed++
 		}
 		nowValue := now()
@@ -2329,6 +2331,21 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 				liveChannel.OpenAIAccounts[index].Status = status
 				liveChannel.OpenAIAccounts[index].LastCheckedAt = nowValue
 				liveChannel.OpenAIAccounts[index].LastError = truncateString(errorMessage, 500)
+				if result.AccessToken != "" {
+					liveChannel.OpenAIAccounts[index].AccessToken = result.AccessToken
+				}
+				if result.RefreshToken != "" {
+					liveChannel.OpenAIAccounts[index].RefreshToken = result.RefreshToken
+				}
+				if result.IDToken != "" {
+					liveChannel.OpenAIAccounts[index].IDToken = result.IDToken
+				}
+				if result.ExpiresAt != "" {
+					liveChannel.OpenAIAccounts[index].ExpiresAt = result.ExpiresAt
+				}
+				if result.LastRefresh != "" {
+					liveChannel.OpenAIAccounts[index].LastRefresh = result.LastRefresh
+				}
 				publicAccount = publicOpenAIAccount(liveChannel.OpenAIAccounts[index])
 				break
 			}
@@ -3435,11 +3452,51 @@ func (s *Server) callOpenAICompatible(call GatewayCall) (gin.H, *ProviderError) 
 }
 
 func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *ProviderError) {
+	if len(call.Channel.OpenAIAccounts) > 0 {
+		var lastErr *ProviderError
+		accounts := activeOpenAIAccounts(call.Channel.OpenAIAccounts)
+		if len(accounts) == 0 {
+			return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "No active OpenAI accounts are available for image generation", Type: "api_error"}
+		}
+		for _, account := range accounts {
+			upstreamKey, err := s.revealSecret(account.AccessToken)
+			if err != nil {
+				lastErr = &ProviderError{Status: http.StatusBadGateway, Code: "upstream_key_unavailable", Message: err.Error(), Type: "api_error"}
+				continue
+			}
+			body, providerErr := s.callOpenAICompatibleImageWithKey(call, upstreamKey)
+			if providerErr == nil {
+				return body, nil
+			}
+			lastErr = providerErr
+			if isBillingProviderError(providerErr) {
+				s.markOpenAIAccountInvalid(call.Channel.ID, account.ID, providerErr.Message)
+				continue
+			}
+			return nil, providerErr
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "No active OpenAI accounts are available for image generation", Type: "api_error"}
+	}
+
 	request, providerErr := s.newOpenAICompatibleImageRequest(call)
 	if providerErr != nil {
 		return nil, providerErr
 	}
+	return s.doOpenAICompatibleImageRequest(call, request)
+}
 
+func (s *Server) callOpenAICompatibleImageWithKey(call ImageGatewayCall, upstreamKey string) (gin.H, *ProviderError) {
+	request, providerErr := s.newOpenAICompatibleImageRequestWithKey(call, upstreamKey)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+	return s.doOpenAICompatibleImageRequest(call, request)
+}
+
+func (s *Server) doOpenAICompatibleImageRequest(call ImageGatewayCall, request *http.Request) (gin.H, *ProviderError) {
 	response, err := s.httpClient.Do(request)
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
@@ -3512,47 +3569,81 @@ func (s *Server) fetchUpstreamModelIDs(channel Channel, upstreamKey string) ([]s
 	return mergeStrings(nil, ids), nil
 }
 
-func (s *Server) checkOpenAIAccountToken(channel Channel, accessToken string) error {
-	if strings.TrimSpace(accessToken) == "" {
-		return fmt.Errorf("missing access_token")
+func (s *Server) checkOpenAIAccount(account OpenAIAccount) OpenAIAccountCheckResult {
+	result := OpenAIAccountCheckResult{Status: "unchecked"}
+	accessToken, err := s.revealSecret(account.AccessToken)
+	if err != nil {
+		result.Message = err.Error()
+		return result
 	}
-	if strings.TrimSpace(channel.BaseURL) == "" {
-		return fmt.Errorf("请先填写渠道 Base URL")
-	}
-	modelID := "gpt-image-1"
-	for _, candidate := range channel.Models {
-		if strings.Contains(strings.ToLower(candidate), "image") {
-			modelID = strings.TrimSpace(candidate)
-			break
+	refreshToken := ""
+	hasRefreshToken := strings.TrimSpace(account.RefreshToken) != ""
+	if hasRefreshToken {
+		refreshToken, err = s.revealSecret(account.RefreshToken)
+		if err != nil {
+			result.Message = err.Error()
+			return result
 		}
 	}
-	payload := gin.H{
-		"model":  modelID,
-		"prompt": "health check",
-		"n":      1,
-		"size":   "1024x1024",
+	if openAIAccountAccessExpired(account.ExpiresAt) && strings.TrimSpace(refreshToken) != "" {
+		refreshed, err := s.refreshOpenAIAccount(refreshToken)
+		if err == nil && strings.TrimSpace(refreshed.AccessToken) != "" {
+			accessToken = refreshed.AccessToken
+			protectedAccess, err := s.protectSecret(refreshed.AccessToken)
+			if err == nil {
+				result.AccessToken = protectedAccess
+			}
+			if strings.TrimSpace(refreshed.RefreshToken) != "" {
+				protectedRefresh, err := s.protectSecret(refreshed.RefreshToken)
+				if err == nil {
+					result.RefreshToken = protectedRefresh
+					refreshToken = refreshed.RefreshToken
+				}
+			}
+			if strings.TrimSpace(refreshed.IDToken) != "" {
+				protectedID, err := s.protectSecret(refreshed.IDToken)
+				if err == nil {
+					result.IDToken = protectedID
+				}
+			}
+			if refreshed.ExpiresAt != "" {
+				result.ExpiresAt = refreshed.ExpiresAt
+			}
+			result.LastRefresh = now()
+			hasRefreshToken = strings.TrimSpace(refreshToken) != ""
+		} else if err != nil {
+			result.Message = "refresh failed: " + err.Error()
+		}
 	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return err
+	if strings.TrimSpace(accessToken) == "" {
+		result.Message = "missing access_token"
+		return result
 	}
-	request, err := http.NewRequest(http.MethodPost, joinURL(channel.BaseURL, "images/generations"), bytes.NewReader(encoded))
+	request, err := http.NewRequest(http.MethodGet, joinURL(s.chatGPTAPIBase, "wham/usage"), nil)
 	if err != nil {
-		return err
+		result.Message = err.Error()
+		return result
 	}
 	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
-	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
 	response, err := s.httpClient.Do(request)
 	if err != nil {
-		return nil
+		result.Message = err.Error()
+		return result
 	}
 	defer response.Body.Close()
 	content, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if response.StatusCode == http.StatusPaymentRequired || upstreamBillingError(content) {
-		providerErr := providerErrorFromUpstream(response.StatusCode, content)
-		return fmt.Errorf("%s", providerErr.Message)
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		result.Status = "healthy"
+		result.Message = ""
+		return result
 	}
-	return nil
+	providerErr := providerErrorFromUpstream(response.StatusCode, content)
+	result.Message = providerErr.Message
+	if response.StatusCode == http.StatusPaymentRequired && !hasRefreshToken {
+		result.Status = "invalid"
+	}
+	return result
 }
 
 func upstreamBillingError(content []byte) bool {
@@ -3568,6 +3659,77 @@ func upstreamBillingError(content []byte) bool {
 	code := strings.ToLower(completionPrompt(payload.Error.Code))
 	errorType := strings.ToLower(strings.TrimSpace(payload.Error.Type))
 	return strings.Contains(code, "billing") || strings.Contains(errorType, "billing")
+}
+
+type OpenAIRefreshResult struct {
+	AccessToken  string
+	RefreshToken string
+	IDToken      string
+	ExpiresAt    string
+}
+
+func openAIAccountAccessExpired(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		expiresAt, err := time.Parse(layout, value)
+		if err == nil {
+			return time.Now().UTC().After(expiresAt.Add(-1 * time.Minute))
+		}
+	}
+	return false
+}
+
+func (s *Server) refreshOpenAIAccount(refreshToken string) (OpenAIRefreshResult, error) {
+	payload := gin.H{
+		"grant_type":    "refresh_token",
+		"refresh_token": refreshToken,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return OpenAIRefreshResult{}, err
+	}
+	request, err := http.NewRequest(http.MethodPost, joinURL(s.openAIAuthBase, "oauth/token"), bytes.NewReader(encoded))
+	if err != nil {
+		return OpenAIRefreshResult{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return OpenAIRefreshResult{}, err
+	}
+	defer response.Body.Close()
+	content, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return OpenAIRefreshResult{}, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		providerErr := providerErrorFromUpstream(response.StatusCode, content)
+		return OpenAIRefreshResult{}, fmt.Errorf("%s", providerErr.Message)
+	}
+	var body struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		IDToken      string `json:"id_token"`
+		ExpiresIn    int    `json:"expires_in"`
+		ExpiresAt    string `json:"expires_at"`
+	}
+	if err := json.Unmarshal(content, &body); err != nil {
+		return OpenAIRefreshResult{}, err
+	}
+	result := OpenAIRefreshResult{
+		AccessToken:  strings.TrimSpace(body.AccessToken),
+		RefreshToken: strings.TrimSpace(body.RefreshToken),
+		IDToken:      strings.TrimSpace(body.IDToken),
+		ExpiresAt:    strings.TrimSpace(body.ExpiresAt),
+	}
+	if result.ExpiresAt == "" && body.ExpiresIn > 0 {
+		result.ExpiresAt = time.Now().Add(time.Duration(body.ExpiresIn) * time.Second).UTC().Format(time.RFC3339Nano)
+	}
+	return result, nil
 }
 
 func (s *Server) streamOpenAICompatible(c *gin.Context, call GatewayCall) *ProviderError {
@@ -3658,6 +3820,10 @@ func (s *Server) newOpenAICompatibleImageRequest(call ImageGatewayCall) (*http.R
 			Type:    "api_error",
 		}
 	}
+	return s.newOpenAICompatibleImageRequestWithKey(call, upstreamKey)
+}
+
+func (s *Server) newOpenAICompatibleImageRequestWithKey(call ImageGatewayCall, upstreamKey string) (*http.Request, *ProviderError) {
 	upstreamKey = strings.TrimSpace(upstreamKey)
 	if upstreamKey == "" {
 		upstreamKey = s.upstreamAPIKey
@@ -3695,7 +3861,7 @@ func (s *Server) newOpenAICompatibleImageRequest(call ImageGatewayCall) (*http.R
 
 func (s *Server) channelUpstreamKey(channel Channel) (string, error) {
 	protectedKeys := []string{}
-	for _, account := range channel.OpenAIAccounts {
+	for _, account := range activeOpenAIAccounts(channel.OpenAIAccounts) {
 		if strings.TrimSpace(account.AccessToken) != "" {
 			protectedKeys = append(protectedKeys, account.AccessToken)
 		}
@@ -3719,6 +3885,36 @@ func (s *Server) channelUpstreamKey(channel Channel) (string, error) {
 		upstreamKey = s.upstreamAPIKey
 	}
 	return strings.TrimSpace(upstreamKey), nil
+}
+
+func activeOpenAIAccounts(accounts []OpenAIAccount) []OpenAIAccount {
+	active := []OpenAIAccount{}
+	for _, account := range accounts {
+		if strings.TrimSpace(account.AccessToken) == "" || account.Status == "invalid" {
+			continue
+		}
+		active = append(active, account)
+	}
+	return active
+}
+
+func (s *Server) markOpenAIAccountInvalid(channelID string, accountID string, message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	channel := s.findChannel(channelID)
+	if channel == nil {
+		return
+	}
+	for index := range channel.OpenAIAccounts {
+		if channel.OpenAIAccounts[index].ID != accountID {
+			continue
+		}
+		channel.OpenAIAccounts[index].Status = "invalid"
+		channel.OpenAIAccounts[index].LastCheckedAt = now()
+		channel.OpenAIAccounts[index].LastError = truncateString(message, 500)
+		s.saveStateLocked()
+		return
+	}
 }
 
 func (s *Server) writeProviderStream(c *gin.Context, call GatewayCall) *ProviderError {
@@ -4972,6 +5168,13 @@ func shouldMarkChannelUnhealthy(providerErr *ProviderError) bool {
 		"upstream_not_configured",
 		"upstream_request_error",
 	)
+}
+
+func isBillingProviderError(providerErr *ProviderError) bool {
+	if providerErr == nil {
+		return false
+	}
+	return providerErr.Status == http.StatusPaymentRequired || strings.Contains(strings.ToLower(providerErr.Code), "billing") || strings.Contains(strings.ToLower(providerErr.Type), "billing")
 }
 
 func (s *Server) checkRateLimitLocked(key *APIKey) bool {

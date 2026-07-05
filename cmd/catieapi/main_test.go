@@ -1275,6 +1275,68 @@ func TestImageGenerationsForwardToOpenAICompatibleUpstream(t *testing.T) {
 	}
 }
 
+func TestImageGenerationsRetryNextOpenAIAccountOnBillingError(t *testing.T) {
+	authHeaders := []string{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		authHeaders = append(authHeaders, auth)
+		if r.URL.Path != "/v1/images/generations" {
+			t.Fatalf("upstream image path = %s", r.URL.Path)
+		}
+		if auth == "Bearer billing-token" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusPaymentRequired)
+			_, _ = w.Write([]byte(`{"error":{"code":"billing_not_active","message":"billing inactive","type":"billing_not_active"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"b64_json":"image-after-retry"}]}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":   "memory",
+		"PROVIDER_MODE": "mock",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-1", Name: "GPT Image", Vendor: "OpenAI", Aliases: []string{"image"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image_pool", Name: "Image Pool", Provider: "openai", BaseURL: upstream.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-1"},
+		OpenAIAccounts: []OpenAIAccount{
+			{ID: "oaiacc_billing", Email: "billing@example.com", AccessToken: "billing-token", Status: "healthy"},
+			{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "healthy"},
+		},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"image","prompt":"retry account"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
+	}
+	if len(authHeaders) != 2 || authHeaders[0] != "Bearer billing-token" || authHeaders[1] != "Bearer good-token" {
+		t.Fatalf("upstream auth sequence = %#v", authHeaders)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"image-after-retry"`)) {
+		t.Fatalf("image response was not retried successfully: %s", response.Body.String())
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel := server.findChannel("chn_image_pool")
+	if channel.OpenAIAccounts[0].Status != "invalid" || !strings.Contains(channel.OpenAIAccounts[0].LastError, "billing inactive") {
+		t.Fatalf("billing account was not marked invalid: %#v", channel.OpenAIAccounts[0])
+	}
+	if channel.OpenAIAccounts[1].Status != "healthy" {
+		t.Fatalf("good account status changed: %#v", channel.OpenAIAccounts[1])
+	}
+}
+
 func TestImageGenerationsWorkWithoutV1Prefix(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)
@@ -1639,37 +1701,44 @@ func TestImportOpenAIAccountsFromZipAddsAccountsToExistingChannel(t *testing.T) 
 
 func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	var authHeaders []string
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	chatgpt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
-		if r.URL.Path != "/v1/images/generations" {
+		if r.URL.Path != "/backend-api/wham/usage" {
 			t.Fatalf("upstream path = %s", r.URL.Path)
 		}
-		if strings.Contains(r.Header.Get("Authorization"), "billing-token") {
+		if strings.Contains(r.Header.Get("Authorization"), "no-refresh-402-token") {
 			w.WriteHeader(http.StatusPaymentRequired)
 			_, _ = w.Write([]byte(`{"error":{"code":"billing_not_active","message":"billing inactive","type":"billing_not_active"}}`))
 			return
 		}
-		if strings.Contains(r.Header.Get("Authorization"), "auth-error-token") {
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(`{"error":{"message":"bad token"}}`))
+		if strings.Contains(r.Header.Get("Authorization"), "missing-scope-token") {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":"missing_scope","message":"Missing scopes: api.model.read","type":"invalid_request_error"}}`))
+			return
+		}
+		if strings.Contains(r.Header.Get("Authorization"), "has-refresh-402-token") {
+			w.WriteHeader(http.StatusPaymentRequired)
+			_, _ = w.Write([]byte(`{"error":{"code":"billing_not_active","message":"billing inactive but refresh exists","type":"billing_not_active"}}`))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"url":"https://example.test/image.png"}]}`))
+		_, _ = w.Write([]byte(`{"object":"usage","capabilities":{}}`))
 	}))
-	defer upstream.Close()
+	defer chatgpt.Close()
 
-	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"CHATGPT_API_BASE": chatgpt.URL + "/backend-api",
+	})
 	server, router := testServerRouter(t)
 	seedGatewayFixtures(server)
 	server.mu.Lock()
 	channel := server.findChannel("chn_1002")
-	channel.BaseURL = upstream.URL + "/v1"
-	channel.Models = []string{"gpt-image-2"}
 	channel.OpenAIAccounts = []OpenAIAccount{
 		{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "unchecked"},
-		{ID: "oaiacc_auth_error", Email: "auth-error@example.com", AccessToken: "auth-error-token", Status: "unchecked"},
-		{ID: "oaiacc_billing", Email: "billing@example.com", AccessToken: "billing-token", Status: "unchecked"},
+		{ID: "oaiacc_missing_scope", Email: "missing-scope@example.com", AccessToken: "missing-scope-token", Status: "unchecked"},
+		{ID: "oaiacc_has_refresh_402", Email: "has-refresh-402@example.com", AccessToken: "has-refresh-402-token", RefreshToken: "some-refresh-token", Status: "unchecked"},
+		{ID: "oaiacc_no_refresh_402", Email: "no-refresh-402@example.com", AccessToken: "no-refresh-402-token", Status: "unchecked"},
 	}
 	server.mu.Unlock()
 
@@ -1677,17 +1746,20 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("check accounts status = %d body = %s", response.Code, response.Body.String())
 	}
-	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":3`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":2`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":1`)) {
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":4`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":1`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":1`)) {
 		t.Fatalf("check response missing summary: %s", response.Body.String())
 	}
-	if len(authHeaders) != 3 {
+	if len(authHeaders) != 4 {
 		t.Fatalf("upstream auth request count = %d", len(authHeaders))
 	}
 
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	channel = server.findChannel("chn_1002")
-	if channel.OpenAIAccounts[0].Status != "healthy" || channel.OpenAIAccounts[1].Status != "healthy" || channel.OpenAIAccounts[2].Status != "invalid" {
+	if channel.OpenAIAccounts[0].Status != "healthy" ||
+		channel.OpenAIAccounts[1].Status != "unchecked" ||
+		channel.OpenAIAccounts[2].Status != "unchecked" ||
+		channel.OpenAIAccounts[3].Status != "invalid" {
 		t.Fatalf("account statuses = %#v", channel.OpenAIAccounts)
 	}
 }
