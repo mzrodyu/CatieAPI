@@ -198,6 +198,8 @@ type RequestLog struct {
 	Channel      *string `json:"channel"`
 	Status       string  `json:"status"`
 	Cost         float64 `json:"cost"`
+	InputTokens  int     `json:"inputTokens"`
+	OutputTokens int     `json:"outputTokens"`
 	LatencyMS    int64   `json:"latencyMs"`
 	ErrorCode    string  `json:"errorCode,omitempty"`
 	CreatedAt    string  `json:"createdAt"`
@@ -2762,8 +2764,9 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 			return
 		}
 		billingModel = modelWithChannelPricing(modelCopy, selectedChannel)
+		inputTokens, outputTokens := callTokenUsage(nil, body.Messages, true)
 		streamCost := calculateCallCost(billingModel, nil, body.Messages, true)
-		s.recordSuccessfulCall(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, streamCost, startedAt)
+		s.recordSuccessfulCall(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, streamCost, inputTokens, outputTokens, startedAt)
 		return
 	}
 
@@ -2791,13 +2794,14 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 	}
 
 	billingModel = modelWithChannelPricing(modelCopy, selectedChannel)
+	inputTokens, outputTokens := callTokenUsage(responseBody, body.Messages, false)
 	cost := calculateCallCost(billingModel, responseBody, body.Messages, false)
 	outputBody := interface{}(responseBody)
 	if transform != nil {
 		outputBody = transform(responseBody, modelCopy)
 	}
 	s.mu.Lock()
-	s.recordSuccessfulCallLocked(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, cost, startedAt)
+	s.recordSuccessfulCallLocked(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, cost, inputTokens, outputTokens, startedAt)
 	if idempotencyKey != "" {
 		s.idempotencyCache[idempotencyKey] = CachedResponse{Status: http.StatusOK, Body: outputBody, CreatedAt: now()}
 	}
@@ -2805,13 +2809,13 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 	c.JSON(http.StatusOK, outputBody)
 }
 
-func (s *Server) recordSuccessfulCall(userID string, keyID string, keyPrefix string, modelID string, channelName string, requestID string, cost float64, startedAt time.Time) {
+func (s *Server) recordSuccessfulCall(userID string, keyID string, keyPrefix string, modelID string, channelName string, requestID string, cost float64, inputTokens int, outputTokens int, startedAt time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.recordSuccessfulCallLocked(userID, keyID, keyPrefix, modelID, channelName, requestID, cost, startedAt)
+	s.recordSuccessfulCallLocked(userID, keyID, keyPrefix, modelID, channelName, requestID, cost, inputTokens, outputTokens, startedAt)
 }
 
-func (s *Server) recordSuccessfulCallLocked(userID string, keyID string, keyPrefix string, modelID string, channelName string, requestID string, cost float64, startedAt time.Time) {
+func (s *Server) recordSuccessfulCallLocked(userID string, keyID string, keyPrefix string, modelID string, channelName string, requestID string, cost float64, inputTokens int, outputTokens int, startedAt time.Time) {
 	user := s.findUser(userID)
 	key := s.findAPIKeyByID(keyID)
 	if user == nil || key == nil {
@@ -2844,6 +2848,8 @@ func (s *Server) recordSuccessfulCallLocked(userID string, keyID string, keyPref
 		Channel:      &channelName,
 		Status:       "success",
 		Cost:         cost,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
 		LatencyMS:    time.Since(startedAt).Milliseconds(),
 		CreatedAt:    now(),
 	})
@@ -4618,33 +4624,42 @@ func estimateTokens(messages []ChatMessage) int {
 }
 
 func calculateCallCost(model Model, response gin.H, messages []ChatMessage, stream bool) float64 {
-	promptTokens := estimateTokens(messages)
-	completionTokens := 18
-	if !stream && response != nil {
-		if usage, ok := response["usage"].(map[string]interface{}); ok {
-			if value, ok := asInt(usage["prompt_tokens"]); ok {
-				promptTokens = value
-			}
-			if value, ok := asInt(usage["completion_tokens"]); ok {
-				completionTokens = value
-			}
-		}
-		if usage, ok := response["usage"].(gin.H); ok {
-			if value, ok := asInt(usage["prompt_tokens"]); ok {
-				promptTokens = value
-			}
-			if value, ok := asInt(usage["completion_tokens"]); ok {
-				completionTokens = value
-			}
-		}
-	}
-
+	promptTokens, completionTokens := callTokenUsage(response, messages, stream)
 	inputRate, outputRate := modelRates(model)
 	cost := (float64(promptTokens)/1000)*inputRate + (float64(completionTokens)/1000)*outputRate
 	if cost > 0 && cost < 0.0001 {
 		cost = 0.0001
 	}
 	return round4(cost)
+}
+
+func callTokenUsage(response gin.H, messages []ChatMessage, stream bool) (int, int) {
+	promptTokens := estimateTokens(messages)
+	completionTokens := 18
+	if stream || response == nil {
+		return promptTokens, completionTokens
+	}
+	if usage, ok := response["usage"].(map[string]interface{}); ok {
+		return tokenUsageFromMap(usage, promptTokens, completionTokens)
+	}
+	if usage, ok := response["usage"].(gin.H); ok {
+		return tokenUsageFromMap(map[string]interface{}(usage), promptTokens, completionTokens)
+	}
+	return promptTokens, completionTokens
+}
+
+func tokenUsageFromMap(usage map[string]interface{}, promptTokens int, completionTokens int) (int, int) {
+	if value, ok := asInt(usage["prompt_tokens"]); ok {
+		promptTokens = value
+	} else if value, ok := asInt(usage["input_tokens"]); ok {
+		promptTokens = value
+	}
+	if value, ok := asInt(usage["completion_tokens"]); ok {
+		completionTokens = value
+	} else if value, ok := asInt(usage["output_tokens"]); ok {
+		completionTokens = value
+	}
+	return promptTokens, completionTokens
 }
 
 func modelRates(model Model) (float64, float64) {

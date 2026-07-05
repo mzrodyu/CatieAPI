@@ -95,6 +95,8 @@ type RequestLog = {
   channel: string | null;
   status: "success" | "failed";
   cost: number;
+  inputTokens?: number;
+  outputTokens?: number;
   latencyMs: number;
   errorCode?: string;
   createdAt: string;
@@ -323,6 +325,18 @@ function statusLabel(status: string) {
     failed: "失败"
   };
   return labels[status] || status;
+}
+
+function formatAmount(value: number | null | undefined, digits = 2) {
+  const number = Number(value || 0);
+  return new Intl.NumberFormat("zh-CN", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits
+  }).format(number);
+}
+
+function formatTokenCount(value: number | null | undefined) {
+  return new Intl.NumberFormat("zh-CN").format(Math.max(0, Math.round(Number(value || 0))));
 }
 
 function logTitle(log: RequestLog) {
@@ -1633,7 +1647,7 @@ function UsersView({
                 <small>{user.id} · {user.email || "未绑定邮箱"}</small>
               </span>
               <Badge tone={user.status}>{statusLabel(user.status)}</Badge>
-              <span>{user.balance.toFixed(2)}</span>
+              <span>{formatAmount(user.balance)}</span>
               <span>{user.requestsToday}</span>
             </div>
           ))}
@@ -1662,7 +1676,7 @@ function UsersView({
 
             <div className="settings-group">
               <Setting label="角色" value={selectedUser.user.role === "admin" ? "管理员" : "用户"} />
-              <Setting label="余额" value={selectedUser.user.balance.toFixed(2)} />
+              <Setting label="余额" value={formatAmount(selectedUser.user.balance)} />
               <Setting label="总请求" value={String(selectedUser.user.totalRequests)} />
               <Setting label="最后登录" value={formatDate(selectedUser.user.lastLoginAt)} />
               <Setting label="API 调用" value={selectedUser.user.status === "disabled" ? "关闭" : "允许"} switchOn={selectedUser.user.status !== "disabled"} />
@@ -1671,7 +1685,7 @@ function UsersView({
             <div className="balance-adjuster">
               <div className="balance-adjuster-title">
                 <strong>调整余额</strong>
-                <span>当前 {selectedUser.user.balance.toFixed(2)}</span>
+                <span>当前 {formatAmount(selectedUser.user.balance)}</span>
               </div>
               <div className="balance-adjuster-fields">
                 <label>
@@ -2442,6 +2456,8 @@ function LogsView({ logs, onCopy }: { logs: RequestLog[]; onCopy: (value: string
               <span>请求</span>
               <span>模型</span>
               <span>渠道</span>
+              <span>输入</span>
+              <span>输出</span>
               <span>消耗</span>
               <span>状态</span>
             </div>
@@ -2462,6 +2478,8 @@ function LogsView({ logs, onCopy }: { logs: RequestLog[]; onCopy: (value: string
                   </span>
                   <span>{logModelText(log)}</span>
                   <span>{logChannelText(log)}</span>
+                  <span>{formatTokenCount(log.inputTokens)}</span>
+                  <span>{formatTokenCount(log.outputTokens)}</span>
                   <span>{log.cost.toFixed(4)}</span>
                   <Badge tone={log.status}>{statusLabel(log.status)}</Badge>
                 </div>
@@ -2491,6 +2509,8 @@ function LogDetail({ log, loading, onCopy }: { log: RequestLog | null; loading: 
       </aside>
     );
   }
+  const inputTokens = Number(log.inputTokens || 0);
+  const outputTokens = Number(log.outputTokens || 0);
   const details = [
     ["请求 ID", log.id],
     ["状态", statusLabel(log.status)],
@@ -2500,6 +2520,9 @@ function LogDetail({ log, loading, onCopy }: { log: RequestLog | null; loading: 
     ["模型", log.model || "未提供"],
     ["渠道", log.channel || "未选择"],
     ["响应耗时", `${log.latencyMs} ms`],
+    ["输入 Tokens", formatTokenCount(inputTokens)],
+    ["输出 Tokens", formatTokenCount(outputTokens)],
+    ["总 Tokens", formatTokenCount(inputTokens + outputTokens)],
     ["扣费", log.cost.toFixed(4)],
     ["错误码", log.errorCode || "无"]
   ];

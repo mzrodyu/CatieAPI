@@ -198,12 +198,8 @@ nav {
 }
 
 .content {
-  width: min(1220px, calc(100vw - 264px));
-  padding: 28px 30px 44px;
-}
-
-.content:has(.models-page) {
   width: calc(100vw - 264px);
+  padding: 28px 30px 44px;
 }
 
 .topbar {
@@ -697,10 +693,9 @@ h3 {
 
 .users-layout {
   display: grid;
-  grid-template-columns: minmax(680px, 1.25fr) minmax(350px, 0.55fr);
+  grid-template-columns: minmax(780px, 1.55fr) minmax(380px, 0.7fr);
   gap: 18px;
   align-items: start;
-  max-width: 1320px;
 }
 
 .users-layout .panel:first-child {
@@ -1356,7 +1351,20 @@ button.table-row:hover {
 }
 
 .users-table {
-  grid-template-columns: 22px minmax(170px, 1fr) 72px 68px 52px;
+  grid-template-columns: 22px minmax(220px, 1fr) 86px minmax(120px, 0.45fr) 68px;
+}
+
+.users-table > span:nth-child(4),
+.users-table > span:nth-child(5) {
+  justify-self: end;
+  text-align: right;
+}
+
+.users-table.table-row > span:nth-child(4) {
+  max-width: 100%;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
 }
 
 .users-table > input[type="checkbox"] {
@@ -1590,12 +1598,12 @@ button.table-row:hover {
 }
 
 .logs-table {
-  grid-template-columns: minmax(150px, 1.4fr) 130px minmax(130px, 1fr) 70px 80px;
+  grid-template-columns: minmax(210px, 1.35fr) minmax(170px, 1fr) minmax(150px, 0.9fr) 78px 78px 86px 80px;
 }
 
 .logs-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(320px, 0.8fr);
+  grid-template-columns: minmax(0, 1.7fr) minmax(420px, 0.75fr);
   gap: 14px;
   align-items: start;
 }
@@ -2893,7 +2901,9 @@ button.table-row:hover {
   .channels-table span:nth-child(4),
   .channels-table span:nth-child(5),
   .logs-table span:nth-child(3),
-  .logs-table span:nth-child(4) {
+  .logs-table span:nth-child(4),
+  .logs-table span:nth-child(5),
+  .logs-table span:nth-child(6) {
     display: none;
   }
 }
