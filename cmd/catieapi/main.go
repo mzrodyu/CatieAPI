@@ -3514,6 +3514,7 @@ func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *Provi
 		}
 		attemptedAccounts := 0
 		invalidatedAccounts := 0
+		usageLimitedAccounts := 0
 		for _, account := range accounts {
 			attemptedAccounts++
 			upstreamKey, err := s.revealSecret(account.AccessToken)
@@ -3526,6 +3527,11 @@ func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *Provi
 				return body, nil
 			}
 			lastErr = providerErr
+			if isUsageLimitProviderError(providerErr) {
+				usageLimitedAccounts++
+				s.markOpenAIAccountUsageLimited(call.Channel.ID, account.ID, providerErr.Message)
+				continue
+			}
 			if shouldInvalidateOpenAIAccountForImage(providerErr) {
 				invalidatedAccounts++
 				s.markOpenAIAccountInvalid(call.Channel.ID, account.ID, providerErr.Message)
@@ -3533,7 +3539,10 @@ func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *Provi
 			}
 			return nil, providerErr
 		}
-		if attemptedAccounts > 0 && invalidatedAccounts == attemptedAccounts {
+		if attemptedAccounts > 0 && invalidatedAccounts+usageLimitedAccounts == attemptedAccounts {
+			if usageLimitedAccounts > 0 {
+				return nil, openAIAccountsUsageLimitedError("image generation")
+			}
 			return nil, &ProviderError{
 				Status:  http.StatusBadGateway,
 				Code:    "upstream_accounts_unavailable",
@@ -3601,6 +3610,7 @@ func (s *Server) callChatGPTCodex(call GatewayCall) (gin.H, *ProviderError) {
 	}
 	attemptedAccounts := 0
 	invalidatedAccounts := 0
+	usageLimitedAccounts := 0
 	for _, account := range accounts {
 		attemptedAccounts++
 		accessToken, err := s.revealSecret(account.AccessToken)
@@ -3613,6 +3623,11 @@ func (s *Server) callChatGPTCodex(call GatewayCall) (gin.H, *ProviderError) {
 			return body, nil
 		}
 		lastErr = providerErr
+		if isUsageLimitProviderError(providerErr) {
+			usageLimitedAccounts++
+			s.markOpenAIAccountUsageLimited(call.Channel.ID, account.ID, providerErr.Message)
+			continue
+		}
 		if shouldInvalidateOpenAIAccountForChat(providerErr) {
 			invalidatedAccounts++
 			s.markOpenAIAccountInvalid(call.Channel.ID, account.ID, providerErr.Message)
@@ -3620,7 +3635,10 @@ func (s *Server) callChatGPTCodex(call GatewayCall) (gin.H, *ProviderError) {
 		}
 		return nil, providerErr
 	}
-	if attemptedAccounts > 0 && invalidatedAccounts == attemptedAccounts {
+	if attemptedAccounts > 0 && invalidatedAccounts+usageLimitedAccounts == attemptedAccounts {
+		if usageLimitedAccounts > 0 {
+			return nil, openAIAccountsUsageLimitedError("chat completions")
+		}
 		return nil, &ProviderError{
 			Status:  http.StatusBadGateway,
 			Code:    "upstream_accounts_unavailable",
@@ -3669,6 +3687,7 @@ func (s *Server) streamChatGPTCodex(c *gin.Context, call GatewayCall) *ProviderE
 	}
 	attemptedAccounts := 0
 	invalidatedAccounts := 0
+	usageLimitedAccounts := 0
 	for _, account := range accounts {
 		attemptedAccounts++
 		accessToken, err := s.revealSecret(account.AccessToken)
@@ -3681,6 +3700,11 @@ func (s *Server) streamChatGPTCodex(c *gin.Context, call GatewayCall) *ProviderE
 			return nil
 		}
 		lastErr = providerErr
+		if isUsageLimitProviderError(providerErr) {
+			usageLimitedAccounts++
+			s.markOpenAIAccountUsageLimited(call.Channel.ID, account.ID, providerErr.Message)
+			continue
+		}
 		if shouldInvalidateOpenAIAccountForChat(providerErr) {
 			invalidatedAccounts++
 			s.markOpenAIAccountInvalid(call.Channel.ID, account.ID, providerErr.Message)
@@ -3688,7 +3712,10 @@ func (s *Server) streamChatGPTCodex(c *gin.Context, call GatewayCall) *ProviderE
 		}
 		return providerErr
 	}
-	if attemptedAccounts > 0 && invalidatedAccounts == attemptedAccounts {
+	if attemptedAccounts > 0 && invalidatedAccounts+usageLimitedAccounts == attemptedAccounts {
+		if usageLimitedAccounts > 0 {
+			return openAIAccountsUsageLimitedError("chat completions")
+		}
 		return &ProviderError{
 			Status:  http.StatusBadGateway,
 			Code:    "upstream_accounts_unavailable",
@@ -5138,8 +5165,13 @@ func (s *Server) channelUpstreamKey(channel Channel) (string, error) {
 func activeOpenAIAccounts(accounts []OpenAIAccount) []OpenAIAccount {
 	healthy := []OpenAIAccount{}
 	standby := []OpenAIAccount{}
+	limited := []OpenAIAccount{}
 	for _, account := range accounts {
 		if strings.TrimSpace(account.AccessToken) == "" || account.Status == "invalid" {
+			continue
+		}
+		if openAIAccountUsageLimited(account) {
+			limited = append(limited, account)
 			continue
 		}
 		if account.Status == "healthy" {
@@ -5148,7 +5180,15 @@ func activeOpenAIAccounts(accounts []OpenAIAccount) []OpenAIAccount {
 		}
 		standby = append(standby, account)
 	}
-	return append(healthy, standby...)
+	ordered := append(healthy, standby...)
+	return append(ordered, limited...)
+}
+
+func openAIAccountUsageLimited(account OpenAIAccount) bool {
+	if len(account.QuotaLimits) > 0 && !openAIQuotaLimitsHaveRemaining(account.QuotaLimits) {
+		return true
+	}
+	return usageLimitErrorText(account.LastError)
 }
 
 func (s *Server) markOpenAIAccountInvalid(channelID string, accountID string, message string) {
@@ -5165,6 +5205,25 @@ func (s *Server) markOpenAIAccountInvalid(channelID string, accountID string, me
 		channel.OpenAIAccounts[index].Status = "invalid"
 		channel.OpenAIAccounts[index].LastCheckedAt = now()
 		channel.OpenAIAccounts[index].LastError = truncateString(message, 500)
+		s.saveStateLocked()
+		return
+	}
+}
+
+func (s *Server) markOpenAIAccountUsageLimited(channelID string, accountID string, message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	channel := s.findChannel(channelID)
+	if channel == nil {
+		return
+	}
+	for index := range channel.OpenAIAccounts {
+		if channel.OpenAIAccounts[index].ID != accountID {
+			continue
+		}
+		channel.OpenAIAccounts[index].Status = "unchecked"
+		channel.OpenAIAccounts[index].LastCheckedAt = now()
+		channel.OpenAIAccounts[index].LastError = truncateString(firstNonEmptyString(message, "usage limit reached"), 500)
 		s.saveStateLocked()
 		return
 	}
@@ -6470,6 +6529,9 @@ func retryableProviderError(providerErr *ProviderError) bool {
 	if providerErr == nil {
 		return false
 	}
+	if isUsageLimitProviderError(providerErr) {
+		return true
+	}
 	if providerErr.Code == "upstream_missing_image_scope" {
 		return true
 	}
@@ -6522,6 +6584,35 @@ func isBillingProviderError(providerErr *ProviderError) bool {
 		return false
 	}
 	return providerErr.Status == http.StatusPaymentRequired || strings.Contains(strings.ToLower(providerErr.Code), "billing") || strings.Contains(strings.ToLower(providerErr.Type), "billing")
+}
+
+func isUsageLimitProviderError(providerErr *ProviderError) bool {
+	if providerErr == nil {
+		return false
+	}
+	if providerErr.Status == http.StatusTooManyRequests {
+		return true
+	}
+	return usageLimitErrorText(providerErr.Code, providerErr.Message, providerErr.Type)
+}
+
+func usageLimitErrorText(parts ...string) bool {
+	text := strings.ToLower(strings.Join(parts, " "))
+	return strings.Contains(text, "usage_limit_reached") ||
+		strings.Contains(text, "usage limit") ||
+		strings.Contains(text, "limit has been reached") ||
+		strings.Contains(text, "rate_limit_exceeded") ||
+		strings.Contains(text, "quota_exceeded") ||
+		strings.Contains(text, "too many requests")
+}
+
+func openAIAccountsUsageLimitedError(scope string) *ProviderError {
+	return &ProviderError{
+		Status:  http.StatusTooManyRequests,
+		Code:    "upstream_accounts_usage_limited",
+		Message: fmt.Sprintf("All active OpenAI accounts for %s are currently usage-limited. Wait for reset or import accounts with remaining quota, then run batch check.", scope),
+		Type:    "rate_limit_error",
+	}
 }
 
 func shouldInvalidateOpenAIAccountForImage(providerErr *ProviderError) bool {

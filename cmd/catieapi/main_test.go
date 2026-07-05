@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -945,6 +946,64 @@ func TestOpenAIAccountPoolChatUsesChatGPTCodexResponses(t *testing.T) {
 	}
 }
 
+func TestOpenAIAccountPoolChatRetriesNextAccountOnUsageLimit(t *testing.T) {
+	authHeaders := []string{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		authHeaders = append(authHeaders, auth)
+		if r.URL.Path != "/backend-api/codex/responses" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		if auth == "Bearer limited-token" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":"upstream_error","message":"The usage limit has been reached","param":"model","type":"usage_limit_reached"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(codexChatSSE("hello after quota retry")))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	channel := server.findChannel("chn_1001")
+	channel.BaseURL = "https://api.openai.com/v1"
+	channel.OpenAIAccounts = []OpenAIAccount{
+		{ID: "oaiacc_limited", Email: "limited@example.com", AccessToken: "limited-token", Status: "healthy"},
+		{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "healthy"},
+	}
+	server.mu.Unlock()
+
+	body := `{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}`
+	response := perform(router, http.MethodPost, "/v1/chat/completions", body, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("chat status = %d body = %s", response.Code, response.Body.String())
+	}
+	if len(authHeaders) != 2 || authHeaders[0] != "Bearer limited-token" || authHeaders[1] != "Bearer good-token" {
+		t.Fatalf("upstream auth sequence = %#v", authHeaders)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"content":"hello after quota retry"`)) {
+		t.Fatalf("chat response was not retried successfully: %s", response.Body.String())
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel = server.findChannel("chn_1001")
+	if channel.OpenAIAccounts[0].Status != "unchecked" || !strings.Contains(channel.OpenAIAccounts[0].LastError, "usage limit") {
+		t.Fatalf("limited account was not marked unchecked: %#v", channel.OpenAIAccounts[0])
+	}
+	if channel.OpenAIAccounts[1].Status != "healthy" {
+		t.Fatalf("good account status changed: %#v", channel.OpenAIAccounts[1])
+	}
+}
+
 func TestEmbeddingsEndpointReturnsClearUnsupportedError(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	_, router := testServerRouter(t)
@@ -1422,6 +1481,69 @@ func TestImageGenerationsRetryNextOpenAIAccountOnBillingError(t *testing.T) {
 	channel := server.findChannel("chn_image_pool")
 	if channel.OpenAIAccounts[0].Status != "invalid" || !strings.Contains(channel.OpenAIAccounts[0].LastError, "billing inactive") {
 		t.Fatalf("billing account was not marked invalid: %#v", channel.OpenAIAccounts[0])
+	}
+	if channel.OpenAIAccounts[1].Status != "healthy" {
+		t.Fatalf("good account status changed: %#v", channel.OpenAIAccounts[1])
+	}
+}
+
+func TestImageGenerationsRetryNextOpenAIAccountOnUsageLimit(t *testing.T) {
+	authHeaders := []string{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		authHeaders = append(authHeaders, auth)
+		if r.URL.Path != "/backend-api/codex/responses" {
+			t.Fatalf("upstream image path = %s", r.URL.Path)
+		}
+		if auth == "Bearer limited-token" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":"upstream_error","message":"The usage limit has been reached","param":"model","type":"usage_limit_reached"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(codexImageSSE("image-after-quota-retry")))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-1", Name: "GPT Image", Vendor: "OpenAI", Aliases: []string{"image"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image_pool", Name: "Image Pool", Provider: "openai", BaseURL: upstream.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-1"},
+		OpenAIAccounts: []OpenAIAccount{
+			{ID: "oaiacc_limited", Email: "limited@example.com", AccessToken: "limited-token", Status: "healthy"},
+			{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "healthy"},
+		},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"image","prompt":"retry usage limit"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
+	}
+	if len(authHeaders) != 2 || authHeaders[0] != "Bearer limited-token" || authHeaders[1] != "Bearer good-token" {
+		t.Fatalf("upstream auth sequence = %#v", authHeaders)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"image-after-quota-retry"`)) {
+		t.Fatalf("image response was not retried successfully: %s", response.Body.String())
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel := server.findChannel("chn_image_pool")
+	if channel.OpenAIAccounts[0].Status != "unchecked" || !strings.Contains(channel.OpenAIAccounts[0].LastError, "usage limit") {
+		t.Fatalf("limited account was not marked unchecked: %#v", channel.OpenAIAccounts[0])
 	}
 	if channel.OpenAIAccounts[1].Status != "healthy" {
 		t.Fatalf("good account status changed: %#v", channel.OpenAIAccounts[1])
@@ -2221,6 +2343,26 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	}
 	if !bytes.Contains(imageResponse.Body.Bytes(), []byte(`"b64_json":"image-after-check"`)) {
 		t.Fatalf("image response was not proxied after check: %s", imageResponse.Body.String())
+	}
+}
+
+func TestActiveOpenAIAccountsOrdersUsageLimitedLast(t *testing.T) {
+	accounts := []OpenAIAccount{
+		{ID: "limited", AccessToken: "limited-token", Status: "healthy", QuotaLimits: []OpenAIQuotaLimit{{Label: "5h", Limit: 100, Used: 100, Remaining: 0}}},
+		{ID: "healthy", AccessToken: "healthy-token", Status: "healthy", QuotaLimits: []OpenAIQuotaLimit{{Label: "5h", Limit: 100, Remaining: 10, PercentRemaining: 10}}},
+		{ID: "unchecked", AccessToken: "unchecked-token", Status: "unchecked"},
+		{ID: "invalid", AccessToken: "invalid-token", Status: "invalid"},
+		{ID: "last-error", AccessToken: "last-error-token", Status: "unchecked", LastError: "The usage limit has been reached"},
+	}
+
+	active := activeOpenAIAccounts(accounts)
+	ids := []string{}
+	for _, account := range active {
+		ids = append(ids, account.ID)
+	}
+	expected := []string{"healthy", "unchecked", "limited", "last-error"}
+	if !reflect.DeepEqual(ids, expected) {
+		t.Fatalf("active account order = %#v", ids)
 	}
 }
 
