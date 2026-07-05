@@ -2131,6 +2131,21 @@ button.table-row:hover {
   display: none;
 }
 
+.channel-import-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.channel-import-actions label {
+  cursor: pointer;
+}
+
+.channel-import-actions input {
+  display: none;
+}
+
 .key-editor {
   display: grid;
   gap: 14px;

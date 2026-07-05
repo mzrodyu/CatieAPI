@@ -78,6 +78,12 @@ type ChannelSyncResult = {
   addedModels: ModelItem[];
 };
 
+type OpenAIAccountImportResult = {
+  imported: number;
+  skipped: number;
+  channels: Channel[];
+};
+
 type ModelItem = {
   id: string;
   name: string;
@@ -666,6 +672,25 @@ function App() {
     window.setTimeout(() => setToast(""), 2400);
   }
 
+  async function importOpenAIAccounts(file: File) {
+    let data: unknown;
+    try {
+      data = JSON.parse(await file.text());
+    } catch {
+      setToast("JSON 文件格式不正确");
+      window.setTimeout(() => setToast(""), 2400);
+      return;
+    }
+    const result = await fetchJson<OpenAIAccountImportResult>("/api/channels/import-openai-accounts", {
+      method: "POST",
+      body: JSON.stringify(data)
+    });
+    await loadAll();
+    setActive("channels");
+    setToast(`已导入 ${result.imported} 个账号${result.skipped ? `，跳过 ${result.skipped} 个` : ""}`);
+    window.setTimeout(() => setToast(""), 2600);
+  }
+
   async function createModel(model: ModelCreate) {
     const data = await fetchJson<{ model: ModelItem }>("/api/models", {
       method: "POST",
@@ -878,7 +903,7 @@ function App() {
         )}
         {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} onUpdateKey={updateAPIKey} onDeleteKey={deleteAPIKey} />}
         {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} onUpdate={updateModel} onDelete={deleteModel} />}
-        {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onDelete={deleteChannel} onSyncModels={syncChannelModels} onCheck={checkChannel} />}
+        {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onImport={importOpenAIAccounts} onDelete={deleteChannel} onSyncModels={syncChannelModels} onCheck={checkChannel} />}
         {active === "logs" && <LogsView logs={logs} onCopy={copyAndToast} />}
         {active === "settings" && <SettingsView models={models} channels={channels} />}
       </main>
@@ -2222,6 +2247,7 @@ function ChannelsView({
   channels,
   onUpdate,
   onCreate,
+  onImport,
   onDelete,
   onSyncModels,
   onCheck
@@ -2229,17 +2255,44 @@ function ChannelsView({
   channels: Channel[];
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
   onCreate: () => void;
+  onImport: (file: File) => Promise<void>;
   onDelete: (id: string) => void;
   onSyncModels: (id: string) => Promise<void>;
   onCheck: (id: string) => Promise<void>;
 }) {
+  const [importing, setImporting] = useState(false);
+
+  async function importFile(file: File) {
+    setImporting(true);
+    try {
+      await onImport(file);
+    } finally {
+      setImporting(false);
+    }
+  }
+
   return (
     <Panel title="渠道管理">
       <div className="panel-toolbar">
-        <span className="muted-inline">新增渠道默认禁用，补充地址后再启用。</span>
-        <button className="primary-button" onClick={onCreate}>
-          新增渠道
-        </button>
+        <span className="muted-inline">新增渠道默认禁用；导入 CPA/Sub2API JSON 会生成 OpenAI 渠道。</span>
+        <div className="channel-import-actions">
+          <label className="secondary-button">
+            {importing ? "导入中" : "导入账号 JSON"}
+            <input
+              type="file"
+              accept="application/json,.json"
+              disabled={importing}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) importFile(file);
+                event.target.value = "";
+              }}
+            />
+          </label>
+          <button className="primary-button" onClick={onCreate}>
+            新增渠道
+          </button>
+        </div>
       </div>
       <div className="channels-stack">
         {channels.map((channel) => (

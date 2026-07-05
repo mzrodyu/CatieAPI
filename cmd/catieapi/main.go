@@ -176,6 +176,20 @@ type PublicChannel struct {
 	LastError         string   `json:"lastError"`
 }
 
+type ImportedOpenAIAccount struct {
+	Name         string
+	Email        string
+	AccessToken  string
+	RefreshToken string
+	IDToken      string
+	AccountID    string
+	UserID       string
+	ExpiresAt    string
+	LastRefresh  string
+	PlanType     string
+	Source       string
+}
+
 type Model struct {
 	ID                string   `json:"id"`
 	Name              string   `json:"name"`
@@ -286,6 +300,12 @@ type ChatRequest struct {
 	Payload  map[string]interface{} `json:"-"`
 }
 
+type ImageRequest struct {
+	Model   string                 `json:"model"`
+	Prompt  string                 `json:"prompt"`
+	Payload map[string]interface{} `json:"-"`
+}
+
 type ChatMessage struct {
 	Role    string      `json:"role"`
 	Content interface{} `json:"content"`
@@ -311,11 +331,36 @@ func (request *ChatRequest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (request *ImageRequest) UnmarshalJSON(data []byte) error {
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return err
+	}
+	var typed struct {
+		Model  string `json:"model"`
+		Prompt string `json:"prompt"`
+	}
+	if err := json.Unmarshal(data, &typed); err != nil {
+		return err
+	}
+	request.Model = typed.Model
+	request.Prompt = typed.Prompt
+	request.Payload = payload
+	return nil
+}
+
 type GatewayCall struct {
 	RequestID string
 	Model     Model
 	Channel   Channel
 	Body      ChatRequest
+}
+
+type ImageGatewayCall struct {
+	RequestID string
+	Model     Model
+	Channel   Channel
+	Body      ImageRequest
 }
 
 type DiscordTokenResponse struct {
@@ -443,6 +488,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.DELETE("/api-keys/:id", s.deleteAPIKey)
 	admin.GET("/channels", s.listChannels)
 	admin.POST("/channels", s.createChannel)
+	admin.POST("/channels/import-openai-accounts", s.importOpenAIAccounts)
 	admin.PATCH("/channels/:id", s.updateChannel)
 	admin.DELETE("/channels/:id", s.deleteChannel)
 	admin.POST("/channels/:id/check", s.checkChannel)
@@ -469,12 +515,14 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	router.POST("/v1/completions", s.completions)
 	router.POST("/v1/responses", s.responses)
 	router.POST("/v1/embeddings", s.embeddings)
+	router.POST("/v1/images/generations", s.imageGenerations)
 	router.GET("/models", s.openAIModels)
 	router.GET("/models/:id", s.openAIModel)
 	router.POST("/chat/completions", s.chatCompletions)
 	router.POST("/completions", s.completions)
 	router.POST("/responses", s.responses)
 	router.POST("/embeddings", s.embeddings)
+	router.POST("/images/generations", s.imageGenerations)
 
 	router.NoRoute(func(c *gin.Context) {
 		if s.serveStatic(c) {
@@ -2093,6 +2141,113 @@ func (s *Server) createChannel(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"channel": publicChannel(channel)})
 }
 
+func (s *Server) importOpenAIAccounts(c *gin.Context) {
+	var payload map[string]interface{}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		s.openAIError(c, http.StatusBadRequest, "invalid_json", "Request body must be valid JSON", "invalid_request_error", nil)
+		return
+	}
+
+	baseURL := "https://api.openai.com/v1"
+	if value := stringFromMap(payload, "baseUrl"); value != "" {
+		baseURL = strings.TrimRight(value, "/")
+	}
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		validationError(c, "Base URL must start with http:// or https://")
+		return
+	}
+	models := stringSliceFromAny(payload["models"])
+	if len(models) == 0 {
+		models = []string{"gpt-5.6", "gpt-image-2", "gpt-image-1"}
+	}
+	status := stringFromMap(payload, "status")
+	if status == "" {
+		status = "standby"
+	}
+	if !allowedString(status, "healthy", "standby", "disabled") {
+		validationError(c, "Invalid channel status")
+		return
+	}
+	priority := 10
+	if value, ok := asInt(payload["priority"]); ok && value > 0 {
+		priority = value
+	}
+	weight := 10
+	if value, ok := asInt(payload["weight"]); ok && value >= 0 {
+		weight = value
+	}
+	namePrefix := stringFromMap(payload, "namePrefix")
+	if namePrefix == "" {
+		namePrefix = "OpenAI Account"
+	}
+
+	importData := payload
+	if nested, ok := payload["data"].(map[string]interface{}); ok {
+		importData = nested
+	}
+	accounts := parseOpenAIAccountImport(importData)
+	if len(accounts) == 0 {
+		validationError(c, "No CPA or Sub2API accounts found in JSON")
+		return
+	}
+
+	channels := []PublicChannel{}
+	invalid := 0
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, modelID := range models {
+		s.ensureImportedModelLocked(modelID)
+	}
+	for _, account := range accounts {
+		if strings.TrimSpace(account.AccessToken) == "" {
+			invalid++
+			continue
+		}
+		protectedKey, err := s.protectSecret(strings.TrimSpace(account.AccessToken))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "Failed to protect imported access token"}})
+			return
+		}
+		display := account.Email
+		if display == "" {
+			display = account.Name
+		}
+		if display == "" {
+			display = account.AccountID
+		}
+		if display == "" {
+			display = account.UserID
+		}
+		if display == "" {
+			display = fmt.Sprintf("account-%d", len(channels)+1)
+		}
+		channel := Channel{
+			ID:             newID("chn"),
+			Name:           strings.TrimSpace(namePrefix + " - " + display),
+			Provider:       "openai",
+			BaseURL:        baseURL,
+			UpstreamAPIKey: protectedKey,
+			Status:         status,
+			StreamMode:     "auto",
+			Priority:       priority,
+			Weight:         weight,
+			Models:         append([]string{}, models...),
+		}
+		s.state.Channels = append(s.state.Channels, channel)
+		channels = append(channels, publicChannel(channel))
+	}
+	if len(channels) == 0 {
+		validationError(c, "Imported accounts do not contain access_token")
+		return
+	}
+	s.saveStateLocked()
+	c.JSON(http.StatusCreated, gin.H{
+		"imported": len(channels),
+		"skipped":  invalid,
+		"channels": channels,
+	})
+}
+
 func (s *Server) updateChannel(c *gin.Context) {
 	var patch map[string]interface{}
 	if err := c.ShouldBindJSON(&patch); err != nil {
@@ -2704,6 +2859,126 @@ func (s *Server) chatCompletions(c *gin.Context) {
 	s.handleChatCompletion(c, body, startedAt, idempotencyKey)
 }
 
+func (s *Server) imageGenerations(c *gin.Context) {
+	startedAt := time.Now()
+	idempotencyKey := c.GetHeader("Idempotency-Key")
+
+	s.mu.Lock()
+	if idempotencyKey != "" {
+		if cached, ok := s.idempotencyCache[idempotencyKey]; ok {
+			s.mu.Unlock()
+			c.JSON(cached.Status, cached.Body)
+			return
+		}
+	}
+	s.mu.Unlock()
+
+	var body ImageRequest
+	if err := c.ShouldBindJSON(&body); err != nil {
+		s.openAIError(c, http.StatusBadRequest, "invalid_json", "Request body must be valid JSON", "invalid_request_error", nil)
+		return
+	}
+	s.handleImageGeneration(c, body, startedAt, idempotencyKey)
+}
+
+func (s *Server) handleImageGeneration(c *gin.Context, body ImageRequest, startedAt time.Time, idempotencyKey string) {
+	s.mu.Lock()
+
+	auth := s.findUserByAPIKeyLocked(apiTokenFromRequest(c))
+	if auth == nil {
+		s.openAIErrorForCallLocked(c, http.StatusUnauthorized, "invalid_api_key", "Invalid CatieAPI key", "invalid_request_error", nil, "", "", body.Model, "")
+		s.mu.Unlock()
+		return
+	}
+	if auth.User.Status == "limited" {
+		s.openAIErrorForCallLocked(c, http.StatusPaymentRequired, "insufficient_quota", "Insufficient quota", "billing_error", nil, auth.User.ID, auth.Key.Prefix, body.Model, "")
+		s.mu.Unlock()
+		return
+	}
+	if !s.checkRateLimitLocked(auth.Key) {
+		s.openAIErrorForCallLocked(c, http.StatusTooManyRequests, "rate_limit_exceeded", "Rate limit exceeded", "rate_limit_error", nil, auth.User.ID, auth.Key.Prefix, body.Model, "")
+		s.mu.Unlock()
+		return
+	}
+	if strings.TrimSpace(body.Prompt) == "" {
+		s.openAIErrorForCallLocked(c, http.StatusBadRequest, "invalid_prompt", "prompt is required", "invalid_request_error", stringPtr("prompt"), auth.User.ID, auth.Key.Prefix, body.Model, "")
+		s.mu.Unlock()
+		return
+	}
+
+	model := s.resolveModelLocked(body.Model)
+	if model == nil || model.Status != "available" {
+		name := body.Model
+		if name == "" {
+			name = "<model>"
+		}
+		s.openAIErrorForCallLocked(c, http.StatusBadRequest, "model_not_available", "No available model: "+name, "invalid_request_error", stringPtr("model"), auth.User.ID, auth.Key.Prefix, body.Model, "")
+		s.mu.Unlock()
+		return
+	}
+	if !apiKeyAllowsModel(auth.Key, model.ID) {
+		s.openAIErrorForCallLocked(c, http.StatusForbidden, "model_not_allowed", "API key is not allowed to use model: "+model.ID, "invalid_request_error", stringPtr("model"), auth.User.ID, auth.Key.Prefix, model.ID, "")
+		s.mu.Unlock()
+		return
+	}
+	channels := s.channelCandidatesLocked(model.ID)
+	if len(channels) == 0 {
+		s.openAIErrorForCallLocked(c, http.StatusBadRequest, "model_not_available", "No available channel for model: "+model.ID, "invalid_request_error", stringPtr("model"), auth.User.ID, auth.Key.Prefix, model.ID, "")
+		s.mu.Unlock()
+		return
+	}
+	billingModel := modelWithChannelPricing(*model, channels[0])
+	if billingModel.PricingConfigured && auth.User.Balance <= 0 {
+		s.openAIErrorForCallLocked(c, http.StatusPaymentRequired, "insufficient_quota", "Insufficient quota", "billing_error", nil, auth.User.ID, auth.Key.Prefix, model.ID, channels[0].Name)
+		s.mu.Unlock()
+		return
+	}
+
+	authUserID := auth.User.ID
+	authKeyID := auth.Key.ID
+	authKeyPrefix := auth.Key.Prefix
+	modelCopy := *model
+	requestID := newID("req")
+	s.mu.Unlock()
+
+	var responseBody gin.H
+	var providerErr *ProviderError
+	var selectedChannel Channel
+	attempts := 0
+	for index, channel := range channels {
+		call := ImageGatewayCall{RequestID: requestID, Model: modelCopy, Channel: channel, Body: body}
+		attempts++
+		responseBody, providerErr = s.callImageProvider(call)
+		if providerErr == nil {
+			selectedChannel = channel
+			s.updateChannelRuntimeHealth(channel.ID, true, "")
+			break
+		}
+		selectedChannel = channel
+		if shouldMarkChannelUnhealthy(providerErr) {
+			s.updateChannelRuntimeHealth(channel.ID, false, providerErr.Message)
+		}
+		if !retryableProviderError(providerErr) || index == len(channels)-1 {
+			break
+		}
+	}
+	if providerErr != nil {
+		s.recordFailedCall(authUserID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, providerErr.Code, attempts, startedAt)
+		writeOpenAIError(c, providerErr.Status, providerErr.Code, providerErr.Message, providerErr.Type, stringPtr("model"))
+		return
+	}
+
+	billingModel = modelWithChannelPricing(modelCopy, selectedChannel)
+	cost := estimateImageGenerationCost(billingModel, body)
+	s.mu.Lock()
+	s.recordSuccessfulImageCallLocked(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, cost, estimateImagePromptTokens(body.Prompt), attempts, startedAt)
+	if idempotencyKey != "" {
+		s.idempotencyCache[idempotencyKey] = CachedResponse{Status: http.StatusOK, Body: responseBody, CreatedAt: now()}
+	}
+	s.mu.Unlock()
+	c.JSON(http.StatusOK, responseBody)
+}
+
 func (s *Server) handleChatCompletion(c *gin.Context, body ChatRequest, startedAt time.Time, idempotencyKey string) {
 	s.handleChatCompletionWithTransform(c, body, startedAt, idempotencyKey, nil)
 }
@@ -2915,6 +3190,48 @@ func (s *Server) recordSuccessfulCallLocked(userID string, keyID string, keyPref
 	s.saveStateLocked()
 }
 
+func (s *Server) recordSuccessfulImageCallLocked(userID string, keyID string, keyPrefix string, modelID string, channelName string, requestID string, cost float64, promptTokens int, attempts int, startedAt time.Time) {
+	user := s.findUser(userID)
+	key := s.findAPIKeyByID(keyID)
+	if user == nil || key == nil {
+		return
+	}
+	user.Balance = round4(user.Balance - cost)
+	if user.Balance < 0 {
+		user.Balance = 0
+	}
+	user.RequestsToday++
+	user.TotalRequests++
+	key.LastUsedAt = now()
+	key.RequestCount++
+
+	s.state.QuotaLedger = append(s.state.QuotaLedger, QuotaEntry{
+		ID:        fmt.Sprintf("quota_%d_%d", time.Now().UnixMilli(), len(s.state.QuotaLedger)+1),
+		UserID:    userID,
+		RequestID: requestID,
+		Model:     modelID,
+		Amount:    -cost,
+		Reason:    "images.generation",
+		CreatedAt: now(),
+	})
+
+	s.state.Logs = append(s.state.Logs, RequestLog{
+		ID:           requestID,
+		UserID:       &userID,
+		APIKeyPrefix: &keyPrefix,
+		Model:        &modelID,
+		Channel:      &channelName,
+		Status:       "success",
+		Cost:         cost,
+		InputTokens:  promptTokens,
+		OutputTokens: 0,
+		Attempts:     attempts,
+		LatencyMS:    time.Since(startedAt).Milliseconds(),
+		CreatedAt:    now(),
+	})
+	s.saveStateLocked()
+}
+
 func (s *Server) recordFailedCall(userID string, keyPrefix string, modelID string, channelName string, requestID string, errorCode string, attempts int, startedAt time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2968,6 +3285,20 @@ func (s *Server) callProvider(call GatewayCall) (gin.H, *ProviderError) {
 	}, nil
 }
 
+func (s *Server) callImageProvider(call ImageGatewayCall) (gin.H, *ProviderError) {
+	if s.shouldUseCompatibleProvider(call.Channel) {
+		return s.callOpenAICompatibleImage(call)
+	}
+	return gin.H{
+		"created": unixNow(),
+		"data": []gin.H{
+			{
+				"b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+			},
+		},
+	}, nil
+}
+
 func (s *Server) callOpenAICompatible(call GatewayCall) (gin.H, *ProviderError) {
 	request, providerErr := s.newOpenAICompatibleRequest(call, false)
 	if providerErr != nil {
@@ -2994,6 +3325,33 @@ func (s *Server) callOpenAICompatible(call GatewayCall) (gin.H, *ProviderError) 
 	}
 	if _, ok := body["model"]; !ok {
 		body["model"] = call.Model.ID
+	}
+	return body, nil
+}
+
+func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *ProviderError) {
+	request, providerErr := s.newOpenAICompatibleImageRequest(call)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	defer response.Body.Close()
+
+	content, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, providerErrorFromUpstream(response.StatusCode, content)
+	}
+
+	var body gin.H
+	if err := json.Unmarshal(content, &body); err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "Upstream returned invalid JSON", Type: "api_error"}
 	}
 	return body, nil
 }
@@ -3117,6 +3475,51 @@ func (s *Server) newOpenAICompatibleRequest(call GatewayCall, stream bool) (*htt
 	}
 
 	endpoint := joinURL(call.Channel.BaseURL, "chat/completions")
+	request, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(encoded))
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	}
+	request.Header.Set("Authorization", "Bearer "+upstreamKey)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Request-ID", call.RequestID)
+	return request, nil
+}
+
+func (s *Server) newOpenAICompatibleImageRequest(call ImageGatewayCall) (*http.Request, *ProviderError) {
+	upstreamKey, err := s.revealSecret(call.Channel.UpstreamAPIKey)
+	if err != nil {
+		return nil, &ProviderError{
+			Status:  http.StatusBadGateway,
+			Code:    "upstream_key_unavailable",
+			Message: err.Error(),
+			Type:    "api_error",
+		}
+	}
+	upstreamKey = strings.TrimSpace(upstreamKey)
+	if upstreamKey == "" {
+		upstreamKey = s.upstreamAPIKey
+	}
+	if upstreamKey == "" {
+		return nil, &ProviderError{
+			Status:  http.StatusBadGateway,
+			Code:    "upstream_not_configured",
+			Message: "Channel upstreamApiKey or UPSTREAM_API_KEY is required when forwarding image generation",
+			Type:    "api_error",
+		}
+	}
+
+	payload := gin.H{}
+	for key, value := range call.Body.Payload {
+		payload[key] = value
+	}
+	payload["model"] = call.Model.ID
+	payload["prompt"] = call.Body.Prompt
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "Failed to encode upstream request", Type: "invalid_request_error"}
+	}
+
+	endpoint := joinURL(call.Channel.BaseURL, "images/generations")
 	request, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(encoded))
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
@@ -3615,6 +4018,112 @@ func removeString(values []string, target string) []string {
 		}
 	}
 	return next
+}
+
+func parseOpenAIAccountImport(payload map[string]interface{}) []ImportedOpenAIAccount {
+	if payload == nil {
+		return nil
+	}
+	if rawAccounts, ok := payload["accounts"].([]interface{}); ok {
+		accounts := []ImportedOpenAIAccount{}
+		for _, raw := range rawAccounts {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			credentials, _ := item["credentials"].(map[string]interface{})
+			codexAuth, _ := item["codex_auth"].(map[string]interface{})
+			tokens, _ := codexAuth["tokens"].(map[string]interface{})
+			account := ImportedOpenAIAccount{
+				Name:         firstNonEmptyString(stringFromMap(item, "name"), stringFromMap(credentials, "name")),
+				Email:        stringFromMap(credentials, "email"),
+				AccessToken:  firstNonEmptyString(stringFromMap(credentials, "access_token"), stringFromMap(tokens, "access_token")),
+				RefreshToken: firstNonEmptyString(stringFromMap(credentials, "refresh_token"), stringFromMap(tokens, "refresh_token")),
+				IDToken:      firstNonEmptyString(stringFromMap(credentials, "id_token"), stringFromMap(tokens, "id_token")),
+				AccountID:    firstNonEmptyString(stringFromMap(credentials, "chatgpt_account_id"), stringFromMap(credentials, "account_id")),
+				UserID:       firstNonEmptyString(stringFromMap(credentials, "chatgpt_user_id"), stringFromMap(credentials, "user_id")),
+				ExpiresAt:    stringFromMap(credentials, "expires_at"),
+				LastRefresh:  stringFromMap(credentials, "last_refresh"),
+				PlanType:     stringFromMap(credentials, "plan_type"),
+				Source:       "sub2api",
+			}
+			if account.Email == "" && strings.Contains(account.Name, "@") {
+				account.Email = account.Name
+			}
+			accounts = append(accounts, account)
+		}
+		return accounts
+	}
+	if stringFromMap(payload, "access_token") != "" || stringFromMap(payload, "refresh_token") != "" || stringFromMap(payload, "id_token") != "" {
+		account := ImportedOpenAIAccount{
+			Name:         stringFromMap(payload, "email"),
+			Email:        stringFromMap(payload, "email"),
+			AccessToken:  stringFromMap(payload, "access_token"),
+			RefreshToken: stringFromMap(payload, "refresh_token"),
+			IDToken:      stringFromMap(payload, "id_token"),
+			AccountID:    stringFromMap(payload, "account_id"),
+			UserID:       firstNonEmptyString(stringFromMap(payload, "chatgpt_user_id"), stringFromMap(payload, "user_id")),
+			ExpiresAt:    firstNonEmptyString(stringFromMap(payload, "expired"), stringFromMap(payload, "expires_at")),
+			LastRefresh:  stringFromMap(payload, "last_refresh"),
+			PlanType:     stringFromMap(payload, "plan_type"),
+			Source:       "cpa",
+		}
+		return []ImportedOpenAIAccount{account}
+	}
+	return nil
+}
+
+func (s *Server) ensureImportedModelLocked(modelID string) {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" || s.findModel(modelID) != nil {
+		return
+	}
+	s.state.Models = append(s.state.Models, Model{
+		ID:          modelID,
+		Name:        modelID,
+		Vendor:      "OpenAI",
+		Aliases:     []string{},
+		Category:    "导入",
+		Description: "Imported OpenAI account model",
+		Price:       "自定义",
+		Context:     "未配置上下文",
+		Status:      "available",
+	})
+}
+
+func stringFromMap(values map[string]interface{}, key string) string {
+	if values == nil {
+		return ""
+	}
+	value, ok := values[key]
+	if !ok {
+		return ""
+	}
+	text, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(text)
+}
+
+func stringSliceFromAny(value interface{}) []string {
+	switch typed := value.(type) {
+	case []string:
+		return cleanAliases(typed)
+	case []interface{}:
+		return cleanAliases(stringSlice(typed))
+	default:
+		return []string{}
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func providerLabel(provider string) string {
@@ -4783,10 +5292,32 @@ func estimateTokens(messages []ChatMessage) int {
 	return tokens
 }
 
+func estimateImagePromptTokens(prompt string) int {
+	characters := len([]rune(prompt))
+	tokens := characters / 4
+	if tokens < 1 {
+		return 1
+	}
+	return tokens
+}
+
 func calculateCallCost(model Model, response gin.H, messages []ChatMessage, stream bool) float64 {
 	promptTokens, completionTokens := callTokenUsage(response, messages, stream)
 	inputRate, outputRate := modelRates(model)
 	cost := (float64(promptTokens)/1000)*inputRate + (float64(completionTokens)/1000)*outputRate
+	if cost > 0 && cost < 0.0001 {
+		cost = 0.0001
+	}
+	return round4(cost)
+}
+
+func estimateImageGenerationCost(model Model, request ImageRequest) float64 {
+	if !model.PricingConfigured {
+		return 0
+	}
+	promptTokens := estimateImagePromptTokens(request.Prompt)
+	inputRate, _ := modelRates(model)
+	cost := (float64(promptTokens) / 1000) * inputRate
 	if cost > 0 && cost < 0.0001 {
 		cost = 0.0001
 	}

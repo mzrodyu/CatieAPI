@@ -1217,6 +1217,86 @@ func TestChannelKeyForwardsWithoutGlobalCompatibleMode(t *testing.T) {
 	}
 }
 
+func TestImageGenerationsForwardToOpenAICompatibleUpstream(t *testing.T) {
+	var upstreamCalled bool
+	var upstreamAuth string
+	var upstreamPath string
+	var upstreamPayload map[string]interface{}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		upstreamAuth = r.Header.Get("Authorization")
+		upstreamPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&upstreamPayload); err != nil {
+			t.Fatalf("decode upstream image request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"b64_json":"image-bytes"}]}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":   "memory",
+		"PROVIDER_MODE": "mock",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-1", Name: "GPT Image", Vendor: "OpenAI", Aliases: []string{"image"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image", Name: "Image Provider", Provider: "openai", BaseURL: upstream.URL + "/v1", UpstreamAPIKey: "channel-image-secret", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-1"},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"image","prompt":"a small moon cat","size":"1024x1024","response_format":"b64_json"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
+	}
+	if !upstreamCalled {
+		t.Fatal("upstream image endpoint was not called")
+	}
+	if upstreamPath != "/v1/images/generations" {
+		t.Fatalf("upstream image path = %s", upstreamPath)
+	}
+	if upstreamAuth != "Bearer channel-image-secret" {
+		t.Fatalf("upstream auth = %s", upstreamAuth)
+	}
+	if upstreamPayload["model"] != "gpt-image-1" || upstreamPayload["prompt"] != "a small moon cat" || upstreamPayload["size"] != "1024x1024" {
+		t.Fatalf("unexpected upstream payload = %#v", upstreamPayload)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"image-bytes"`)) {
+		t.Fatalf("image response was not proxied: %s", response.Body.String())
+	}
+}
+
+func TestImageGenerationsWorkWithoutV1Prefix(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-1", Name: "GPT Image", Vendor: "OpenAI", Aliases: []string{"image"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image", Name: "Image Provider", Provider: "openai", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-1"},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/images/generations", `{"model":"image","prompt":"test image"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("image generation without v1 status = %d body = %s", response.Code, response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json"`)) {
+		t.Fatalf("mock image response missing data: %s", response.Body.String())
+	}
+}
+
 func TestOpenAICompatibleProviderPreservesUpstreamError(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1339,6 +1419,121 @@ func TestChannelUpstreamKeyIsEncryptedAtRestAndUsable(t *testing.T) {
 	}
 	if upstreamAuth != "Bearer "+plainKey {
 		t.Fatalf("upstream auth = %s", upstreamAuth)
+	}
+}
+
+func TestImportCPAJSONCreatesEncryptedOpenAIChannel(t *testing.T) {
+	dataFile := filepath.Join(t.TempDir(), "state.json")
+	accessToken := "cpa-access-token-secret"
+	withEnv(t, map[string]string{
+		"PERSISTENCE": "file",
+		"DATA_FILE":   dataFile,
+		"SECRET_KEY":  "import-secret-key",
+	})
+	router := testRouter(t)
+
+	body := `{
+		"id_token":"cpa-id-token-secret",
+		"access_token":"` + accessToken + `",
+		"refresh_token":"cpa-refresh-token-secret",
+		"account_id":"acc_cpa",
+		"last_refresh":"2026-07-06T00:00:00.000Z",
+		"email":"cpa@example.com",
+		"type":"codex",
+		"expired":"2026-07-06T01:00:00.000Z"
+	}`
+	response := perform(router, http.MethodPost, "/api/channels/import-openai-accounts", body, nil)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("CPA import status = %d body = %s", response.Code, response.Body.String())
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte(accessToken)) || bytes.Contains(response.Body.Bytes(), []byte("cpa-refresh-token-secret")) {
+		t.Fatalf("import response leaked token: %s", response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"imported":1`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"upstreamKeySet":true`)) {
+		t.Fatalf("import response missing summary: %s", response.Body.String())
+	}
+
+	stateContent, err := os.ReadFile(dataFile)
+	if err != nil {
+		t.Fatalf("read state file: %v", err)
+	}
+	if bytes.Contains(stateContent, []byte(accessToken)) {
+		t.Fatal("plain CPA access token was stored")
+	}
+	if !bytes.Contains(stateContent, []byte("enc:v1:")) {
+		t.Fatalf("encrypted token marker missing from state: %s", string(stateContent))
+	}
+}
+
+func TestImportSub2APIJSONCreatesMultipleChannels(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+
+	body := `{
+		"baseUrl":"https://api.openai.com/v1",
+		"models":["gpt-image-2"],
+		"data":{
+			"exported_at":"2026-07-06T00:00:00Z",
+			"accounts":[
+				{
+					"name":"first@example.com",
+					"platform":"openai",
+					"type":"oauth",
+					"credentials":{
+						"access_token":"first-access-token",
+						"refresh_token":"first-refresh-token",
+						"email":"first@example.com",
+						"chatgpt_account_id":"acc_first"
+					}
+				},
+				{
+					"name":"second@example.com",
+					"platform":"openai",
+					"type":"oauth",
+					"credentials":{
+						"email":"second@example.com",
+						"chatgpt_account_id":"acc_second"
+					},
+					"codex_auth":{
+						"tokens":{
+							"access_token":"second-access-token",
+							"refresh_token":"second-refresh-token"
+						}
+					}
+				}
+			],
+			"type":"sub2api-data",
+			"version":1
+		}
+	}`
+	response := perform(router, http.MethodPost, "/api/channels/import-openai-accounts", body, nil)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("Sub2 import status = %d body = %s", response.Code, response.Body.String())
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte("first-access-token")) || bytes.Contains(response.Body.Bytes(), []byte("second-access-token")) {
+		t.Fatalf("Sub2 import response leaked token: %s", response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"imported":2`)) {
+		t.Fatalf("Sub2 import response missing imported count: %s", response.Body.String())
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	imageChannels := 0
+	for _, channel := range server.state.Channels {
+		if channel.Name == "OpenAI Account - first@example.com" || channel.Name == "OpenAI Account - second@example.com" {
+			imageChannels++
+			if !containsString(channel.Models, "gpt-image-2") || channel.UpstreamAPIKey == "" {
+				t.Fatalf("bad imported channel: %#v", channel)
+			}
+		}
+	}
+	if imageChannels != 2 {
+		t.Fatalf("imported channel count = %d", imageChannels)
+	}
+	if server.findModel("gpt-image-2") == nil {
+		t.Fatal("import did not create missing model")
 	}
 }
 
