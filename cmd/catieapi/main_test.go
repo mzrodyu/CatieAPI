@@ -1471,6 +1471,54 @@ func TestImageGenerationsRetryNextOpenAIAccountOnInvalidatedToken(t *testing.T) 
 	}
 }
 
+func TestImageGenerationsReturnPoolUnavailableWhenAllOpenAIAccountsInvalidated(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/images/generations" {
+			t.Fatalf("upstream image path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"code":"upstream_token_invalidated","message":"Your authentication token has been invalidated. Please try signing in again.","param":"model","type":"invalid_request_error"}}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":   "memory",
+		"PROVIDER_MODE": "mock",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-1", Name: "GPT Image", Vendor: "OpenAI", Aliases: []string{"image"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image_pool", Name: "Image Pool", Provider: "openai", BaseURL: upstream.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-1"},
+		OpenAIAccounts: []OpenAIAccount{
+			{ID: "oaiacc_invalidated_one", Email: "invalidated-one@example.com", AccessToken: "invalidated-one-token", Status: "healthy"},
+			{ID: "oaiacc_invalidated_two", Email: "invalidated-two@example.com", AccessToken: "invalidated-two-token", Status: "healthy"},
+		},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"image","prompt":"all invalidated"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`upstream_accounts_unavailable`)) {
+		t.Fatalf("expected pool unavailable error: %s", response.Body.String())
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel := server.findChannel("chn_image_pool")
+	if channel.OpenAIAccounts[0].Status != "invalid" || channel.OpenAIAccounts[1].Status != "invalid" {
+		t.Fatalf("invalidated accounts were not marked invalid: %#v", channel.OpenAIAccounts)
+	}
+}
+
 func TestImageGenerationsWorkWithoutV1Prefix(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)

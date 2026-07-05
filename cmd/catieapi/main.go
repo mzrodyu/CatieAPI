@@ -3475,7 +3475,10 @@ func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *Provi
 		if len(accounts) == 0 {
 			return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "No active OpenAI accounts are available for image generation", Type: "api_error"}
 		}
+		attemptedAccounts := 0
+		invalidatedAccounts := 0
 		for _, account := range accounts {
+			attemptedAccounts++
 			upstreamKey, err := s.revealSecret(account.AccessToken)
 			if err != nil {
 				lastErr = &ProviderError{Status: http.StatusBadGateway, Code: "upstream_key_unavailable", Message: err.Error(), Type: "api_error"}
@@ -3487,10 +3490,19 @@ func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *Provi
 			}
 			lastErr = providerErr
 			if shouldInvalidateOpenAIAccountForImage(providerErr) {
+				invalidatedAccounts++
 				s.markOpenAIAccountInvalid(call.Channel.ID, account.ID, providerErr.Message)
 				continue
 			}
 			return nil, providerErr
+		}
+		if attemptedAccounts > 0 && invalidatedAccounts == attemptedAccounts {
+			return nil, &ProviderError{
+				Status:  http.StatusBadGateway,
+				Code:    "upstream_accounts_unavailable",
+				Message: "All active OpenAI accounts for image generation are invalid, expired, missing image scope, or billing-disabled. Re-import or sign in accounts again, then run batch check.",
+				Type:    "api_error",
+			}
 		}
 		if lastErr != nil {
 			return nil, lastErr
@@ -5423,6 +5435,7 @@ func retryableProviderError(providerErr *ProviderError) bool {
 	}
 	if allowedString(providerErr.Code,
 		"stream_not_supported",
+		"upstream_accounts_unavailable",
 		"upstream_unreachable",
 		"upstream_read_error",
 		"upstream_invalid_json",
@@ -5452,6 +5465,7 @@ func shouldMarkChannelUnhealthy(providerErr *ProviderError) bool {
 	}
 	return allowedString(providerErr.Code,
 		"upstream_authentication_error",
+		"upstream_accounts_unavailable",
 		"upstream_invalid_api_key",
 		"upstream_token_invalidated",
 		"upstream_key_unavailable",
