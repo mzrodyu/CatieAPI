@@ -31,6 +31,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+const defaultUpstreamTimeoutSeconds = 600
+
 type AppState struct {
 	Users       []User       `json:"users"`
 	APIKeys     []APIKey     `json:"apiKeys"`
@@ -494,8 +496,8 @@ func NewServer() *Server {
 		requestLimitPerMinute: envInt("REQUEST_LIMIT_PER_MINUTE", 60),
 		providerMode:          env("PROVIDER_MODE", "mock"),
 		upstreamAPIKey:        env("UPSTREAM_API_KEY", ""),
-		upstreamTimeout:       time.Duration(envInt("UPSTREAM_TIMEOUT_SECONDS", 60)) * time.Second,
-		httpClient:            &http.Client{Timeout: time.Duration(envInt("UPSTREAM_TIMEOUT_SECONDS", 60)) * time.Second},
+		upstreamTimeout:       time.Duration(envInt("UPSTREAM_TIMEOUT_SECONDS", defaultUpstreamTimeoutSeconds)) * time.Second,
+		httpClient:            &http.Client{Timeout: time.Duration(envInt("UPSTREAM_TIMEOUT_SECONDS", defaultUpstreamTimeoutSeconds)) * time.Second},
 		chatGPTAPIBase:        env("CHATGPT_API_BASE", "https://chatgpt.com/backend-api"),
 		openAIAuthBase:        env("OPENAI_AUTH_BASE", "https://auth.openai.com"),
 		discordClientID:       env("DISCORD_CLIENT_ID", ""),

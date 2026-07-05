@@ -171,10 +171,10 @@ PROVIDER_MODE=mock
 ```text
 PROVIDER_MODE=compatible
 UPSTREAM_API_KEY=<upstream_provider_key>
-UPSTREAM_TIMEOUT_SECONDS=60
+UPSTREAM_TIMEOUT_SECONDS=600
 ```
 
-也可以给单个渠道设置 `upstreamApiKey`。渠道级 Key 优先于全局 `UPSTREAM_API_KEY`，管理 API 响应只返回 `upstreamKeySet`，不会返回明文 Key。
+也可以给单个渠道设置 `upstreamApiKey`。渠道级 Key 优先于全局 `UPSTREAM_API_KEY`，管理 API 响应只返回 `upstreamKeySet`，不会返回明文 Key。`UPSTREAM_TIMEOUT_SECONDS` 可按部署环境改成更大的秒数。
 
 建议生产环境设置：
 

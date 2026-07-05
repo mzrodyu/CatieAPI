@@ -75,7 +75,7 @@ Discord 变量说明：
 ```text
 PROVIDER_MODE=compatible
 UPSTREAM_API_KEY=你的上游供应商Key
-UPSTREAM_TIMEOUT_SECONDS=60
+UPSTREAM_TIMEOUT_SECONDS=600
 ```
 
 上游变量说明：
@@ -84,7 +84,7 @@ UPSTREAM_TIMEOUT_SECONDS=60
 | --- | --- |
 | `PROVIDER_MODE` | 上游模式。`mock` 为本地模拟，`compatible` 为强制转发到 OpenAI-compatible 上游。后台渠道填写了 Base URL 和上游 Key 时，即使这里仍是 `mock`，也会优先走真实上游。 |
 | `UPSTREAM_API_KEY` | 全局兜底上游 Key。更推荐在后台渠道里配置渠道级 Key。 |
-| `UPSTREAM_TIMEOUT_SECONDS` | 请求上游的超时时间，单位秒。 |
+| `UPSTREAM_TIMEOUT_SECONDS` | 请求上游的超时时间，单位秒。默认 600，可按环境继续调大；如果前面有 1Panel/Nginx/Cloudflare 等反代，也要同步调高反代超时。 |
 
 渠道级上游 Key 仍建议在后台渠道管理里配置；全局 `UPSTREAM_API_KEY` 只作为兜底。
 
