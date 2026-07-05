@@ -46,6 +46,7 @@ type Channel = {
   provider: string;
   baseUrl: string;
   status: string;
+  streamMode: "auto" | "real" | "fake" | "disabled";
   priority: number;
   weight: number;
   models: string[];
@@ -169,7 +170,8 @@ function arrayOf<T>(value: T[] | null | undefined): T[] {
 }
 
 function normalizeChannel(channel: Channel): Channel {
-  return { ...channel, models: arrayOf(channel.models) };
+  const streamMode = streamModeOptions.some((option) => option.value === channel.streamMode) ? channel.streamMode : "auto";
+  return { ...channel, streamMode, models: arrayOf(channel.models) };
 }
 
 function normalizeModel(model: ModelItem): ModelItem {
@@ -274,6 +276,13 @@ const providerOptions = [
   { value: "moonshot", label: "Moonshot" },
   { value: "compatible", label: "OpenAI Compatible" }
 ];
+
+const streamModeOptions = [
+  { value: "auto", label: "自动", description: "按请求参数处理" },
+  { value: "real", label: "真流", description: "直连上游 SSE" },
+  { value: "fake", label: "假流", description: "非流转 SSE" },
+  { value: "disabled", label: "禁用流", description: "流式请求跳过" }
+] as const;
 
 function formatDate(value: string) {
   if (!value) return "未使用";
@@ -2223,6 +2232,7 @@ function ChannelEditor({
 }) {
   const [name, setName] = useState(channel.name);
   const [provider, setProvider] = useState(channel.provider);
+  const [streamMode, setStreamMode] = useState<Channel["streamMode"]>(channel.streamMode || "auto");
   const [baseUrl, setBaseUrl] = useState(channel.baseUrl);
   const [models, setModels] = useState(arrayOf(channel.models).join(", "));
   const [inputPrice, setInputPrice] = useState(String(channel.inputPricePer1K || 0));
@@ -2233,17 +2243,19 @@ function ChannelEditor({
   useEffect(() => {
     setName(channel.name);
     setProvider(channel.provider);
+    setStreamMode(channel.streamMode || "auto");
     setBaseUrl(channel.baseUrl);
     setModels(arrayOf(channel.models).join(", "));
     setInputPrice(String(channel.inputPricePer1K || 0));
     setOutputPrice(String(channel.outputPricePer1K || 0));
     setUpstreamApiKey("");
-  }, [channel.id, channel.name, channel.provider, channel.baseUrl, channel.models, channel.inputPricePer1K, channel.outputPricePer1K]);
+  }, [channel.id, channel.name, channel.provider, channel.streamMode, channel.baseUrl, channel.models, channel.inputPricePer1K, channel.outputPricePer1K]);
 
   async function save() {
     const patch: ChannelPatch = {
       name: name.trim() || channel.name,
       provider,
+      streamMode,
       baseUrl,
       inputPricePer1K: Number(inputPrice) || 0,
       outputPricePer1K: Number(outputPrice) || 0,
@@ -2301,6 +2313,15 @@ function ChannelEditor({
         {providerOptions.map((option) => (
           <button key={option.value} type="button" className={provider === option.value ? "selected" : ""} onClick={() => setProvider(option.value)}>
             {option.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="stream-mode-grid" role="radiogroup" aria-label="流式处理">
+        {streamModeOptions.map((option) => (
+          <button key={option.value} type="button" className={streamMode === option.value ? "selected" : ""} onClick={() => setStreamMode(option.value)}>
+            <strong>{option.label}</strong>
+            <span>{option.description}</span>
           </button>
         ))}
       </div>

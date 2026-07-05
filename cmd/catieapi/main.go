@@ -147,6 +147,7 @@ type Channel struct {
 	BaseURL           string   `json:"baseUrl"`
 	UpstreamAPIKey    string   `json:"upstreamApiKey,omitempty"`
 	Status            string   `json:"status"`
+	StreamMode        string   `json:"streamMode"`
 	Priority          int      `json:"priority"`
 	Weight            int      `json:"weight"`
 	Models            []string `json:"models"`
@@ -164,6 +165,7 @@ type PublicChannel struct {
 	BaseURL           string   `json:"baseUrl"`
 	UpstreamKeySet    bool     `json:"upstreamKeySet"`
 	Status            string   `json:"status"`
+	StreamMode        string   `json:"streamMode"`
 	Priority          int      `json:"priority"`
 	Weight            int      `json:"weight"`
 	Models            []string `json:"models"`
@@ -2021,6 +2023,7 @@ func (s *Server) createChannel(c *gin.Context) {
 		Provider         string   `json:"provider"`
 		BaseURL          string   `json:"baseUrl"`
 		UpstreamAPIKey   string   `json:"upstreamApiKey"`
+		StreamMode       string   `json:"streamMode"`
 		Priority         int      `json:"priority"`
 		Weight           int      `json:"weight"`
 		Models           []string `json:"models"`
@@ -2031,6 +2034,11 @@ func (s *Server) createChannel(c *gin.Context) {
 	body.Name = strings.TrimSpace(body.Name)
 	body.Provider = strings.TrimSpace(body.Provider)
 	body.BaseURL = strings.TrimSpace(body.BaseURL)
+	body.StreamMode = normalizeStreamMode(body.StreamMode)
+	if body.StreamMode == "" {
+		validationError(c, "Invalid stream mode")
+		return
+	}
 	if body.Name == "" {
 		body.Name = "新渠道"
 	}
@@ -2068,6 +2076,7 @@ func (s *Server) createChannel(c *gin.Context) {
 		BaseURL:           strings.TrimRight(body.BaseURL, "/"),
 		UpstreamAPIKey:    protectedKey,
 		Status:            "disabled",
+		StreamMode:        body.StreamMode,
 		Priority:          body.Priority,
 		Weight:            body.Weight,
 		Models:            append([]string{}, body.Models...),
@@ -2105,6 +2114,14 @@ func (s *Server) updateChannel(c *gin.Context) {
 			return
 		}
 		channel.Status = value
+	}
+	if value, ok := patch["streamMode"].(string); ok {
+		streamMode := normalizeStreamMode(value)
+		if streamMode == "" {
+			validationError(c, "Invalid stream mode")
+			return
+		}
+		channel.StreamMode = streamMode
 	}
 	if value, ok := patch["name"].(string); ok && strings.TrimSpace(value) != "" {
 		channel.Name = strings.TrimSpace(value)
@@ -2753,10 +2770,32 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 	if body.Stream {
 		var selectedChannel Channel
 		var providerErr *ProviderError
+		var responseBody gin.H
+		streamMode := ""
 		for index, channel := range channels {
 			selectedChannel = channel
 			call := GatewayCall{RequestID: requestID, Model: modelCopy, Channel: channel, Body: body}
-			providerErr = s.writeProviderStream(c, call)
+			streamMode = normalizeStreamMode(channel.StreamMode)
+			if streamMode == "disabled" {
+				providerErr = &ProviderError{Status: http.StatusBadRequest, Code: "stream_not_supported", Message: "Channel streaming is disabled", Type: "invalid_request_error"}
+			} else if streamMode == "fake" {
+				nonStreamCall := call
+				nonStreamCall.Body.Stream = false
+				if nonStreamCall.Body.Payload != nil {
+					payload := gin.H{}
+					for key, value := range nonStreamCall.Body.Payload {
+						payload[key] = value
+					}
+					payload["stream"] = false
+					nonStreamCall.Body.Payload = payload
+				}
+				responseBody, providerErr = s.callProvider(nonStreamCall)
+				if providerErr == nil {
+					s.writeFakeProviderStream(c, call, responseBody)
+				}
+			} else {
+				providerErr = s.writeProviderStream(c, call)
+			}
 			if providerErr == nil {
 				selectedChannel = channel
 				s.updateChannelRuntimeHealth(channel.ID, true, "")
@@ -2773,8 +2812,8 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 			return
 		}
 		billingModel = modelWithChannelPricing(modelCopy, selectedChannel)
-		inputTokens, outputTokens := callTokenUsage(nil, body.Messages, true)
-		streamCost := calculateCallCost(billingModel, nil, body.Messages, true)
+		inputTokens, outputTokens := callTokenUsage(responseBody, body.Messages, streamMode != "fake")
+		streamCost := calculateCallCost(billingModel, responseBody, body.Messages, streamMode != "fake")
 		s.recordSuccessfulCall(authUserID, authKeyID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, streamCost, inputTokens, outputTokens, startedAt)
 		return
 	}
@@ -3119,6 +3158,76 @@ func (s *Server) writeProviderStream(c *gin.Context, call GatewayCall) *Provider
 	_, _ = c.Writer.WriteString("data: [DONE]\n\n")
 	c.Writer.Flush()
 	return nil
+}
+
+func (s *Server) writeFakeProviderStream(c *gin.Context, call GatewayCall, response gin.H) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+
+	chunkID, _ := response["id"].(string)
+	if chunkID == "" {
+		chunkID = newID("chatcmpl")
+	}
+	text := assistantTextFromChatCompletion(response)
+	if strings.TrimSpace(text) == "" {
+		text = " "
+	}
+	parts := splitFakeStreamText(text)
+	for index, part := range parts {
+		delta := gin.H{"content": part}
+		if index == 0 {
+			delta["role"] = "assistant"
+		}
+		chunk := gin.H{
+			"id":      chunkID,
+			"object":  "chat.completion.chunk",
+			"created": unixNow(),
+			"model":   call.Model.ID,
+			"choices": []gin.H{{
+				"index":         0,
+				"delta":         delta,
+				"finish_reason": nil,
+			}},
+		}
+		writeSSEChunk(c, chunk)
+	}
+	writeSSEChunk(c, gin.H{
+		"id":      chunkID,
+		"object":  "chat.completion.chunk",
+		"created": unixNow(),
+		"model":   call.Model.ID,
+		"choices": []gin.H{{
+			"index":         0,
+			"delta":         gin.H{},
+			"finish_reason": "stop",
+		}},
+	})
+	_, _ = c.Writer.WriteString("data: [DONE]\n\n")
+	c.Writer.Flush()
+}
+
+func writeSSEChunk(c *gin.Context, chunk gin.H) {
+	encoded, _ := json.Marshal(chunk)
+	_, _ = c.Writer.WriteString("data: " + string(encoded) + "\n\n")
+	c.Writer.Flush()
+}
+
+func splitFakeStreamText(text string) []string {
+	runes := []rune(text)
+	if len(runes) == 0 {
+		return []string{" "}
+	}
+	size := 24
+	parts := []string{}
+	for start := 0; start < len(runes); start += size {
+		end := start + size
+		if end > len(runes) {
+			end = len(runes)
+		}
+		parts = append(parts, string(runes[start:end]))
+	}
+	return parts
 }
 
 func (s *Server) openAIError(c *gin.Context, status int, code string, message string, errorType string, param *string) {
@@ -3989,6 +4098,7 @@ func retryableProviderError(providerErr *ProviderError) bool {
 		return true
 	}
 	return allowedString(providerErr.Code,
+		"stream_not_supported",
 		"upstream_unreachable",
 		"upstream_read_error",
 		"upstream_invalid_json",
@@ -4908,6 +5018,7 @@ func publicChannel(channel Channel) PublicChannel {
 		BaseURL:           channel.BaseURL,
 		UpstreamKeySet:    strings.TrimSpace(channel.UpstreamAPIKey) != "",
 		Status:            channel.Status,
+		StreamMode:        normalizeStreamMode(channel.StreamMode),
 		Priority:          channel.Priority,
 		Weight:            channel.Weight,
 		Models:            append([]string{}, channel.Models...),
@@ -4916,6 +5027,21 @@ func publicChannel(channel Channel) PublicChannel {
 		PricingConfigured: channel.PricingConfigured,
 		LastCheckedAt:     channel.LastCheckedAt,
 		LastError:         channel.LastError,
+	}
+}
+
+func normalizeStreamMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "auto":
+		return "auto"
+	case "real", "real_stream", "stream":
+		return "real"
+	case "fake", "fake_stream":
+		return "fake"
+	case "disabled", "no_stream", "non_stream":
+		return "disabled"
+	default:
+		return ""
 	}
 }
 

@@ -1449,6 +1449,43 @@ button.table-row:hover {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 30%, transparent);
 }
 
+.stream-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.stream-mode-grid button {
+  display: grid;
+  gap: 3px;
+  min-height: 58px;
+  padding: 9px 11px;
+  color: var(--muted);
+  text-align: left;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  cursor: pointer;
+}
+
+.stream-mode-grid button strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.stream-mode-grid button span {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stream-mode-grid button.selected {
+  background: var(--surface-solid);
+  border-color: color-mix(in srgb, var(--blue) 42%, var(--hairline));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 30%, transparent);
+}
+
 .channel-form-grid {
   display: grid;
   grid-template-columns: 1.4fr 0.5fr 0.7fr;
@@ -2828,6 +2865,10 @@ button.table-row:hover {
   .user-summary-strip,
   .channel-form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .stream-mode-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .bulk-action-bar {
