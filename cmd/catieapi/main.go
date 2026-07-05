@@ -3516,8 +3516,58 @@ func (s *Server) checkOpenAIAccountToken(channel Channel, accessToken string) er
 	if strings.TrimSpace(accessToken) == "" {
 		return fmt.Errorf("missing access_token")
 	}
-	_, err := s.fetchUpstreamModelIDs(channel, accessToken)
-	return err
+	if strings.TrimSpace(channel.BaseURL) == "" {
+		return fmt.Errorf("请先填写渠道 Base URL")
+	}
+	modelID := "gpt-image-1"
+	for _, candidate := range channel.Models {
+		if strings.Contains(strings.ToLower(candidate), "image") {
+			modelID = strings.TrimSpace(candidate)
+			break
+		}
+	}
+	payload := gin.H{
+		"model":  modelID,
+		"prompt": "health check",
+		"n":      1,
+		"size":   "1024x1024",
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequest(http.MethodPost, joinURL(channel.BaseURL, "images/generations"), bytes.NewReader(encoded))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return nil
+	}
+	defer response.Body.Close()
+	content, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if response.StatusCode == http.StatusPaymentRequired || upstreamBillingError(content) {
+		providerErr := providerErrorFromUpstream(response.StatusCode, content)
+		return fmt.Errorf("%s", providerErr.Message)
+	}
+	return nil
+}
+
+func upstreamBillingError(content []byte) bool {
+	var payload struct {
+		Error struct {
+			Code interface{} `json:"code"`
+			Type string      `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(content, &payload); err != nil {
+		return false
+	}
+	code := strings.ToLower(completionPrompt(payload.Error.Code))
+	errorType := strings.ToLower(strings.TrimSpace(payload.Error.Type))
+	return strings.Contains(code, "billing") || strings.Contains(errorType, "billing")
 }
 
 func (s *Server) streamOpenAICompatible(c *gin.Context, call GatewayCall) *ProviderError {

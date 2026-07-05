@@ -1641,16 +1641,21 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	var authHeaders []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
-		if r.URL.Path != "/v1/models" {
+		if r.URL.Path != "/v1/images/generations" {
 			t.Fatalf("upstream path = %s", r.URL.Path)
 		}
-		if strings.Contains(r.Header.Get("Authorization"), "bad-token") {
+		if strings.Contains(r.Header.Get("Authorization"), "billing-token") {
+			w.WriteHeader(http.StatusPaymentRequired)
+			_, _ = w.Write([]byte(`{"error":{"code":"billing_not_active","message":"billing inactive","type":"billing_not_active"}}`))
+			return
+		}
+		if strings.Contains(r.Header.Get("Authorization"), "auth-error-token") {
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":{"message":"bad token"}}`))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-image-2"}]}`))
+		_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"url":"https://example.test/image.png"}]}`))
 	}))
 	defer upstream.Close()
 
@@ -1660,9 +1665,11 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	server.mu.Lock()
 	channel := server.findChannel("chn_1002")
 	channel.BaseURL = upstream.URL + "/v1"
+	channel.Models = []string{"gpt-image-2"}
 	channel.OpenAIAccounts = []OpenAIAccount{
 		{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "unchecked"},
-		{ID: "oaiacc_bad", Email: "bad@example.com", AccessToken: "bad-token", Status: "unchecked"},
+		{ID: "oaiacc_auth_error", Email: "auth-error@example.com", AccessToken: "auth-error-token", Status: "unchecked"},
+		{ID: "oaiacc_billing", Email: "billing@example.com", AccessToken: "billing-token", Status: "unchecked"},
 	}
 	server.mu.Unlock()
 
@@ -1670,17 +1677,17 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("check accounts status = %d body = %s", response.Code, response.Body.String())
 	}
-	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":2`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":1`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":1`)) {
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":3`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":2`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":1`)) {
 		t.Fatalf("check response missing summary: %s", response.Body.String())
 	}
-	if len(authHeaders) != 2 {
+	if len(authHeaders) != 3 {
 		t.Fatalf("upstream auth request count = %d", len(authHeaders))
 	}
 
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	channel = server.findChannel("chn_1002")
-	if channel.OpenAIAccounts[0].Status != "healthy" || channel.OpenAIAccounts[1].Status != "invalid" {
+	if channel.OpenAIAccounts[0].Status != "healthy" || channel.OpenAIAccounts[1].Status != "healthy" || channel.OpenAIAccounts[2].Status != "invalid" {
 		t.Fatalf("account statuses = %#v", channel.OpenAIAccounts)
 	}
 }
