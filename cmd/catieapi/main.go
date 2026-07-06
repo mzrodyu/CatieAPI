@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"mime/multipart"
 	"net/http"
 	"net/mail"
 	"net/url"
@@ -449,6 +450,7 @@ type ImageGatewayCall struct {
 	Model     Model
 	Channel   Channel
 	Body      ImageRequest
+	Operation string
 }
 
 type DiscordTokenResponse struct {
@@ -608,6 +610,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	router.POST("/v1/responses", s.responses)
 	router.POST("/v1/embeddings", s.embeddings)
 	router.POST("/v1/images/generations", s.imageGenerations)
+	router.POST("/v1/images/edits", s.imageEdits)
 	router.GET("/models", s.openAIModels)
 	router.GET("/models/:id", s.openAIModel)
 	router.POST("/chat/completions", s.chatCompletions)
@@ -615,6 +618,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	router.POST("/responses", s.responses)
 	router.POST("/embeddings", s.embeddings)
 	router.POST("/images/generations", s.imageGenerations)
+	router.POST("/images/edits", s.imageEdits)
 
 	router.NoRoute(func(c *gin.Context) {
 		if s.serveStatic(c) {
@@ -3093,10 +3097,141 @@ func (s *Server) imageGenerations(c *gin.Context) {
 		s.openAIError(c, http.StatusBadRequest, "invalid_json", "Request body must be valid JSON", "invalid_request_error", nil)
 		return
 	}
-	s.handleImageGeneration(c, body, startedAt, idempotencyKey)
+	s.handleImageGeneration(c, body, startedAt, idempotencyKey, "generate")
 }
 
-func (s *Server) handleImageGeneration(c *gin.Context, body ImageRequest, startedAt time.Time, idempotencyKey string) {
+func (s *Server) imageEdits(c *gin.Context) {
+	startedAt := time.Now()
+	idempotencyKey := c.GetHeader("Idempotency-Key")
+
+	s.mu.Lock()
+	if idempotencyKey != "" {
+		if cached, ok := s.idempotencyCache[idempotencyKey]; ok {
+			s.mu.Unlock()
+			c.JSON(cached.Status, cached.Body)
+			return
+		}
+	}
+	s.mu.Unlock()
+
+	body, providerErr := imageEditRequestFromContext(c)
+	if providerErr != nil {
+		writeOpenAIError(c, providerErr.Status, providerErr.Code, providerErr.Message, providerErr.Type, nil)
+		return
+	}
+	s.handleImageGeneration(c, body, startedAt, idempotencyKey, "edit")
+}
+
+func imageEditRequestFromContext(c *gin.Context) (ImageRequest, *ProviderError) {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Type"))), "multipart/form-data") {
+		return imageEditMultipartRequestFromContext(c)
+	}
+	var body ImageRequest
+	if err := c.ShouldBindJSON(&body); err != nil {
+		return ImageRequest{}, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_json", Message: "Request body must be valid JSON", Type: "invalid_request_error"}
+	}
+	if body.Payload == nil {
+		body.Payload = map[string]interface{}{}
+	}
+	if len(imageURLsFromPayload(body.Payload)) == 0 {
+		return ImageRequest{}, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_image", Message: "image input is required", Type: "invalid_request_error"}
+	}
+	return body, nil
+}
+
+func imageEditMultipartRequestFromContext(c *gin.Context) (ImageRequest, *ProviderError) {
+	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
+		return ImageRequest{}, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_multipart", Message: "Invalid multipart body: " + err.Error(), Type: "invalid_request_error"}
+	}
+	form := c.Request.MultipartForm
+	if form == nil {
+		return ImageRequest{}, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_multipart", Message: "Multipart body is required", Type: "invalid_request_error"}
+	}
+
+	payload := map[string]interface{}{}
+	for key, values := range form.Value {
+		if len(values) == 1 {
+			payload[key] = values[0]
+			continue
+		}
+		items := make([]interface{}, 0, len(values))
+		for _, value := range values {
+			items = append(items, value)
+		}
+		payload[key] = items
+	}
+
+	images := []interface{}{}
+	for field, files := range form.File {
+		if field != "image" && !strings.HasPrefix(field, "image[") {
+			continue
+		}
+		for _, fileHeader := range files {
+			dataURL, err := multipartImageFileToDataURL(fileHeader)
+			if err != nil {
+				return ImageRequest{}, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_image", Message: err.Error(), Type: "invalid_request_error"}
+			}
+			images = append(images, gin.H{"image_url": dataURL})
+		}
+	}
+	if len(images) == 0 {
+		return ImageRequest{}, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_image", Message: "image input is required", Type: "invalid_request_error"}
+	}
+	payload["images"] = images
+
+	if files := form.File["mask"]; len(files) > 0 {
+		dataURL, err := multipartImageFileToDataURL(files[0])
+		if err != nil {
+			return ImageRequest{}, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_image", Message: err.Error(), Type: "invalid_request_error"}
+		}
+		payload["mask"] = gin.H{"image_url": dataURL}
+	}
+
+	return ImageRequest{
+		Model:   strings.TrimSpace(multipartFormFirstValue(form, "model")),
+		Prompt:  strings.TrimSpace(multipartFormFirstValue(form, "prompt")),
+		Payload: payload,
+	}, nil
+}
+
+func multipartFormFirstValue(form *multipart.Form, key string) string {
+	if form == nil {
+		return ""
+	}
+	values := form.Value[key]
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func multipartImageFileToDataURL(fileHeader *multipart.FileHeader) (string, error) {
+	if fileHeader == nil {
+		return "", fmt.Errorf("image file is required")
+	}
+	file, err := fileHeader.Open()
+	if err != nil {
+		return "", fmt.Errorf("open image file: %w", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 20<<20))
+	if err != nil {
+		return "", fmt.Errorf("read image file: %w", err)
+	}
+	if len(data) == 0 {
+		return "", fmt.Errorf("image file is empty")
+	}
+	contentType := strings.TrimSpace(fileHeader.Header.Get("Content-Type"))
+	if contentType == "" || strings.EqualFold(contentType, "application/octet-stream") {
+		contentType = http.DetectContentType(data)
+	}
+	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
+		return "", fmt.Errorf("image file must be an image")
+	}
+	return "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+}
+
+func (s *Server) handleImageGeneration(c *gin.Context, body ImageRequest, startedAt time.Time, idempotencyKey string, operation string) {
 	s.mu.Lock()
 
 	auth := s.findUserByAPIKeyLocked(apiTokenFromRequest(c))
@@ -3161,7 +3296,7 @@ func (s *Server) handleImageGeneration(c *gin.Context, body ImageRequest, starte
 	var selectedChannel Channel
 	attempts := 0
 	for index, channel := range channels {
-		call := ImageGatewayCall{RequestID: requestID, Model: modelCopy, Channel: channel, Body: body}
+		call := ImageGatewayCall{RequestID: requestID, Model: modelCopy, Channel: channel, Body: body, Operation: operation}
 		attempts++
 		responseBody, providerErr = s.callImageProvider(call)
 		if providerErr == nil {
@@ -4224,13 +4359,14 @@ func buildChatGPTCodexImagePayload(call ImageGatewayCall, mainModel string) ([]b
 	if mainModel == "" {
 		mainModel = chatGPTCodexImageModel
 	}
+	operation := normalizeImageOperation(call.Operation)
 	tool := gin.H{
 		"type":          "image_generation",
-		"action":        "generate",
+		"action":        operation,
 		"model":         call.Model.ID,
 		"output_format": "png",
 	}
-	for _, key := range []string{"size", "quality", "background", "output_format", "moderation", "style"} {
+	for _, key := range []string{"size", "quality", "background", "output_format", "moderation", "style", "input_fidelity"} {
 		if value, ok := call.Body.Payload[key]; ok && strings.TrimSpace(completionPrompt(value)) != "" {
 			tool[key] = value
 		}
@@ -4240,7 +4376,26 @@ func buildChatGPTCodexImagePayload(call ImageGatewayCall, mainModel string) ([]b
 			tool[key] = value
 		}
 	}
+	if operation == "edit" {
+		if value, ok := call.Body.Payload["n"]; ok {
+			tool["n"] = value
+		}
+	}
+	content := []gin.H{{"type": "input_text", "text": call.Body.Prompt}}
+	if operation == "edit" {
+		images := imageURLsFromPayload(call.Body.Payload)
+		if len(images) == 0 {
+			return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_image", Message: "image input is required", Type: "invalid_request_error"}
+		}
+		for _, imageURL := range images {
+			content = append(content, gin.H{"type": "input_image", "image_url": imageURL})
+		}
+		if mask := imageURLFromValue(call.Body.Payload["mask"]); mask != "" {
+			tool["input_image_mask"] = gin.H{"image_url": mask}
+		}
+	}
 	payload := gin.H{
+		"instructions":        "",
 		"model":               mainModel,
 		"stream":              true,
 		"store":               false,
@@ -4249,13 +4404,114 @@ func buildChatGPTCodexImagePayload(call ImageGatewayCall, mainModel string) ([]b
 		"include":             []string{"reasoning.encrypted_content"},
 		"tool_choice":         gin.H{"type": "image_generation"},
 		"tools":               []gin.H{tool},
-		"input":               []gin.H{{"type": "message", "role": "user", "content": []gin.H{{"type": "input_text", "text": call.Body.Prompt}}}},
+		"input":               []gin.H{{"type": "message", "role": "user", "content": content}},
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "Failed to encode upstream request", Type: "invalid_request_error"}
 	}
 	return encoded, nil
+}
+
+func normalizeImageOperation(operation string) string {
+	if strings.EqualFold(strings.TrimSpace(operation), "edit") {
+		return "edit"
+	}
+	return "generate"
+}
+
+func imageURLsFromPayload(payload map[string]interface{}) []string {
+	if payload == nil {
+		return nil
+	}
+	urls := []string{}
+	seen := map[string]bool{}
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			return
+		}
+		seen[value] = true
+		urls = append(urls, value)
+	}
+	collectImageURLs(payload["images"], add)
+	collectImageURLs(payload["image"], add)
+	return urls
+}
+
+func collectImageURLs(value interface{}, add func(string)) {
+	switch typed := value.(type) {
+	case nil:
+		return
+	case string:
+		add(typed)
+	case []interface{}:
+		for _, item := range typed {
+			collectImageURLs(item, add)
+		}
+	case []string:
+		for _, item := range typed {
+			add(item)
+		}
+	case []gin.H:
+		for _, item := range typed {
+			collectImageURLs(item, add)
+		}
+	case []map[string]interface{}:
+		for _, item := range typed {
+			collectImageURLs(item, add)
+		}
+	case gin.H:
+		add(imageURLFromGinH(typed))
+	case map[string]interface{}:
+		add(imageURLFromMap(typed))
+	case map[string]string:
+		add(firstNonEmptyString(typed["image_url"], typed["url"], typed["b64_json"]))
+	}
+}
+
+func imageURLFromValue(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case gin.H:
+		return imageURLFromGinH(typed)
+	case map[string]interface{}:
+		return imageURLFromMap(typed)
+	case map[string]string:
+		return strings.TrimSpace(firstNonEmptyString(typed["image_url"], typed["url"], typed["b64_json"]))
+	default:
+		return ""
+	}
+}
+
+func imageURLFromGinH(value gin.H) string {
+	raw := map[string]interface{}{}
+	for key, item := range value {
+		raw[key] = item
+	}
+	return imageURLFromMap(raw)
+}
+
+func imageURLFromMap(value map[string]interface{}) string {
+	for _, key := range []string{"image_url", "url", "b64_json"} {
+		raw, ok := value[key]
+		if !ok {
+			continue
+		}
+		if text := imageURLFromValue(raw); text != "" {
+			if key == "b64_json" && !strings.HasPrefix(strings.ToLower(text), "data:") {
+				return "data:image/png;base64," + text
+			}
+			return text
+		}
+		if nested, ok := raw.(map[string]interface{}); ok {
+			if text := imageURLFromMap(nested); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
 }
 
 func buildChatGPTCodexDirectImagePayload(call ImageGatewayCall, model string) ([]byte, *ProviderError) {
@@ -5569,7 +5825,11 @@ func (s *Server) newOpenAICompatibleImageRequestWithKey(call ImageGatewayCall, u
 		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "Failed to encode upstream request", Type: "invalid_request_error"}
 	}
 
-	endpoint := joinURL(call.Channel.BaseURL, "images/generations")
+	endpointPath := "images/generations"
+	if normalizeImageOperation(call.Operation) == "edit" {
+		endpointPath = "images/edits"
+	}
+	endpoint := joinURL(call.Channel.BaseURL, endpointPath)
 	request, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(encoded))
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}

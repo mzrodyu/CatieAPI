@@ -1596,6 +1596,110 @@ func TestImageGenerationsOpenAIAccountUsesCodexResponsesForGPTImage2(t *testing.
 	}
 }
 
+func TestImageEditsOpenAIAccountUsesCodexResponsesMultipart(t *testing.T) {
+	var upstreamPayload map[string]interface{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/codex/responses" {
+			t.Fatalf("upstream image path = %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamPayload); err != nil {
+			t.Fatalf("decode responses image request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(codexImageSSE("edited-image")))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-2", Name: "GPT Image 2", Vendor: "OpenAI", Aliases: []string{"image2"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image_edit", Name: "Image Edit Pool", Provider: "openai", BaseURL: upstream.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-2"},
+		OpenAIAccounts: []OpenAIAccount{
+			{ID: "oaiacc_edit", Email: "edit@example.com", AccessToken: "edit-token", Status: "healthy"},
+		},
+	})
+	server.mu.Unlock()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("model", "gpt-image-2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("prompt", "replace the background"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("input_fidelity", "high"); err != nil {
+		t.Fatal(err)
+	}
+	imagePart, err := writer.CreateFormFile("image", "source.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := imagePart.Write([]byte("\x89PNG\r\n\x1a\nsource")); err != nil {
+		t.Fatal(err)
+	}
+	maskPart, err := writer.CreateFormFile("mask", "mask.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := maskPart.Write([]byte("\x89PNG\r\n\x1a\nmask")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/edits", &body)
+	request.Header.Set("Authorization", "Bearer cat_fixture_live_secret")
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("image edit status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	tools, ok := upstreamPayload["tools"].([]interface{})
+	if !ok || len(tools) != 1 {
+		t.Fatalf("unexpected responses tools = %#v", upstreamPayload["tools"])
+	}
+	tool, ok := tools[0].(map[string]interface{})
+	if !ok || tool["action"] != "edit" || tool["model"] != "gpt-image-2" || tool["input_fidelity"] != "high" {
+		t.Fatalf("unexpected responses tool = %#v", tools[0])
+	}
+	mask, ok := tool["input_image_mask"].(map[string]interface{})
+	if !ok || !strings.HasPrefix(fmt.Sprint(mask["image_url"]), "data:image/") {
+		t.Fatalf("unexpected edit mask = %#v", tool["input_image_mask"])
+	}
+	input, ok := upstreamPayload["input"].([]interface{})
+	if !ok || len(input) != 1 {
+		t.Fatalf("unexpected responses input = %#v", upstreamPayload["input"])
+	}
+	message, ok := input[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected responses message = %#v", input[0])
+	}
+	content, ok := message["content"].([]interface{})
+	if !ok || len(content) < 2 {
+		t.Fatalf("unexpected responses content = %#v", message["content"])
+	}
+	imageContent, ok := content[1].(map[string]interface{})
+	if !ok || imageContent["type"] != "input_image" || !strings.HasPrefix(fmt.Sprint(imageContent["image_url"]), "data:image/") {
+		t.Fatalf("unexpected edit input image = %#v", content[1])
+	}
+	if !bytes.Contains(recorder.Body.Bytes(), []byte(`"b64_json":"edited-image"`)) {
+		t.Fatalf("responses image edit response was not proxied: %s", recorder.Body.String())
+	}
+}
+
 func TestImageGenerationsOpenAIAccountFallsBackWhenCodexDirectImageIsEmpty(t *testing.T) {
 	directCalls := 0
 	responsesCalls := 0
