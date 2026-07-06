@@ -1273,7 +1273,8 @@ h3 {
   align-items: center;
 }
 
-.model-create-form input {
+.model-create-form input,
+.model-create-form select {
   width: 100%;
   min-width: 0;
   height: 40px;
@@ -1285,7 +1286,12 @@ h3 {
   outline: none;
 }
 
-.model-create-form input:focus {
+.model-create-form select {
+  appearance: none;
+}
+
+.model-create-form input:focus,
+.model-create-form select:focus {
   border-color: var(--blue);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent);
 }
@@ -1299,6 +1305,34 @@ h3 {
   min-height: 18px;
   color: #ff3b30;
   font-size: 13px;
+}
+
+.drawing-model-form {
+  grid-template-columns: minmax(170px, 0.9fr) repeat(3, minmax(0, 1fr)) auto;
+}
+
+.drawing-model-strip,
+.drawing-channel-models {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.drawing-model-strip {
+  margin-top: 12px;
+}
+
+.drawing-model-strip span,
+.drawing-channel-models span {
+  max-width: 100%;
+  padding: 7px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  overflow-wrap: anywhere;
 }
 
 .model-card {
@@ -1408,6 +1442,7 @@ h3 {
 .app-shell[data-theme="dark"] .search-box,
 .app-shell[data-theme="dark"] .model-list-toolbar input,
 .app-shell[data-theme="dark"] .model-create-form input,
+.app-shell[data-theme="dark"] .model-create-form select,
 .app-shell[data-theme="dark"] .channel-form-grid input,
 .app-shell[data-theme="dark"] .channel-form-grid textarea,
 .app-shell[data-theme="dark"] .channel-editor input,

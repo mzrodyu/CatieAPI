@@ -75,6 +75,10 @@ type ModelCreate = {
   context: string;
 };
 
+type DrawingModelCreate = ModelCreate & {
+  channelId: string;
+};
+
 type ChannelSyncResult = {
   channel: Channel;
   models: string[];
@@ -214,6 +218,18 @@ type AccountProfile = {
 
 function arrayOf<T>(value: T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [];
+}
+
+function mergeUniqueStrings(values: string[]) {
+  const seen = new Set<string>();
+  return values
+    .map((value) => value.trim())
+    .filter((value) => {
+      const key = value.toLowerCase();
+      if (!value || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 function normalizeChannel(channel: Channel): Channel {
@@ -739,7 +755,6 @@ function App() {
       })
     });
     setChannels((current) => [...current, normalizeChannel(data.channel)]);
-    setActive("channels");
     setToast("已创建 Codex 账号池渠道，导入账号后即可启用");
     window.setTimeout(() => setToast(""), 2400);
   }
@@ -749,7 +764,6 @@ function App() {
     formData.append("file", file);
     const result = await fetchFormJson<OpenAIAccountImportResult>(`/api/channels/${encodeURIComponent(channelId)}/import-openai-accounts`, formData);
     setChannels((current) => current.map((channel) => (channel.id === result.channel.id ? normalizeChannel(result.channel) : channel)));
-    setActive("channels");
     setToast(`已导入 ${result.imported} 个账号${result.skipped ? `，跳过 ${result.skipped} 个` : ""}`);
     window.setTimeout(() => setToast(""), 2600);
   }
@@ -782,6 +796,34 @@ function App() {
     setModels((current) => [...current, normalizeModel(data.model)]);
     setToast("模型已添加");
     window.setTimeout(() => setToast(""), 1800);
+  }
+
+  async function createDrawingModel(model: DrawingModelCreate) {
+    const channel = channels.find((item) => item.id === model.channelId);
+    if (!channel) throw new Error("请选择要绑定的绘图渠道");
+
+    const { channelId, ...modelBody } = model;
+    const modelExists = models.some((item) => item.id.toLowerCase() === modelBody.id.toLowerCase());
+    if (!modelExists) {
+      const data = await fetchJson<{ model: ModelItem }>("/api/models", {
+        method: "POST",
+        body: JSON.stringify(modelBody)
+      });
+      setModels((current) => [...current, normalizeModel(data.model)]);
+    }
+
+    const nextChannelModels = mergeUniqueStrings([...arrayOf(channel.models), modelBody.id]);
+    const data = await fetchJson<{ channel: Channel }>(`/api/channels/${encodeURIComponent(channelId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        models: nextChannelModels,
+        provider: channel.provider || "codex",
+        baseUrl: channel.baseUrl || (channel.provider === "openai" ? defaultOpenAIBaseURL : defaultCodexBaseURL)
+      })
+    });
+    setChannels((current) => current.map((item) => (item.id === channelId ? normalizeChannel(data.channel) : item)));
+    setToast(modelExists ? "模型已绑定到绘图渠道" : "绘图模型已添加并绑定");
+    window.setTimeout(() => setToast(""), 2000);
   }
 
   async function updateModel(id: string, patch: Partial<ModelItem>) {
@@ -986,7 +1028,7 @@ function App() {
         )}
         {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} onUpdateKey={updateAPIKey} onDeleteKey={deleteAPIKey} />}
         {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} onUpdate={updateModel} onDelete={deleteModel} />}
-        {active === "drawing" && <DrawingView channels={channels} onCreate={createChannel} onImport={importOpenAIAccounts} onCheckAccounts={checkOpenAIAccounts} onDeleteAccount={deleteOpenAIAccount} onUpdate={updateChannel} />}
+        {active === "drawing" && <DrawingView channels={channels} models={models} onCreate={createChannel} onCreateModel={createDrawingModel} onImport={importOpenAIAccounts} onCheckAccounts={checkOpenAIAccounts} onDeleteAccount={deleteOpenAIAccount} onUpdate={updateChannel} />}
         {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onImport={importOpenAIAccounts} onDelete={deleteChannel} onSyncModels={syncChannelModels} onCheck={checkChannel} />}
         {active === "logs" && <LogsView logs={logs} onCopy={copyAndToast} />}
         {active === "settings" && <SettingsView models={models} channels={channels} />}
@@ -2329,24 +2371,76 @@ function ModelCard({
 
 function DrawingView({
   channels,
+  models,
   onCreate,
+  onCreateModel,
   onImport,
   onCheckAccounts,
   onDeleteAccount,
   onUpdate
 }: {
   channels: Channel[];
+  models: ModelItem[];
   onCreate: () => Promise<void>;
+  onCreateModel: (model: DrawingModelCreate) => Promise<void>;
   onImport: (channelId: string, file: File) => Promise<void>;
   onCheckAccounts: (channelId: string) => Promise<void>;
   onDeleteAccount: (channelId: string, accountId: string) => Promise<void>;
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
 }) {
   const drawingChannels = channels.filter((channel) => channel.provider === "codex" || channel.provider === "openai" || arrayOf(channel.models).some((model) => model.includes("image")));
+  const drawingModelIds = new Set(drawingChannels.flatMap((channel) => arrayOf(channel.models)).map((model) => model.toLowerCase()));
+  const drawingModels = models.filter((model) => drawingModelIds.has(model.id.toLowerCase()) || model.id.toLowerCase().includes("image") || model.category === "绘图");
   const [busy, setBusy] = useState("");
+  const [selectedChannelId, setSelectedChannelId] = useState("");
+  const [modelId, setModelId] = useState("");
+  const [modelName, setModelName] = useState("");
+  const [modelVendor, setModelVendor] = useState("OpenAI");
+  const [aliases, setAliases] = useState("");
+  const [description, setDescription] = useState("");
+  const [message, setMessage] = useState("");
   const [accountVisibleCounts, setAccountVisibleCounts] = useState<Record<string, number>>({});
   const defaultVisibleAccounts = 24;
   const accountBatchSize = 48;
+
+  useEffect(() => {
+    if (selectedChannelId && drawingChannels.some((channel) => channel.id === selectedChannelId)) return;
+    setSelectedChannelId(drawingChannels[0]?.id || "");
+  }, [drawingChannels, selectedChannelId]);
+
+  async function submitModel(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const id = modelId.trim();
+    const channelId = selectedChannelId || drawingChannels[0]?.id || "";
+    if (!id || !channelId) {
+      setMessage(!channelId ? "请先新增一个绘图渠道" : "模型 ID 不能为空");
+      return;
+    }
+    setBusy("model");
+    setMessage("");
+    try {
+      await onCreateModel({
+        channelId,
+        id,
+        name: modelName.trim() || id,
+        vendor: modelVendor.trim() || "OpenAI",
+        aliases: aliases.split(",").map((alias) => alias.trim()).filter(Boolean),
+        category: "绘图",
+        description: description.trim() || "绘图模型",
+        price: "自定义",
+        context: "Image generation"
+      });
+      setModelId("");
+      setModelName("");
+      setAliases("");
+      setDescription("");
+      setMessage("已添加到绘图模型，并绑定到目标渠道");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "绘图模型添加失败");
+    } finally {
+      setBusy("");
+    }
+  }
 
   async function importFile(channelId: string, file: File) {
     setBusy(`import:${channelId}`);
@@ -2392,131 +2486,168 @@ function DrawingView({
   }
 
   return (
-    <Panel title="绘图账号池">
-      <div className="panel-toolbar">
-        <span className="muted-inline">OpenAI 生图渠道集中管理；ZIP/JSON 导入后可批量测活。</span>
-        <button className="primary-button" onClick={onCreate}>新增绘图渠道</button>
-      </div>
-      <div className="channels-stack">
-        {drawingChannels.map((channel) => {
-          const accounts = arrayOf(channel.openaiAccounts);
-          const healthy = accounts.filter((account) => account.status === "healthy").length;
-          const invalid = accounts.filter((account) => account.status === "invalid").length;
-          const unchecked = Math.max(0, accounts.length - healthy - invalid);
-          const visibleAccountCount = Math.min(accounts.length, accountVisibleCounts[channel.id] || defaultVisibleAccounts);
-          const visibleAccounts = accounts.slice(0, visibleAccountCount);
-          const hiddenAccountCount = Math.max(0, accounts.length - visibleAccounts.length);
-          const allAccountsVisible = hiddenAccountCount === 0;
-          return (
-            <div className="channel-card" key={channel.id}>
-              <div className="channel-card-head">
-                <div>
-                  <strong>{channel.name}</strong>
-                  <span>{channel.baseUrl || (channel.provider === "openai" ? defaultOpenAIBaseURL : defaultCodexBaseURL)}</span>
-                  <small>账号 {accounts.length} 个，可用 {healthy}，无效 {invalid}，未验证 {unchecked}</small>
+    <>
+      <Panel title="绘图模型">
+        <form className="model-create-form drawing-model-form" onSubmit={submitModel}>
+          <select value={selectedChannelId} onChange={(event) => setSelectedChannelId(event.target.value)} disabled={drawingChannels.length === 0}>
+            {drawingChannels.length === 0 ? (
+              <option value="">暂无绘图渠道</option>
+            ) : (
+              drawingChannels.map((channel) => (
+                <option value={channel.id} key={channel.id}>{channel.name}</option>
+              ))
+            )}
+          </select>
+          <input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="模型 ID，例如 gpt-image-2" />
+          <input value={modelName} onChange={(event) => setModelName(event.target.value)} placeholder="显示名称（可选）" />
+          <input value={modelVendor} onChange={(event) => setModelVendor(event.target.value)} placeholder="供应商" />
+          <input value={aliases} onChange={(event) => setAliases(event.target.value)} placeholder="代称，多个用逗号分隔（可选）" />
+          <input className="model-create-wide" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="描述（可选）" />
+          <button className="primary-button" type="submit" disabled={busy !== "" || drawingChannels.length === 0}>
+            {busy === "model" ? "添加中" : "新增并绑定"}
+          </button>
+          <div className="model-create-message" role="status">{message}</div>
+        </form>
+        {drawingModels.length > 0 && (
+          <div className="drawing-model-strip">
+            {drawingModels.slice(0, 18).map((model) => (
+              <span key={model.id}>{model.id}</span>
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      <Panel title="绘图账号池">
+        <div className="panel-toolbar">
+          <span className="muted-inline">OpenAI 生图渠道集中管理；ZIP/JSON 导入后可批量测活。</span>
+          <button className="primary-button" onClick={onCreate}>新增绘图渠道</button>
+        </div>
+        <div className="channels-stack">
+          {drawingChannels.map((channel) => {
+            const accounts = arrayOf(channel.openaiAccounts);
+            const healthy = accounts.filter((account) => account.status === "healthy").length;
+            const invalid = accounts.filter((account) => account.status === "invalid").length;
+            const unchecked = Math.max(0, accounts.length - healthy - invalid);
+            const visibleAccountCount = Math.min(accounts.length, accountVisibleCounts[channel.id] || defaultVisibleAccounts);
+            const visibleAccounts = accounts.slice(0, visibleAccountCount);
+            const hiddenAccountCount = Math.max(0, accounts.length - visibleAccounts.length);
+            const allAccountsVisible = hiddenAccountCount === 0;
+            return (
+              <div className="channel-card" key={channel.id}>
+                <div className="channel-card-head">
+                  <div>
+                    <strong>{channel.name}</strong>
+                    <span>{channel.baseUrl || (channel.provider === "openai" ? defaultOpenAIBaseURL : defaultCodexBaseURL)}</span>
+                    <small>账号 {accounts.length} 个，可用 {healthy}，无效 {invalid}，未验证 {unchecked}</small>
+                  </div>
+                  <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
                 </div>
-                <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
-              </div>
-              <div className="metrics-grid">
-                <Metric label="账号总数" value={accounts.length} />
-                <Metric label="可用账号" value={healthy} />
-                <Metric label="无效账号" value={invalid} />
-                <Metric label="未验证账号" value={unchecked} />
-              </div>
-              <div className="channel-card-actions">
-                <label className="secondary-button">
-                  {busy === `import:${channel.id}` ? "导入中" : "导入 ZIP/JSON"}
-                  <input
-                    type="file"
-                    accept="application/json,application/zip,.json,.zip"
-                    disabled={busy !== ""}
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) importFile(channel.id, file);
-                      event.target.value = "";
-                    }}
-                  />
-                </label>
-                <button className="secondary-button" onClick={() => checkAccounts(channel.id)} disabled={busy !== "" || accounts.length === 0}>
-                  {busy === `check:${channel.id}` ? "测活中" : "批量测活"}
-                </button>
-                <button className="status-button" onClick={() => toggleChannel(channel)} disabled={busy !== ""}>
-                  <Badge tone={channel.status}>{channel.status === "disabled" ? "启用" : "禁用"}</Badge>
-                </button>
-              </div>
-              {accounts.length > 0 && (
-                <div className="account-pool-list">
-                  {visibleAccounts.map((account) => (
-                    <div className="account-pool-row" key={account.id}>
-                      <div className="account-pool-main">
-                        <div>
-                          <strong>{account.email || account.name || account.accountId || account.id}</strong>
-                          <span>{account.lastError || (account.lastCheckedAt ? `上次检测 ${formatDate(account.lastCheckedAt)}` : "未检测")}</span>
+                <div className="metrics-grid">
+                  <Metric label="账号总数" value={accounts.length} />
+                  <Metric label="可用账号" value={healthy} />
+                  <Metric label="无效账号" value={invalid} />
+                  <Metric label="未验证账号" value={unchecked} />
+                </div>
+                <div className="drawing-channel-models">
+                  {arrayOf(channel.models).length ? arrayOf(channel.models).map((model) => (
+                    <span key={model}>{model}</span>
+                  )) : <span>未绑定绘图模型</span>}
+                </div>
+                <div className="channel-card-actions">
+                  <label className="secondary-button">
+                    {busy === `import:${channel.id}` ? "导入中" : "导入 ZIP/JSON"}
+                    <input
+                      type="file"
+                      accept="application/json,application/zip,.json,.zip"
+                      disabled={busy !== ""}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) importFile(channel.id, file);
+                        event.target.value = "";
+                      }}
+                    />
+                  </label>
+                  <button className="secondary-button" onClick={() => checkAccounts(channel.id)} disabled={busy !== "" || accounts.length === 0}>
+                    {busy === `check:${channel.id}` ? "测活中" : "批量测活"}
+                  </button>
+                  <button className="status-button" onClick={() => toggleChannel(channel)} disabled={busy !== ""}>
+                    <Badge tone={channel.status}>{channel.status === "disabled" ? "启用" : "禁用"}</Badge>
+                  </button>
+                </div>
+                {accounts.length > 0 && (
+                  <div className="account-pool-list">
+                    {visibleAccounts.map((account) => (
+                      <div className="account-pool-row" key={account.id}>
+                        <div className="account-pool-main">
+                          <div>
+                            <strong>{account.email || account.name || account.accountId || account.id}</strong>
+                            <span>{account.lastError || (account.lastCheckedAt ? `上次检测 ${formatDate(account.lastCheckedAt)}` : "未检测")}</span>
+                          </div>
+                          <QuotaBars limits={account.quotaLimits} />
                         </div>
-                        <QuotaBars limits={account.quotaLimits} />
-                      </div>
-                      <div className="account-pool-meta">
-                        <Badge tone={account.status === "healthy" ? "healthy" : account.status === "invalid" ? "disabled" : "standby"}>
-                          {account.status === "healthy" ? "可用" : account.status === "invalid" ? "无效" : "未验证"}
-                        </Badge>
-                        <button
-                          type="button"
-                          className="danger-button compact-button"
-                          disabled={busy !== ""}
-                          onClick={() => deleteAccount(channel, account)}
-                        >
-                          {busy === `delete-account:${account.id}` ? "删除中" : "删除"}
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                  {accounts.length > defaultVisibleAccounts && (
-                    <div className="account-pool-more">
-                      <span className="muted-inline">
-                        {allAccountsVisible ? `已显示全部 ${accounts.length} 个账号` : `已显示 ${visibleAccounts.length} 个，还有 ${hiddenAccountCount} 个`}
-                      </span>
-                      <div className="account-pool-more-actions">
-                        {!allAccountsVisible && (
+                        <div className="account-pool-meta">
+                          <Badge tone={account.status === "healthy" ? "healthy" : account.status === "invalid" ? "disabled" : "standby"}>
+                            {account.status === "healthy" ? "可用" : account.status === "invalid" ? "无效" : "未验证"}
+                          </Badge>
                           <button
                             type="button"
-                            className="secondary-button compact-button"
-                            onClick={() => setAccountVisibleCounts((current) => ({
-                              ...current,
-                              [channel.id]: Math.min(accounts.length, visibleAccountCount + accountBatchSize)
-                            }))}
+                            className="danger-button compact-button"
+                            disabled={busy !== ""}
+                            onClick={() => deleteAccount(channel, account)}
                           >
-                            再显示 {Math.min(accountBatchSize, hiddenAccountCount)} 个
+                            {busy === `delete-account:${account.id}` ? "删除中" : "删除"}
                           </button>
-                        )}
-                        {!allAccountsVisible && (
-                          <button
-                            type="button"
-                            className="secondary-button compact-button"
-                            onClick={() => setAccountVisibleCounts((current) => ({ ...current, [channel.id]: accounts.length }))}
-                          >
-                            全部显示
-                          </button>
-                        )}
-                        {visibleAccountCount > defaultVisibleAccounts && (
-                          <button
-                            type="button"
-                            className="secondary-button compact-button"
-                            onClick={() => setAccountVisibleCounts((current) => ({ ...current, [channel.id]: defaultVisibleAccounts }))}
-                          >
-                            收起
-                          </button>
-                        )}
+                        </div>
                       </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-        {drawingChannels.length === 0 && <Empty text="暂无绘图渠道，先新增一个 OpenAI 账号池渠道" />}
-      </div>
-    </Panel>
+                    ))}
+                    {accounts.length > defaultVisibleAccounts && (
+                      <div className="account-pool-more">
+                        <span className="muted-inline">
+                          {allAccountsVisible ? `已显示全部 ${accounts.length} 个账号` : `已显示 ${visibleAccounts.length} 个，还有 ${hiddenAccountCount} 个`}
+                        </span>
+                        <div className="account-pool-more-actions">
+                          {!allAccountsVisible && (
+                            <button
+                              type="button"
+                              className="secondary-button compact-button"
+                              onClick={() => setAccountVisibleCounts((current) => ({
+                                ...current,
+                                [channel.id]: Math.min(accounts.length, visibleAccountCount + accountBatchSize)
+                              }))}
+                            >
+                              再显示 {Math.min(accountBatchSize, hiddenAccountCount)} 个
+                            </button>
+                          )}
+                          {!allAccountsVisible && (
+                            <button
+                              type="button"
+                              className="secondary-button compact-button"
+                              onClick={() => setAccountVisibleCounts((current) => ({ ...current, [channel.id]: accounts.length }))}
+                            >
+                              全部显示
+                            </button>
+                          )}
+                          {visibleAccountCount > defaultVisibleAccounts && (
+                            <button
+                              type="button"
+                              className="secondary-button compact-button"
+                              onClick={() => setAccountVisibleCounts((current) => ({ ...current, [channel.id]: defaultVisibleAccounts }))}
+                            >
+                              收起
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {drawingChannels.length === 0 && <Empty text="暂无绘图渠道，先新增一个 OpenAI 账号池渠道" />}
+        </div>
+      </Panel>
+    </>
   );
 }
 
