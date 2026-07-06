@@ -624,7 +624,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	router.POST("/images/edits", s.imageEdits)
 
 	router.NoRoute(func(c *gin.Context) {
-		if normalizedPath := normalizeRequestPath(c.Request.URL.Path); normalizedPath != c.Request.URL.Path {
+		if normalizedPath := normalizeOpenAIRequestPath(c.Request.URL.Path); normalizedPath != c.Request.URL.Path {
 			c.Request.URL.Path = normalizedPath
 			c.Request.URL.RawPath = ""
 			router.HandleContext(c)
@@ -3738,33 +3738,41 @@ func (s *Server) callOpenAICompatible(call GatewayCall) (gin.H, *ProviderError) 
 		return s.callChatGPTCodex(call)
 	}
 
-	request, providerErr := s.newOpenAICompatibleRequest(call, false)
-	if providerErr != nil {
-		return nil, providerErr
-	}
+	endpoints := openAICompatibleChatEndpointCandidates(call.Channel.BaseURL)
+	for index, endpoint := range endpoints {
+		request, providerErr := s.newOpenAICompatibleRequest(call, false, endpoint)
+		if providerErr != nil {
+			return nil, providerErr
+		}
 
-	response, err := s.httpClient.Do(request)
-	if err != nil {
-		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
-	}
-	defer response.Body.Close()
+		response, err := s.httpClient.Do(request)
+		if err != nil {
+			return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+		}
 
-	content, err := io.ReadAll(response.Body)
-	if err != nil {
-		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, providerErrorFromUpstream(response.StatusCode, content)
-	}
+		content, err := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if err != nil {
+			return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			providerErr := providerErrorFromUpstream(response.StatusCode, content)
+			if shouldRetryOpenAICompatibleEndpoint(providerErr) && index < len(endpoints)-1 {
+				continue
+			}
+			return nil, providerErr
+		}
 
-	var body gin.H
-	if err := json.Unmarshal(content, &body); err != nil {
-		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "Upstream returned invalid JSON", Type: "api_error"}
+		var body gin.H
+		if err := json.Unmarshal(content, &body); err != nil {
+			return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "Upstream returned invalid JSON", Type: "api_error"}
+		}
+		if _, ok := body["model"]; !ok {
+			body["model"] = call.Model.ID
+		}
+		return body, nil
 	}
-	if _, ok := body["model"]; !ok {
-		body["model"] = call.Model.ID
-	}
-	return body, nil
+	return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "Channel baseUrl is required", Type: "api_error"}
 }
 
 func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *ProviderError) {
@@ -5873,28 +5881,37 @@ func (s *Server) streamOpenAICompatible(c *gin.Context, call GatewayCall) *Provi
 		return s.streamChatGPTCodex(c, call)
 	}
 
-	request, providerErr := s.newOpenAICompatibleRequest(call, true)
-	if providerErr != nil {
-		return providerErr
-	}
+	endpoints := openAICompatibleChatEndpointCandidates(call.Channel.BaseURL)
+	for index, endpoint := range endpoints {
+		request, providerErr := s.newOpenAICompatibleRequest(call, true, endpoint)
+		if providerErr != nil {
+			return providerErr
+		}
 
-	response, err := s.httpClient.Do(request)
-	if err != nil {
-		return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
-	}
-	defer response.Body.Close()
+		response, err := s.httpClient.Do(request)
+		if err != nil {
+			return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+		}
 
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		content, _ := io.ReadAll(response.Body)
-		return providerErrorFromUpstream(response.StatusCode, content)
-	}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			content, _ := io.ReadAll(response.Body)
+			_ = response.Body.Close()
+			providerErr := providerErrorFromUpstream(response.StatusCode, content)
+			if shouldRetryOpenAICompatibleEndpoint(providerErr) && index < len(endpoints)-1 {
+				continue
+			}
+			return providerErr
+		}
 
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	_, _ = io.Copy(c.Writer, response.Body)
-	c.Writer.Flush()
-	return nil
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		_, _ = io.Copy(c.Writer, response.Body)
+		_ = response.Body.Close()
+		c.Writer.Flush()
+		return nil
+	}
+	return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "Channel baseUrl is required", Type: "api_error"}
 }
 
 func (s *Server) shouldUseCompatibleProvider(channel Channel) bool {
@@ -5916,7 +5933,7 @@ func shouldFallbackStreamToNonStream(providerErr *ProviderError, channel Channel
 		providerErr.Status == http.StatusNotImplemented
 }
 
-func (s *Server) newOpenAICompatibleRequest(call GatewayCall, stream bool) (*http.Request, *ProviderError) {
+func (s *Server) newOpenAICompatibleRequest(call GatewayCall, stream bool, endpoint string) (*http.Request, *ProviderError) {
 	upstreamKey, err := s.channelUpstreamKey(call.Channel)
 	if err != nil {
 		return nil, &ProviderError{
@@ -5941,6 +5958,9 @@ func (s *Server) newOpenAICompatibleRequest(call GatewayCall, stream bool) (*htt
 
 	payload := gin.H{}
 	for key, value := range call.Body.Payload {
+		if value == nil {
+			continue
+		}
 		payload[key] = value
 	}
 	payload["model"] = call.Model.ID
@@ -5951,13 +5971,17 @@ func (s *Server) newOpenAICompatibleRequest(call GatewayCall, stream bool) (*htt
 		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "Failed to encode upstream request", Type: "invalid_request_error"}
 	}
 
-	endpoint := joinURL(call.Channel.BaseURL, "chat/completions")
 	request, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(encoded))
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
 	}
 	request.Header.Set("Authorization", "Bearer "+upstreamKey)
 	request.Header.Set("Content-Type", "application/json")
+	if stream {
+		request.Header.Set("Accept", "text/event-stream")
+	} else {
+		request.Header.Set("Accept", "application/json")
+	}
 	request.Header.Set("X-Request-ID", call.RequestID)
 	return request, nil
 }
@@ -8591,6 +8615,91 @@ func joinURL(base string, path string) string {
 	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(path, "/")
 }
 
+var openAIRequestEndpointPrefixes = []string{
+	"/v1/images/generations",
+	"/images/generations",
+	"/v1/images/edits",
+	"/images/edits",
+	"/v1/chat/completions",
+	"/chat/completions",
+	"/v1/completions",
+	"/completions",
+	"/v1/responses",
+	"/responses",
+	"/v1/embeddings",
+	"/embeddings",
+	"/v1/models/",
+	"/v1/models",
+	"/models/",
+	"/models",
+}
+
+var openAIRequestPathMap = map[string]string{
+	"/chat/completions":   "/v1/chat/completions",
+	"/completions":        "/v1/completions",
+	"/responses":          "/v1/responses",
+	"/embeddings":         "/v1/embeddings",
+	"/images/generations": "/v1/images/generations",
+	"/images/edits":       "/v1/images/edits",
+	"/models":             "/v1/models",
+	"/models/":            "/v1/models/",
+}
+
+func normalizeOpenAIRequestPath(value string) string {
+	normalized := normalizeRequestPath(value)
+	return extractOpenAIRequestPath(normalized)
+}
+
+func extractOpenAIRequestPath(path string) string {
+	if path == "" {
+		return "/"
+	}
+	for _, prefix := range []string{
+		"/api/admin/",
+		"/api/auth/",
+		"/api/backup",
+		"/api/channels",
+		"/api/discord",
+		"/api/health",
+		"/api/keys",
+		"/api/logs",
+		"/api/me",
+		"/api/models",
+		"/api/public/",
+		"/api/restore",
+		"/api/settings",
+		"/api/users",
+		"/assets/",
+		"/favicon",
+		"/index.html",
+		"/ws/",
+	} {
+		if strings.HasPrefix(path, prefix) {
+			return path
+		}
+	}
+	for _, endpoint := range openAIRequestEndpointPrefixes {
+		index := strings.Index(path, endpoint)
+		if index < 0 {
+			continue
+		}
+		extracted := path[index:]
+		for shortPath, fullPath := range openAIRequestPathMap {
+			if shortPath == "/models/" {
+				if strings.HasPrefix(extracted, shortPath) {
+					return fullPath + strings.TrimPrefix(extracted, shortPath)
+				}
+				continue
+			}
+			if extracted == shortPath || strings.HasPrefix(extracted, shortPath+"/") {
+				return fullPath + strings.TrimPrefix(extracted, shortPath)
+			}
+		}
+		return extracted
+	}
+	return path
+}
+
 func normalizeRequestPath(value string) string {
 	if value == "" {
 		return "/"
@@ -8614,6 +8723,70 @@ func normalizeRequestPath(value string) string {
 		return "/"
 	}
 	return normalized
+}
+
+func openAICompatibleChatEndpointCandidates(base string) []string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return nil
+	}
+	candidates := make([]string, 0, 3)
+	add := func(endpoint string) {
+		endpoint = strings.TrimSpace(endpoint)
+		if endpoint == "" {
+			return
+		}
+		for _, existing := range candidates {
+			if existing == endpoint {
+				return
+			}
+		}
+		candidates = append(candidates, endpoint)
+	}
+
+	if parsed, err := url.Parse(base); err == nil {
+		normalizedPath := normalizeRequestPath(parsed.Path)
+		if strings.Contains(strings.ToLower(normalizedPath), "/chat/completions") {
+			add(base)
+		}
+		add(joinURL(base, "chat/completions"))
+		if !pathLooksVersioned(normalizedPath) {
+			add(joinURL(base, "v1/chat/completions"))
+		}
+	} else {
+		add(joinURL(base, "chat/completions"))
+	}
+	return candidates
+}
+
+func pathLooksVersioned(path string) bool {
+	path = strings.Trim(strings.ToLower(path), "/")
+	if path == "" {
+		return false
+	}
+	segments := strings.Split(path, "/")
+	last := segments[len(segments)-1]
+	if last == "v1beta" {
+		return true
+	}
+	if len(last) >= 2 && last[0] == 'v' {
+		for _, char := range last[1:] {
+			if char < '0' || char > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func shouldRetryOpenAICompatibleEndpoint(providerErr *ProviderError) bool {
+	if providerErr == nil {
+		return false
+	}
+	return providerErr.Status == http.StatusNotFound ||
+		providerErr.Status == http.StatusMethodNotAllowed ||
+		providerErr.Status == http.StatusNotImplemented
 }
 
 func requestIDFromContext(c *gin.Context) string {
