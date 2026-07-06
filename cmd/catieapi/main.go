@@ -6447,7 +6447,7 @@ func (s *Server) ensureImportedModelLocked(modelID string) bool {
 }
 
 func openAIImageModelIDs() []string {
-	return []string{"gpt-image-2", "gpt-image-1"}
+	return []string{"gpt-image-2", "gpt-image-1.5", "gpt-image-1"}
 }
 
 func codexChannelModelIDs() []string {
