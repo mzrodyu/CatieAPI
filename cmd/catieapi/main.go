@@ -49,6 +49,7 @@ const (
 	chatGPTCodexVersion           = "0.125.0"
 	chatGPTCodexTUIVersion        = "0.135.0"
 	chatGPTCodexImageModel        = "gpt-5.4-mini"
+	chatGPTCodexImageInstructions = "You are an image art director for the image_generation tool. Before calling the tool, internally turn the user's request into a precise visual brief: subject, composition, style, lighting, color, materials, camera/framing, and negative constraints when useful. Preserve any explicit user wording, characters, brands, reference-image intent, aspect ratio, and requested text exactly. Do not add visible text, logos, watermarks, UI labels, or poster typography unless the user explicitly asks for them."
 	openAIAuthClientID            = "app_EMoamEEZ73f0CkXaXp7hrann"
 )
 
@@ -4429,7 +4430,7 @@ func buildChatGPTCodexImagePayload(call ImageGatewayCall, mainModel string) ([]b
 		}
 	}
 	payload := gin.H{
-		"instructions":        "",
+		"instructions":        chatGPTCodexImageInstructions,
 		"model":               mainModel,
 		"stream":              true,
 		"store":               false,
