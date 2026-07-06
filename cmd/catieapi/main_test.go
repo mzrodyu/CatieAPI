@@ -1452,6 +1452,60 @@ func TestImageGenerationsForwardToOpenAICompatibleUpstream(t *testing.T) {
 	}
 }
 
+func TestImageGenerationsKeepsConnectionAliveDuringSlowUpstream(t *testing.T) {
+	oldInterval := imageJSONKeepaliveInterval
+	imageJSONKeepaliveInterval = 10 * time.Millisecond
+	t.Cleanup(func() {
+		imageJSONKeepaliveInterval = oldInterval
+	})
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var upstreamPayload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamPayload); err != nil {
+			t.Fatalf("decode upstream image request: %v", err)
+		}
+		time.Sleep(35 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"b64_json":"slow-image-bytes"}]}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":   "memory",
+		"PROVIDER_MODE": "mock",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-1", Name: "GPT Image", Vendor: "OpenAI", Aliases: []string{"image"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image", Name: "Image Provider", Provider: "openai", BaseURL: upstream.URL + "/v1", UpstreamAPIKey: "channel-image-secret", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-1"},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"image","prompt":"a slow moon cat"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
+	}
+	if !response.Flushed {
+		t.Fatal("slow image response did not flush keepalive bytes")
+	}
+	if !strings.HasPrefix(response.Body.String(), " \n") {
+		t.Fatalf("slow image response did not start with JSON keepalive whitespace: %q", response.Body.String())
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("slow image response should remain valid JSON after keepalive: %v body=%q", err, response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"slow-image-bytes"`)) {
+		t.Fatalf("image response was not proxied: %s", response.Body.String())
+	}
+}
+
 func TestImageGenerationsRetryNextOpenAIAccountOnBillingError(t *testing.T) {
 	authHeaders := []string{}
 	upstreamPayloads := []map[string]interface{}{}

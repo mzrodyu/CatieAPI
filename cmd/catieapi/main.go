@@ -52,6 +52,8 @@ const (
 	openAIAuthClientID            = "app_EMoamEEZ73f0CkXaXp7hrann"
 )
 
+var imageJSONKeepaliveInterval = 8 * time.Second
+
 type AppState struct {
 	Users       []User       `json:"users"`
 	APIKeys     []APIKey     `json:"apiKeys"`
@@ -3122,6 +3124,37 @@ func (s *Server) imageEdits(c *gin.Context) {
 	s.handleImageGeneration(c, body, startedAt, idempotencyKey, "edit")
 }
 
+func startImageJSONKeepalive(c *gin.Context) func() {
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	requestDone := c.Request.Context().Done()
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(imageJSONKeepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-requestDone:
+				return
+			case <-ticker.C:
+				c.Header("Content-Type", "application/json; charset=utf-8")
+				c.Header("Cache-Control", "no-cache")
+				c.Header("X-Accel-Buffering", "no")
+				if _, err := c.Writer.Write([]byte(" \n")); err != nil {
+					return
+				}
+				c.Writer.Flush()
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-stopped
+	}
+}
+
 func imageEditRequestFromContext(c *gin.Context) (ImageRequest, *ProviderError) {
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Type"))), "multipart/form-data") {
 		return imageEditMultipartRequestFromContext(c)
@@ -3295,6 +3328,7 @@ func (s *Server) handleImageGeneration(c *gin.Context, body ImageRequest, starte
 	var providerErr *ProviderError
 	var selectedChannel Channel
 	attempts := 0
+	stopKeepalive := startImageJSONKeepalive(c)
 	for index, channel := range channels {
 		call := ImageGatewayCall{RequestID: requestID, Model: modelCopy, Channel: channel, Body: body, Operation: operation}
 		attempts++
@@ -3312,6 +3346,7 @@ func (s *Server) handleImageGeneration(c *gin.Context, body ImageRequest, starte
 			break
 		}
 	}
+	stopKeepalive()
 	if providerErr != nil {
 		s.recordFailedCall(authUserID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, providerErr.Code, attempts, startedAt)
 		writeOpenAIError(c, providerErr.Status, providerErr.Code, providerErr.Message, providerErr.Type, stringPtr("model"))
