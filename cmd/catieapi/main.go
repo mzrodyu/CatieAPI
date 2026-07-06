@@ -3887,6 +3887,9 @@ func (s *Server) streamChatGPTCodexWithAccount(c *gin.Context, call GatewayCall,
 }
 
 func (s *Server) callChatGPTCodexImageWithAccount(call ImageGatewayCall, account OpenAIAccount, accessToken string) (gin.H, *ProviderError) {
+	if directModel := chatGPTCodexDirectImageModel(call); directModel != "" {
+		return s.callChatGPTCodexDirectImageWithAccount(call, account, accessToken, directModel)
+	}
 	encoded, providerErr := buildChatGPTCodexImagePayload(call)
 	if providerErr != nil {
 		return nil, providerErr
@@ -3920,6 +3923,36 @@ func (s *Server) callChatGPTCodexImageWithAccount(call ImageGatewayCall, account
 	return gin.H{"created": created, "data": parsed.Images}, nil
 }
 
+func (s *Server) callChatGPTCodexDirectImageWithAccount(call ImageGatewayCall, account OpenAIAccount, accessToken string, model string) (gin.H, *ProviderError) {
+	encoded, providerErr := buildChatGPTCodexDirectImagePayload(call, model)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+	request, providerErr := s.newChatGPTCodexDirectImageRequest(encoded, accessToken, account)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	defer response.Body.Close()
+
+	content, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, providerErrorFromUpstream(response.StatusCode, content)
+	}
+
+	var body gin.H
+	if err := json.Unmarshal(content, &body); err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "Upstream returned invalid JSON", Type: "api_error"}
+	}
+	return body, nil
+}
+
 func (s *Server) newChatGPTCodexRequest(encoded []byte, accessToken string, account OpenAIAccount) (*http.Request, *ProviderError) {
 	request, err := http.NewRequest(http.MethodPost, s.chatGPTCodexResponsesURL(), bytes.NewReader(encoded))
 	if err != nil {
@@ -3937,8 +3970,28 @@ func (s *Server) newChatGPTCodexRequest(encoded []byte, accessToken string, acco
 	return request, nil
 }
 
+func (s *Server) newChatGPTCodexDirectImageRequest(encoded []byte, accessToken string, account OpenAIAccount) (*http.Request, *ProviderError) {
+	request, err := http.NewRequest(http.MethodPost, s.chatGPTCodexImagesGenerationsURL(), bytes.NewReader(encoded))
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	}
+	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Connection", "Keep-Alive")
+	setChatGPTCodexClientHeaders(request, account, false)
+	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
+		setHeaderPreserveCase(request.Header, "ChatGPT-Account-Id", accountID)
+	}
+	return request, nil
+}
+
 func (s *Server) chatGPTCodexResponsesURL() string {
 	return joinURL(s.chatGPTAPIBase, "codex/responses")
+}
+
+func (s *Server) chatGPTCodexImagesGenerationsURL() string {
+	return joinURL(s.chatGPTAPIBase, "codex/images/generations")
 }
 
 type chatGPTCodexClientProfile struct {
@@ -4100,6 +4153,44 @@ func buildChatGPTCodexImagePayload(call ImageGatewayCall) ([]byte, *ProviderErro
 		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "Failed to encode upstream request", Type: "invalid_request_error"}
 	}
 	return encoded, nil
+}
+
+func buildChatGPTCodexDirectImagePayload(call ImageGatewayCall, model string) ([]byte, *ProviderError) {
+	payload := gin.H{}
+	for key, value := range call.Body.Payload {
+		if strings.EqualFold(strings.TrimSpace(key), "stream") {
+			continue
+		}
+		payload[key] = value
+	}
+	payload["model"] = model
+	if prompt := strings.TrimSpace(call.Body.Prompt); prompt != "" {
+		payload["prompt"] = prompt
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "Failed to encode upstream request", Type: "invalid_request_error"}
+	}
+	return encoded, nil
+}
+
+func chatGPTCodexDirectImageModel(call ImageGatewayCall) string {
+	for _, model := range []string{call.Body.Model, call.Model.ID} {
+		base := chatGPTCodexImageBaseModel(model)
+		switch base {
+		case "gpt-image-2", "gpt-image-1.5":
+			return base
+		}
+	}
+	return ""
+}
+
+func chatGPTCodexImageBaseModel(model string) string {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if index := strings.LastIndex(model, "/"); index >= 0 && index < len(model)-1 {
+		model = strings.TrimSpace(model[index+1:])
+	}
+	return model
 }
 
 func chatMessagesToCodexInput(messages []ChatMessage) (string, []gin.H) {
