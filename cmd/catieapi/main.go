@@ -624,6 +624,12 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	router.POST("/images/edits", s.imageEdits)
 
 	router.NoRoute(func(c *gin.Context) {
+		if normalizedPath := normalizeRequestPath(c.Request.URL.Path); normalizedPath != c.Request.URL.Path {
+			c.Request.URL.Path = normalizedPath
+			c.Request.URL.RawPath = ""
+			router.HandleContext(c)
+			return
+		}
 		if s.serveStatic(c) {
 			return
 		}
@@ -2535,6 +2541,7 @@ func (s *Server) updateChannel(c *gin.Context) {
 	for _, modelID := range channel.Models {
 		s.ensureChannelModelLocked(modelID, channel.Provider, "渠道", "Imported channel model")
 	}
+	removedModels := s.pruneUnreferencedImportedModelsLocked()
 	pricingChanged := false
 	if value, ok := asFloat(patch["inputPricePer1K"]); ok {
 		if value < 0 {
@@ -2561,7 +2568,7 @@ func (s *Server) updateChannel(c *gin.Context) {
 	}
 	s.saveStateLocked()
 
-	c.JSON(http.StatusOK, gin.H{"channel": publicChannel(*channel)})
+	c.JSON(http.StatusOK, gin.H{"channel": publicChannel(*channel), "removedModels": removedModels})
 }
 
 func (s *Server) deleteChannel(c *gin.Context) {
@@ -2573,8 +2580,9 @@ func (s *Server) deleteChannel(c *gin.Context) {
 			continue
 		}
 		s.state.Channels = append(s.state.Channels[:i], s.state.Channels[i+1:]...)
+		removedModels := s.pruneUnreferencedImportedModelsLocked()
 		s.saveStateLocked()
-		c.JSON(http.StatusOK, gin.H{"deleted": true})
+		c.JSON(http.StatusOK, gin.H{"deleted": true, "removedModels": removedModels})
 		return
 	}
 	c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
@@ -2621,7 +2629,10 @@ func (s *Server) syncChannelModels(c *gin.Context) {
 	if isCodexChannel(*channel) {
 		s.ensureCodexChannelLocked(channel)
 	}
-	channel.Models = mergeStrings(channel.Models, modelIDs)
+	channel.Models = mergeStrings(nil, modelIDs)
+	if isCodexChannel(*channel) {
+		s.ensureCodexChannelLocked(channel)
+	}
 	added := []Model{}
 	for _, id := range modelIDs {
 		sourceName := strings.TrimSpace(channel.Name)
@@ -2648,8 +2659,9 @@ func (s *Server) syncChannelModels(c *gin.Context) {
 		s.state.Models = append(s.state.Models, model)
 		added = append(added, model)
 	}
+	removedModels := s.pruneUnreferencedImportedModelsLocked()
 	s.saveStateLocked()
-	c.JSON(http.StatusOK, gin.H{"channel": publicChannel(*channel), "models": channel.Models, "addedModels": added})
+	c.JSON(http.StatusOK, gin.H{"channel": publicChannel(*channel), "models": channel.Models, "addedModels": added, "removedModels": removedModels})
 }
 
 func (s *Server) checkChannel(c *gin.Context) {
@@ -2903,9 +2915,13 @@ func (s *Server) openAIModels(c *gin.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	auth, ok := s.openAIAPIKeyAuthLocked(c)
+	if !ok {
+		return
+	}
 	data := []gin.H{}
 	for _, model := range s.state.Models {
-		if model.Status == "available" {
+		if model.Status == "available" && (auth == nil || apiKeyAllowsModel(auth.Key, model.ID)) {
 			data = append(data, toOpenAIModel(model))
 		}
 	}
@@ -2916,9 +2932,17 @@ func (s *Server) openAIModel(c *gin.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	auth, ok := s.openAIAPIKeyAuthLocked(c)
+	if !ok {
+		return
+	}
 	model := s.resolveModelLocked(c.Param("id"))
 	if model == nil || model.Status != "available" {
-		s.openAIError(c, http.StatusNotFound, "model_not_found", "Model not found: "+c.Param("id"), "invalid_request_error", stringPtr("model"))
+		writeOpenAIError(c, http.StatusNotFound, "model_not_found", "Model not found: "+c.Param("id"), "invalid_request_error", stringPtr("model"))
+		return
+	}
+	if auth != nil && !apiKeyAllowsModel(auth.Key, model.ID) {
+		writeOpenAIError(c, http.StatusNotFound, "model_not_found", "Model not found: "+c.Param("id"), "invalid_request_error", stringPtr("model"))
 		return
 	}
 	c.JSON(http.StatusOK, toOpenAIModel(*model))
@@ -6838,6 +6862,59 @@ func (s *Server) ensureChannelModelLocked(modelID string, provider string, categ
 	return true
 }
 
+func (s *Server) pruneUnreferencedImportedModelsLocked() []string {
+	referenced := map[string]bool{}
+	for _, channel := range s.state.Channels {
+		for _, modelID := range channel.Models {
+			referenced[modelID] = true
+		}
+	}
+
+	removed := []string{}
+	models := make([]Model, 0, len(s.state.Models))
+	for _, model := range s.state.Models {
+		if referenced[model.ID] || !isImportedModelManagedByChannel(model) {
+			models = append(models, model)
+			continue
+		}
+		removed = append(removed, model.ID)
+	}
+	if len(removed) == 0 {
+		return removed
+	}
+
+	s.state.Models = models
+	for i := range s.state.APIKeys {
+		for _, modelID := range removed {
+			s.state.APIKeys[i].AllowedModels = removeString(s.state.APIKeys[i].AllowedModels, modelID)
+		}
+	}
+	return removed
+}
+
+func isImportedModelManagedByChannel(model Model) bool {
+	if model.Name != model.ID || model.Recommended || model.PricingConfigured {
+		return false
+	}
+	if model.InputPricePer1K != 0 || model.OutputPricePer1K != 0 {
+		return false
+	}
+	if len(model.Aliases) > 0 {
+		return false
+	}
+	description := strings.TrimSpace(model.Description)
+	switch {
+	case description == "Imported channel model":
+	case description == "Imported OpenAI account model":
+	case description == "从上游模型列表拉取":
+	case strings.HasPrefix(description, "由 ") && strings.HasSuffix(description, " 拉取"):
+	default:
+		return false
+	}
+	category := strings.TrimSpace(model.Category)
+	return category == "" || category == "渠道" || category == "通用" || category == "导入"
+}
+
 func (s *Server) ensureImportedModelLocked(modelID string) bool {
 	return s.ensureChannelModelLocked(modelID, "openai", "导入", "Imported OpenAI account model")
 }
@@ -7251,6 +7328,19 @@ func (s *Server) findUserByAPIKeyLocked(secret string) *AuthContext {
 	return nil
 }
 
+func (s *Server) openAIAPIKeyAuthLocked(c *gin.Context) (*AuthContext, bool) {
+	token := apiTokenFromRequest(c)
+	if token == "" {
+		return nil, true
+	}
+	auth := s.findUserByAPIKeyLocked(token)
+	if auth == nil {
+		writeOpenAIError(c, http.StatusUnauthorized, "invalid_api_key", "Invalid CatieAPI key", "invalid_request_error", nil)
+		return nil, false
+	}
+	return auth, true
+}
+
 func apiTokenFromRequest(c *gin.Context) string {
 	for _, value := range []string{
 		c.GetHeader("Authorization"),
@@ -7314,8 +7404,9 @@ func apiKeyAllowsModel(key *APIKey, modelID string) bool {
 	if key == nil || len(key.AllowedModels) == 0 {
 		return true
 	}
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
 	for _, allowed := range key.AllowedModels {
-		if allowed == modelID {
+		if strings.ToLower(strings.TrimSpace(allowed)) == modelID {
 			return true
 		}
 	}
@@ -8471,6 +8562,31 @@ func sanitizeErrorCode(value string) string {
 
 func joinURL(base string, path string) string {
 	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(path, "/")
+}
+
+func normalizeRequestPath(value string) string {
+	if value == "" {
+		return "/"
+	}
+	var builder strings.Builder
+	builder.Grow(len(value))
+	previousSlash := false
+	for _, char := range value {
+		if char == '/' {
+			if previousSlash {
+				continue
+			}
+			previousSlash = true
+		} else {
+			previousSlash = false
+		}
+		builder.WriteRune(char)
+	}
+	normalized := builder.String()
+	if normalized == "" {
+		return "/"
+	}
+	return normalized
 }
 
 func requestIDFromContext(c *gin.Context) string {

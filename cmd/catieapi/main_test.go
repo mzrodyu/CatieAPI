@@ -731,6 +731,81 @@ func TestAPIKeyAllowedModelsRestrictsChat(t *testing.T) {
 	}
 }
 
+func TestUpdatedAPIKeyAllowedModelsRestrictsChat(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+
+	created := perform(router, http.MethodPost, "/api/users/usr_1002/api-keys", `{"name":"Manual Scope"}`, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create key status = %d body = %s", created.Code, created.Body.String())
+	}
+	var payload struct {
+		Secret string       `json:"secret"`
+		APIKey PublicAPIKey `json:"apiKey"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode key response: %v", err)
+	}
+
+	updated := perform(router, http.MethodPatch, "/api/api-keys/"+payload.APIKey.ID, `{"allowedModels":["DS"]}`, nil)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update key status = %d body = %s", updated.Code, updated.Body.String())
+	}
+	if !bytes.Contains(updated.Body.Bytes(), []byte(`"allowedModels":["deepseek-v4"]`)) {
+		t.Fatalf("updated key did not save canonical allowed model: %s", updated.Body.String())
+	}
+
+	blockedBody := `{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}`
+	blocked := perform(router, http.MethodPost, "/v1/chat/completions", blockedBody, map[string]string{"Authorization": "Bearer " + payload.Secret})
+	if blocked.Code != http.StatusForbidden {
+		t.Fatalf("manually restricted key status = %d body = %s", blocked.Code, blocked.Body.String())
+	}
+
+	allowedBody := `{"model":"ds","messages":[{"role":"user","content":"hello"}]}`
+	allowed := perform(router, http.MethodPost, "/v1/chat/completions", allowedBody, map[string]string{"Authorization": "Bearer " + payload.Secret})
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("allowed model status = %d body = %s", allowed.Code, allowed.Body.String())
+	}
+}
+
+func TestOpenAIModelsAreFilteredByAPIKeyAllowedModels(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+
+	created := perform(router, http.MethodPost, "/api/users/usr_1002/api-keys", `{"name":"Model List Scope","allowedModels":["ds"]}`, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create scoped key status = %d body = %s", created.Code, created.Body.String())
+	}
+	var payload struct {
+		Secret string `json:"secret"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode scoped key response: %v", err)
+	}
+
+	models := perform(router, http.MethodGet, "/models", "", map[string]string{"Authorization": "Bearer " + payload.Secret})
+	if models.Code != http.StatusOK {
+		t.Fatalf("filtered models status = %d body = %s", models.Code, models.Body.String())
+	}
+	if !bytes.Contains(models.Body.Bytes(), []byte(`"id":"deepseek-v4"`)) {
+		t.Fatalf("filtered model list missing allowed model: %s", models.Body.String())
+	}
+	if bytes.Contains(models.Body.Bytes(), []byte(`"id":"gpt-5.5"`)) {
+		t.Fatalf("filtered model list included disallowed model: %s", models.Body.String())
+	}
+
+	allowed := perform(router, http.MethodGet, "/models/ds", "", map[string]string{"Authorization": "Bearer " + payload.Secret})
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("allowed model detail status = %d body = %s", allowed.Code, allowed.Body.String())
+	}
+	blocked := perform(router, http.MethodGet, "/models/gpt-5.5", "", map[string]string{"Authorization": "Bearer " + payload.Secret})
+	if blocked.Code != http.StatusNotFound {
+		t.Fatalf("disallowed model detail status = %d body = %s", blocked.Code, blocked.Body.String())
+	}
+}
+
 func TestAPIKeyRateLimitOverride(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)
@@ -1157,7 +1232,7 @@ func TestSyncChannelModelsPullsFromUpstream(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	_, router := testServerRouter(t)
 
-	created := perform(router, http.MethodPost, "/api/channels", `{"name":"Upstream","baseUrl":"`+upstream.URL+`/v1","upstreamApiKey":"sync-secret"}`, nil)
+	created := perform(router, http.MethodPost, "/api/channels", `{"name":"Upstream","baseUrl":"`+upstream.URL+`/v1","upstreamApiKey":"sync-secret","models":["stale-provider-model"]}`, nil)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create channel status = %d body = %s", created.Code, created.Body.String())
 	}
@@ -1178,9 +1253,58 @@ func TestSyncChannelModelsPullsFromUpstream(t *testing.T) {
 	if !bytes.Contains(synced.Body.Bytes(), []byte(`provider-model-a`)) || !bytes.Contains(synced.Body.Bytes(), []byte(`provider-model-b`)) {
 		t.Fatalf("sync models response missing upstream ids: %s", synced.Body.String())
 	}
+	if !bytes.Contains(synced.Body.Bytes(), []byte(`stale-provider-model`)) {
+		t.Fatalf("sync models response missing removed stale model: %s", synced.Body.String())
+	}
 	models := perform(router, http.MethodGet, "/api/models", "", nil)
 	if !bytes.Contains(models.Body.Bytes(), []byte(`"id":"provider-model-a"`)) {
 		t.Fatalf("synced model was not created: %s", models.Body.String())
+	}
+	if bytes.Contains(models.Body.Bytes(), []byte(`"id":"stale-provider-model"`)) {
+		t.Fatalf("stale synced model was not pruned: %s", models.Body.String())
+	}
+	channels := perform(router, http.MethodGet, "/api/channels", "", nil)
+	if bytes.Contains(channels.Body.Bytes(), []byte(`stale-provider-model`)) {
+		t.Fatalf("stale synced model was still attached to channel: %s", channels.Body.String())
+	}
+}
+
+func TestDeleteChannelPrunesImportedModels(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+
+	created := perform(router, http.MethodPost, "/api/channels", `{"name":"Temporary","baseUrl":"https://temporary.example.test/v1","models":["temporary-model"]}`, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create channel status = %d body = %s", created.Code, created.Body.String())
+	}
+	var payload struct {
+		Channel PublicChannel `json:"channel"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode channel: %v", err)
+	}
+
+	server.mu.Lock()
+	server.state.APIKeys = append(server.state.APIKeys, APIKey{ID: "key_temp", UserID: "usr_temp", AllowedModels: []string{"temporary-model"}})
+	server.mu.Unlock()
+
+	deleted := perform(router, http.MethodDelete, "/api/channels/"+payload.Channel.ID, "", nil)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete channel status = %d body = %s", deleted.Code, deleted.Body.String())
+	}
+	if !bytes.Contains(deleted.Body.Bytes(), []byte(`temporary-model`)) {
+		t.Fatalf("delete channel response missing removed model: %s", deleted.Body.String())
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.findModel("temporary-model") != nil {
+		t.Fatal("temporary model was not pruned")
+	}
+	for _, apiKey := range server.state.APIKeys {
+		if containsString(apiKey.AllowedModels, "temporary-model") {
+			t.Fatalf("pruned model still referenced by api key %#v", apiKey)
+		}
 	}
 }
 
@@ -3478,5 +3602,22 @@ func TestOpenAICompatibleRoutesWorkWithoutV1Prefix(t *testing.T) {
 	}
 	if !bytes.Contains(chat.Body.Bytes(), []byte(`"model":"deepseek-v4"`)) {
 		t.Fatalf("chat without v1 did not resolve model: %s", chat.Body.String())
+	}
+}
+
+func TestOpenAICompatibleRoutesNormalizeRepeatedSlashes(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+
+	chatBody := `{"model":"ds","messages":[{"role":"user","content":"hello"}]}`
+	for _, path := range []string{"//chat/completions", "//v1/chat/completions"} {
+		chat := perform(router, http.MethodPost, path, chatBody, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+		if chat.Code != http.StatusOK {
+			t.Fatalf("chat with repeated slashes at %s status = %d body = %s", path, chat.Code, chat.Body.String())
+		}
+		if !bytes.Contains(chat.Body.Bytes(), []byte(`"model":"deepseek-v4"`)) {
+			t.Fatalf("chat with repeated slashes at %s did not resolve model: %s", path, chat.Body.String())
+		}
 	}
 }

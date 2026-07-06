@@ -88,6 +88,7 @@ type ChannelSyncResult = {
   channel: Channel;
   models: string[];
   addedModels: ModelItem[];
+  removedModels?: string[];
 };
 
 type OpenAIAccount = {
@@ -432,7 +433,7 @@ function channelCreateFromTemplate(provider: string): ChannelCreate {
 }
 
 function modelTextToList(value: string) {
-  return mergeUniqueStrings(value.split(","));
+  return mergeUniqueStrings(value.split(/[\s,;，；]+/));
 }
 
 const streamModeOptions = [
@@ -758,11 +759,12 @@ function App() {
   }
 
   async function updateChannel(id: string, patch: ChannelPatch) {
-    const data = await fetchJson<{ channel: Channel }>(`/api/channels/${id}`, {
+    const data = await fetchJson<{ channel: Channel; removedModels?: string[] }>(`/api/channels/${id}`, {
       method: "PATCH",
       body: JSON.stringify(patch)
     });
     setChannels((current) => current.map((channel) => (channel.id === id ? normalizeChannel(data.channel) : channel)));
+    removeModelsFromCatalog(data.removedModels);
     setToast("渠道已更新");
     window.setTimeout(() => setToast(""), 1800);
   }
@@ -770,8 +772,9 @@ function App() {
   async function deleteChannel(id: string) {
     const channel = channels.find((item) => item.id === id);
     if (!window.confirm(`删除渠道「${channel?.name || id}」？`)) return;
-    await fetchJson<{ deleted: boolean }>(`/api/channels/${id}`, { method: "DELETE" });
+    const data = await fetchJson<{ deleted: boolean; removedModels?: string[] }>(`/api/channels/${id}`, { method: "DELETE" });
     setChannels((current) => current.filter((item) => item.id !== id));
+    removeModelsFromCatalog(data.removedModels);
     setToast("渠道已删除");
     window.setTimeout(() => setToast(""), 1800);
   }
@@ -791,8 +794,19 @@ function App() {
         return [...current, ...addedModels.filter((model) => !seen.has(model.id.toLowerCase()))];
       });
     }
+    removeModelsFromCatalog(data.removedModels);
     setToast(syncedModels.length ? `已拉取 ${syncedModels.length} 个模型` : "上游没有返回模型");
     window.setTimeout(() => setToast(""), 2200);
+  }
+
+  function removeModelsFromCatalog(modelIds?: string[]) {
+    const removed = new Set(arrayOf(modelIds).map((modelId) => modelId.toLowerCase()));
+    if (removed.size === 0) return;
+    setModels((current) => current.filter((model) => !removed.has(model.id.toLowerCase())));
+    setSelectedUser((current) => current ? {
+      ...current,
+      apiKeys: current.apiKeys.map((apiKey) => ({ ...apiKey, allowedModels: apiKey.allowedModels.filter((modelId) => !removed.has(modelId.toLowerCase())) }))
+    } : current);
   }
 
   async function checkChannel(id: string) {
@@ -2057,7 +2071,7 @@ function KeyEditor({
     try {
       await onSave(apiKey.id, {
         name: name.trim() || "API Key",
-        allowedModels: allowedModels.split(",").map((item) => item.trim()).filter(Boolean),
+        allowedModels: modelTextToList(allowedModels),
         expiresAt: fromLocalDateTime(expiresAt),
         rateLimitPerMinute: Number(rateLimit || 0)
       });
