@@ -2659,17 +2659,11 @@ func TestImportSub2APIJSONAddsAccountsToExistingChannel(t *testing.T) {
 	if !containsString(channel.Models, "gpt-image-1") {
 		t.Fatalf("import did not add default image model to target channel: %#v", channel.Models)
 	}
-	if !containsString(channel.Models, "gpt-image-1.5") {
-		t.Fatalf("import did not add default image 1.5 model to target channel: %#v", channel.Models)
-	}
 	if server.findModel("gpt-image-2") == nil {
 		t.Fatal("import did not create missing model")
 	}
 	if server.findModel("gpt-image-1") == nil {
 		t.Fatal("import did not create default image model")
-	}
-	if server.findModel("gpt-image-1.5") == nil {
-		t.Fatal("import did not create default image 1.5 model")
 	}
 }
 
@@ -2809,7 +2803,7 @@ func TestImportOpenAIAccountsFromZipAddsAccountsToExistingChannel(t *testing.T) 
 	if channel.OpenAIAccounts[0].RefreshToken != "" {
 		t.Fatal("missing refresh_token should be stored as empty and still imported")
 	}
-	if !containsString(channel.Models, "gpt-image-2") || !containsString(channel.Models, "gpt-image-1.5") || !containsString(channel.Models, "gpt-image-1") {
+	if !containsString(channel.Models, "gpt-image-2") || !containsString(channel.Models, "gpt-image-1") {
 		t.Fatalf("ZIP import did not add default image models: %#v", channel.Models)
 	}
 }
@@ -2991,7 +2985,7 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 		channel.OpenAIAccounts[6].Status != "unchecked" {
 		t.Fatalf("account statuses = %#v", channel.OpenAIAccounts)
 	}
-	if channel.Status != "healthy" || !containsString(channel.Models, "gpt-image-2") || !containsString(channel.Models, "gpt-image-1.5") || !containsString(channel.Models, "gpt-image-1") {
+	if channel.Status != "healthy" || !containsString(channel.Models, "gpt-image-2") || !containsString(channel.Models, "gpt-image-1") {
 		t.Fatalf("healthy check did not enable image pool: status=%s models=%#v", channel.Status, channel.Models)
 	}
 	if len(channel.OpenAIAccounts[0].QuotaLimits) != 2 || channel.OpenAIAccounts[0].QuotaLimits[0].Label != "5h" || channel.OpenAIAccounts[0].QuotaLimits[0].PercentRemaining != 96 {

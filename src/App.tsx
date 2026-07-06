@@ -64,6 +64,15 @@ type ChannelPatch = Partial<Channel> & {
   upstreamApiKey?: string;
 };
 
+type ChannelCreate = {
+  name: string;
+  provider: string;
+  baseUrl: string;
+  models: string[];
+  upstreamApiKey?: string;
+  streamMode?: Channel["streamMode"];
+};
+
 type ModelCreate = {
   id: string;
   name: string;
@@ -73,10 +82,6 @@ type ModelCreate = {
   description: string;
   price: string;
   context: string;
-};
-
-type DrawingModelCreate = ModelCreate & {
-  channelId: string;
 };
 
 type ChannelSyncResult = {
@@ -364,7 +369,71 @@ const providerOptions = [
 const defaultOpenAIBaseURL = "https://api.openai.com/v1";
 const defaultCodexBaseURL = "https://chatgpt.com/backend-api";
 const defaultCodexModels = "gpt-5.5, gpt-5.4, gpt-image-2, gpt-image-1";
-const defaultOpenAIModels = "gpt-5.5, gpt-5.4";
+const defaultOpenAIModels = "gpt-5.5, gpt-5.4, gpt-image-2";
+
+const channelTemplates = [
+  {
+    provider: "openai",
+    label: "OpenAI",
+    name: "OpenAI 主线路",
+    baseUrl: defaultOpenAIBaseURL,
+    models: defaultOpenAIModels.split(",").map((model) => model.trim())
+  },
+  {
+    provider: "codex",
+    label: "Codex 账号池",
+    name: "Codex 账号池",
+    baseUrl: defaultCodexBaseURL,
+    models: defaultCodexModels.split(",").map((model) => model.trim())
+  },
+  {
+    provider: "compatible",
+    label: "OpenAI Compatible",
+    name: "兼容渠道",
+    baseUrl: "",
+    models: [] as string[]
+  },
+  {
+    provider: "openrouter",
+    label: "OpenRouter",
+    name: "OpenRouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    models: [] as string[]
+  },
+  {
+    provider: "google",
+    label: "Google Gemini",
+    name: "Gemini",
+    baseUrl: "",
+    models: [] as string[]
+  },
+  {
+    provider: "anthropic",
+    label: "Anthropic / Claude",
+    name: "Claude",
+    baseUrl: "",
+    models: [] as string[]
+  }
+] as const;
+
+function channelTemplateFor(provider: string) {
+  return channelTemplates.find((template) => template.provider === provider) || channelTemplates[2];
+}
+
+function channelCreateFromTemplate(provider: string): ChannelCreate {
+  const template = channelTemplateFor(provider);
+  return {
+    name: template.name,
+    provider: template.provider,
+    baseUrl: template.baseUrl,
+    models: [...template.models],
+    streamMode: "auto"
+  };
+}
+
+function modelTextToList(value: string) {
+  return mergeUniqueStrings(value.split(","));
+}
 
 const streamModeOptions = [
   { value: "auto", label: "自动", description: "按请求参数处理" },
@@ -744,18 +813,13 @@ function App() {
     window.setTimeout(() => setToast(""), 2400);
   }
 
-  async function createChannel() {
+  async function createChannel(channel: ChannelCreate = channelCreateFromTemplate("codex")) {
     const data = await fetchJson<{ channel: Channel }>("/api/channels", {
       method: "POST",
-      body: JSON.stringify({
-        name: "Codex 账号池",
-        provider: "codex",
-        baseUrl: defaultCodexBaseURL,
-        models: defaultCodexModels.split(",").map((model) => model.trim())
-      })
+      body: JSON.stringify(channel)
     });
     setChannels((current) => [...current, normalizeChannel(data.channel)]);
-    setToast("已创建 Codex 账号池渠道，导入账号后即可启用");
+    setToast("渠道已创建，可继续拉取模型或检测渠道");
     window.setTimeout(() => setToast(""), 2400);
   }
 
@@ -796,34 +860,6 @@ function App() {
     setModels((current) => [...current, normalizeModel(data.model)]);
     setToast("模型已添加");
     window.setTimeout(() => setToast(""), 1800);
-  }
-
-  async function createDrawingModel(model: DrawingModelCreate) {
-    const channel = channels.find((item) => item.id === model.channelId);
-    if (!channel) throw new Error("请选择要绑定的绘图渠道");
-
-    const { channelId, ...modelBody } = model;
-    const modelExists = models.some((item) => item.id.toLowerCase() === modelBody.id.toLowerCase());
-    if (!modelExists) {
-      const data = await fetchJson<{ model: ModelItem }>("/api/models", {
-        method: "POST",
-        body: JSON.stringify(modelBody)
-      });
-      setModels((current) => [...current, normalizeModel(data.model)]);
-    }
-
-    const nextChannelModels = mergeUniqueStrings([...arrayOf(channel.models), modelBody.id]);
-    const data = await fetchJson<{ channel: Channel }>(`/api/channels/${encodeURIComponent(channelId)}`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        models: nextChannelModels,
-        provider: channel.provider || "codex",
-        baseUrl: channel.baseUrl || (channel.provider === "openai" ? defaultOpenAIBaseURL : defaultCodexBaseURL)
-      })
-    });
-    setChannels((current) => current.map((item) => (item.id === channelId ? normalizeChannel(data.channel) : item)));
-    setToast(modelExists ? "模型已绑定到绘图渠道" : "绘图模型已添加并绑定");
-    window.setTimeout(() => setToast(""), 2000);
   }
 
   async function updateModel(id: string, patch: Partial<ModelItem>) {
@@ -1028,7 +1064,7 @@ function App() {
         )}
         {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} onUpdateKey={updateAPIKey} onDeleteKey={deleteAPIKey} />}
         {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} onUpdate={updateModel} onDelete={deleteModel} />}
-        {active === "drawing" && <DrawingView channels={channels} models={models} onCreate={createChannel} onCreateModel={createDrawingModel} onImport={importOpenAIAccounts} onCheckAccounts={checkOpenAIAccounts} onDeleteAccount={deleteOpenAIAccount} onUpdate={updateChannel} />}
+        {active === "drawing" && <DrawingView channels={channels} onCreate={createChannel} onImport={importOpenAIAccounts} onCheckAccounts={checkOpenAIAccounts} onDeleteAccount={deleteOpenAIAccount} onUpdate={updateChannel} />}
         {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onImport={importOpenAIAccounts} onDelete={deleteChannel} onSyncModels={syncChannelModels} onCheck={checkChannel} />}
         {active === "logs" && <LogsView logs={logs} onCopy={copyAndToast} />}
         {active === "settings" && <SettingsView models={models} channels={channels} />}
@@ -2371,76 +2407,24 @@ function ModelCard({
 
 function DrawingView({
   channels,
-  models,
   onCreate,
-  onCreateModel,
   onImport,
   onCheckAccounts,
   onDeleteAccount,
   onUpdate
 }: {
   channels: Channel[];
-  models: ModelItem[];
-  onCreate: () => Promise<void>;
-  onCreateModel: (model: DrawingModelCreate) => Promise<void>;
+  onCreate: (channel?: ChannelCreate) => Promise<void>;
   onImport: (channelId: string, file: File) => Promise<void>;
   onCheckAccounts: (channelId: string) => Promise<void>;
   onDeleteAccount: (channelId: string, accountId: string) => Promise<void>;
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
 }) {
   const drawingChannels = channels.filter((channel) => channel.provider === "codex" || channel.provider === "openai" || arrayOf(channel.models).some((model) => model.includes("image")));
-  const drawingModelIds = new Set(drawingChannels.flatMap((channel) => arrayOf(channel.models)).map((model) => model.toLowerCase()));
-  const drawingModels = models.filter((model) => drawingModelIds.has(model.id.toLowerCase()) || model.id.toLowerCase().includes("image") || model.category === "绘图");
   const [busy, setBusy] = useState("");
-  const [selectedChannelId, setSelectedChannelId] = useState("");
-  const [modelId, setModelId] = useState("");
-  const [modelName, setModelName] = useState("");
-  const [modelVendor, setModelVendor] = useState("OpenAI");
-  const [aliases, setAliases] = useState("");
-  const [description, setDescription] = useState("");
-  const [message, setMessage] = useState("");
   const [accountVisibleCounts, setAccountVisibleCounts] = useState<Record<string, number>>({});
   const defaultVisibleAccounts = 24;
   const accountBatchSize = 48;
-
-  useEffect(() => {
-    if (selectedChannelId && drawingChannels.some((channel) => channel.id === selectedChannelId)) return;
-    setSelectedChannelId(drawingChannels[0]?.id || "");
-  }, [drawingChannels, selectedChannelId]);
-
-  async function submitModel(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const id = modelId.trim();
-    const channelId = selectedChannelId || drawingChannels[0]?.id || "";
-    if (!id || !channelId) {
-      setMessage(!channelId ? "请先新增一个绘图渠道" : "模型 ID 不能为空");
-      return;
-    }
-    setBusy("model");
-    setMessage("");
-    try {
-      await onCreateModel({
-        channelId,
-        id,
-        name: modelName.trim() || id,
-        vendor: modelVendor.trim() || "OpenAI",
-        aliases: aliases.split(",").map((alias) => alias.trim()).filter(Boolean),
-        category: "绘图",
-        description: description.trim() || "绘图模型",
-        price: "自定义",
-        context: "Image generation"
-      });
-      setModelId("");
-      setModelName("");
-      setAliases("");
-      setDescription("");
-      setMessage("已添加到绘图模型，并绑定到目标渠道");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "绘图模型添加失败");
-    } finally {
-      setBusy("");
-    }
-  }
 
   async function importFile(channelId: string, file: File) {
     setBusy(`import:${channelId}`);
@@ -2486,41 +2470,10 @@ function DrawingView({
   }
 
   return (
-    <>
-      <Panel title="绘图模型">
-        <form className="model-create-form drawing-model-form" onSubmit={submitModel}>
-          <select value={selectedChannelId} onChange={(event) => setSelectedChannelId(event.target.value)} disabled={drawingChannels.length === 0}>
-            {drawingChannels.length === 0 ? (
-              <option value="">暂无绘图渠道</option>
-            ) : (
-              drawingChannels.map((channel) => (
-                <option value={channel.id} key={channel.id}>{channel.name}</option>
-              ))
-            )}
-          </select>
-          <input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="模型 ID，例如 gpt-image-2" />
-          <input value={modelName} onChange={(event) => setModelName(event.target.value)} placeholder="显示名称（可选）" />
-          <input value={modelVendor} onChange={(event) => setModelVendor(event.target.value)} placeholder="供应商" />
-          <input value={aliases} onChange={(event) => setAliases(event.target.value)} placeholder="代称，多个用逗号分隔（可选）" />
-          <input className="model-create-wide" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="描述（可选）" />
-          <button className="primary-button" type="submit" disabled={busy !== "" || drawingChannels.length === 0}>
-            {busy === "model" ? "添加中" : "新增并绑定"}
-          </button>
-          <div className="model-create-message" role="status">{message}</div>
-        </form>
-        {drawingModels.length > 0 && (
-          <div className="drawing-model-strip">
-            {drawingModels.slice(0, 18).map((model) => (
-              <span key={model.id}>{model.id}</span>
-            ))}
-          </div>
-        )}
-      </Panel>
-
       <Panel title="绘图账号池">
         <div className="panel-toolbar">
-          <span className="muted-inline">OpenAI 生图渠道集中管理；ZIP/JSON 导入后可批量测活。</span>
-          <button className="primary-button" onClick={onCreate}>新增绘图渠道</button>
+          <span className="muted-inline">账号池是渠道类型之一；模型在渠道内维护，可用模板、上游同步或手动填写。</span>
+          <button className="primary-button" onClick={() => onCreate(channelCreateFromTemplate("codex"))}>新增绘图渠道</button>
         </div>
         <div className="channels-stack">
           {drawingChannels.map((channel) => {
@@ -2647,7 +2600,6 @@ function DrawingView({
           {drawingChannels.length === 0 && <Empty text="暂无绘图渠道，先新增一个 OpenAI 账号池渠道" />}
         </div>
       </Panel>
-    </>
   );
 }
 
@@ -2706,20 +2658,108 @@ function ChannelsView({
 }: {
   channels: Channel[];
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
-  onCreate: () => void;
+  onCreate: (channel: ChannelCreate) => Promise<void>;
   onImport: (channelId: string, file: File) => Promise<void>;
   onDelete: (id: string) => void;
   onSyncModels: (id: string) => Promise<void>;
   onCheck: (id: string) => Promise<void>;
 }) {
+  const initialTemplate = channelTemplateFor("openai");
+  const [creating, setCreating] = useState(false);
+  const [provider, setProvider] = useState<string>(initialTemplate.provider);
+  const [name, setName] = useState<string>(initialTemplate.name);
+  const [baseUrl, setBaseUrl] = useState<string>(initialTemplate.baseUrl);
+  const [models, setModels] = useState(initialTemplate.models.join(", "));
+  const [upstreamApiKey, setUpstreamApiKey] = useState("");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  function applyTemplate(nextProvider: string) {
+    const template = channelTemplateFor(nextProvider);
+    setProvider(template.provider);
+    setName(template.name);
+    setBaseUrl(template.baseUrl);
+    setModels(template.models.join(", "));
+    setMessage("");
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setMessage("");
+    try {
+      await onCreate({
+        name: name.trim() || channelTemplateFor(provider).name,
+        provider,
+        baseUrl: baseUrl.trim(),
+        upstreamApiKey: upstreamApiKey.trim() || undefined,
+        models: modelTextToList(models),
+        streamMode: "auto"
+      });
+      setCreating(false);
+      setUpstreamApiKey("");
+      applyTemplate(provider);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "渠道创建失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <Panel title="渠道管理">
       <div className="panel-toolbar">
-        <span className="muted-inline">新增渠道默认禁用；CPA/Sub2API JSON 请在目标 OpenAI 渠道内导入。</span>
-        <button className="primary-button" onClick={onCreate}>
-          新增渠道
+        <span className="muted-inline">渠道内置模型；优先从上游同步，模板仅作起步建议，也可以手动填写。</span>
+        <button className="primary-button" onClick={() => setCreating((current) => !current)}>
+          {creating ? "收起" : "新增渠道"}
         </button>
       </div>
+      {creating && (
+        <form className="channel-card channel-create-form" onSubmit={submit}>
+          <div className="provider-chip-grid" role="radiogroup" aria-label="渠道模板">
+            {channelTemplates.map((template) => (
+              <button
+                key={template.provider}
+                type="button"
+                className={provider === template.provider ? "selected" : ""}
+                onClick={() => applyTemplate(template.provider)}
+              >
+                {template.label}
+              </button>
+            ))}
+          </div>
+          <div className="channel-form-grid">
+            <label>
+              <span>渠道名称</span>
+              <input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如 OpenAI 主线路" />
+            </label>
+            <label>
+              <span>供应商</span>
+              <input value={providerDisplayName(provider)} readOnly />
+            </label>
+            <label className="channel-form-wide">
+              <span>Base URL</span>
+              <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://provider.example/v1" />
+            </label>
+            <label>
+              <span>上游 Key</span>
+              <input type="password" value={upstreamApiKey} onChange={(event) => setUpstreamApiKey(event.target.value)} placeholder={provider === "codex" ? "账号池导入后使用" : "可先留空，稍后编辑"} autoComplete="new-password" />
+            </label>
+            <div className="channel-form-wide channel-model-field">
+              <div className="field-label-row">
+                <span>模型</span>
+                <small>来源：模板，可手动修改；保存后可从上游拉取校准</small>
+              </div>
+              <textarea value={models} onChange={(event) => setModels(event.target.value)} placeholder="多个模型用逗号分隔，也可以保存后拉取上游模型" />
+            </div>
+          </div>
+          <div className="channel-card-actions">
+            <span className="model-create-message" role="status">{message}</span>
+            <button className="secondary-button" type="button" onClick={() => applyTemplate(provider)} disabled={busy}>填入模板</button>
+            <button className="primary-button" type="submit" disabled={busy}>{busy ? "创建中" : "创建渠道"}</button>
+          </div>
+        </form>
+      )}
       <div className="channels-stack">
         {channels.map((channel) => (
           <ChannelEditor key={channel.id} channel={channel} onUpdate={onUpdate} onImport={onImport} onDelete={onDelete} onSyncModels={onSyncModels} onCheck={onCheck} />
@@ -2750,11 +2790,18 @@ function ChannelEditor({
   const [streamMode, setStreamMode] = useState<Channel["streamMode"]>(channel.streamMode || "auto");
   const [baseUrl, setBaseUrl] = useState(channel.baseUrl);
   const [models, setModels] = useState(arrayOf(channel.models).join(", "));
+  const [modelSource, setModelSource] = useState<"saved" | "template" | "manual" | "synced">("saved");
   const [inputPrice, setInputPrice] = useState(String(channel.inputPricePer1K || 0));
   const [outputPrice, setOutputPrice] = useState(String(channel.outputPricePer1K || 0));
   const [upstreamApiKey, setUpstreamApiKey] = useState("");
   const [busy, setBusy] = useState("");
   const accountCount = channel.openaiAccountCount ?? channel.openaiAccounts?.length ?? 0;
+  const modelSourceLabel = {
+    saved: "已保存",
+    template: "模板",
+    manual: "手动",
+    synced: "上游同步"
+  }[modelSource];
 
   useEffect(() => {
     setName(channel.name);
@@ -2762,6 +2809,7 @@ function ChannelEditor({
     setStreamMode(channel.streamMode || "auto");
     setBaseUrl(channel.baseUrl);
     setModels(arrayOf(channel.models).join(", "));
+    setModelSource("saved");
     setInputPrice(String(channel.inputPricePer1K || 0));
     setOutputPrice(String(channel.outputPricePer1K || 0));
     setUpstreamApiKey("");
@@ -2820,8 +2868,18 @@ function ChannelEditor({
     try {
       await save();
       await onSyncModels(channel.id);
+      setModelSource("synced");
     } finally {
       setBusy("");
+    }
+  }
+
+  function fillTemplateModels() {
+    const template = channelTemplateFor(provider);
+    setModels(template.models.join(", "));
+    setModelSource("template");
+    if (template.baseUrl && !/^https?:\/\//i.test(baseUrl.trim())) {
+      setBaseUrl(template.baseUrl);
     }
   }
 
@@ -2905,10 +2963,28 @@ function ChannelEditor({
           <span>优先级</span>
           <input value={channel.priority} readOnly />
         </label>
-        <label className="channel-form-wide">
-          <span>模型</span>
-          <textarea value={models} onChange={(event) => setModels(event.target.value)} placeholder="先拉取上游模型，也可以手动补充，多个用逗号分隔" />
-        </label>
+        <div className="channel-form-wide channel-model-field">
+          <div className="field-label-row">
+            <span>模型</span>
+            <small>来源：{modelSourceLabel}</small>
+          </div>
+          <textarea
+            value={models}
+            onChange={(event) => {
+              setModels(event.target.value);
+              setModelSource("manual");
+            }}
+            placeholder="优先拉取上游模型，也可以手动补充，多个用逗号分隔"
+          />
+          <div className="channel-model-actions">
+            <button type="button" className="secondary-button compact-button" onClick={fillTemplateModels} disabled={busy !== ""}>
+              填入模板
+            </button>
+            <button type="button" className="secondary-button compact-button" onClick={syncModels} disabled={busy !== ""}>
+              {busy === "sync" ? "拉取中" : "获取上游模型"}
+            </button>
+          </div>
+        </div>
         <label>
           <span>上游 Key</span>
           <input type="password" value={upstreamApiKey} onChange={(event) => setUpstreamApiKey(event.target.value)} placeholder={provider === "codex" ? "Codex 账号池不需要上游 Key" : "留空表示不修改"} autoComplete="new-password" />
@@ -2921,7 +2997,7 @@ function ChannelEditor({
           <span>输出单价 / 1K Token</span>
           <input type="number" min="0" step="0.0001" value={outputPrice} onChange={(event) => setOutputPrice(event.target.value)} />
         </label>
-        <span className="channel-billing-note">渠道价格优先；均为 0 时使用模型价格，模型也未定价则不扣费。</span>
+        <span className="channel-billing-note">定价可先留空；接入是否可用优先看渠道检测和模型同步结果。</span>
       </div>
 
       <div className="channel-card-actions">
@@ -2940,9 +3016,6 @@ function ChannelEditor({
         </label>
         <button className="secondary-button" onClick={check} disabled={busy !== ""}>
           {busy === "check" ? "检测中" : "检测渠道"}
-        </button>
-        <button className="secondary-button" onClick={syncModels} disabled={busy !== ""}>
-          {busy === "sync" ? "拉取中" : "拉取模型"}
         </button>
         <button className="secondary-button" onClick={save} disabled={busy !== ""}>
           {busy === "save" ? "保存中" : "保存"}

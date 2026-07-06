@@ -1307,22 +1307,12 @@ h3 {
   font-size: 13px;
 }
 
-.drawing-model-form {
-  grid-template-columns: minmax(170px, 0.9fr) repeat(3, minmax(0, 1fr)) auto;
-}
-
-.drawing-model-strip,
 .drawing-channel-models {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.drawing-model-strip {
-  margin-top: 12px;
-}
-
-.drawing-model-strip span,
 .drawing-channel-models span {
   max-width: 100%;
   padding: 7px 10px;
@@ -1575,6 +1565,10 @@ button.table-row:hover {
   gap: 14px;
 }
 
+.channel-create-form {
+  margin-bottom: 14px;
+}
+
 .channel-card {
   display: grid;
   gap: 14px;
@@ -1704,6 +1698,27 @@ button.table-row:hover {
   font-weight: 700;
 }
 
+.channel-model-field {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.field-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.field-label-row small {
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .channel-form-wide {
   grid-column: span 2;
 }
@@ -1741,10 +1756,23 @@ button.table-row:hover {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent);
 }
 
+.channel-model-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .channel-card-actions {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.channel-card-actions .model-create-message {
+  flex: 1;
+  min-width: 180px;
 }
 
 .channel-editor {

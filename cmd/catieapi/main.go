@@ -2245,6 +2245,9 @@ func (s *Server) createChannel(c *gin.Context) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for _, modelID := range channel.Models {
+		s.ensureChannelModelLocked(modelID, channel.Provider, "渠道", "Imported channel model")
+	}
 	s.state.Channels = append(s.state.Channels, channel)
 	s.saveStateLocked()
 	c.JSON(http.StatusCreated, gin.H{"channel": publicChannel(channel)})
@@ -2528,6 +2531,9 @@ func (s *Server) updateChannel(c *gin.Context) {
 	}
 	if value, ok := patch["models"].([]interface{}); ok {
 		channel.Models = stringSlice(value)
+	}
+	for _, modelID := range channel.Models {
+		s.ensureChannelModelLocked(modelID, channel.Provider, "渠道", "Imported channel model")
 	}
 	pricingChanged := false
 	if value, ok := asFloat(patch["inputPricePer1K"]); ok {
@@ -6805,18 +6811,26 @@ func isZipContent(content []byte) bool {
 	return len(content) >= 4 && content[0] == 'P' && content[1] == 'K' && content[2] == 0x03 && content[3] == 0x04
 }
 
-func (s *Server) ensureImportedModelLocked(modelID string) bool {
+func (s *Server) ensureChannelModelLocked(modelID string, provider string, category string, description string) bool {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" || s.findModel(modelID) != nil {
 		return false
 	}
+	category = strings.TrimSpace(category)
+	if category == "" {
+		category = "渠道"
+	}
+	description = strings.TrimSpace(description)
+	if description == "" {
+		description = "Imported channel model"
+	}
 	s.state.Models = append(s.state.Models, Model{
 		ID:          modelID,
 		Name:        modelID,
-		Vendor:      "OpenAI",
+		Vendor:      providerLabel(provider),
 		Aliases:     []string{},
-		Category:    "导入",
-		Description: "Imported OpenAI account model",
+		Category:    category,
+		Description: description,
 		Price:       "自定义",
 		Context:     "未配置上下文",
 		Status:      "available",
@@ -6824,8 +6838,12 @@ func (s *Server) ensureImportedModelLocked(modelID string) bool {
 	return true
 }
 
+func (s *Server) ensureImportedModelLocked(modelID string) bool {
+	return s.ensureChannelModelLocked(modelID, "openai", "导入", "Imported OpenAI account model")
+}
+
 func openAIImageModelIDs() []string {
-	return []string{"gpt-image-2", "gpt-image-1.5", "gpt-image-1"}
+	return []string{"gpt-image-2", "gpt-image-1"}
 }
 
 func codexChannelModelIDs() []string {
