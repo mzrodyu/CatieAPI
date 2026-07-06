@@ -3946,7 +3946,7 @@ func buildChatGPTCodexImagePayload(call ImageGatewayCall) ([]byte, *ProviderErro
 			tool[key] = value
 		}
 	}
-	for _, key := range []string{"n", "output_compression", "partial_images"} {
+	for _, key := range []string{"output_compression", "partial_images"} {
 		if value, ok := call.Body.Payload[key]; ok {
 			tool[key] = value
 		}
@@ -4632,7 +4632,7 @@ func whamRateLimitWindows(payload map[string]interface{}) []OpenAIQuotaLimit {
 }
 
 func whamQuotaLimitFromWindow(name string, label string, values map[string]interface{}) (OpenAIQuotaLimit, bool) {
-	usedPercent, hasUsedPercent := percentFromAnyKeys(values, "used_percent")
+	usedPercent, hasUsedPercent := numberFromAnyKeys(values, "used_percent")
 	if !hasUsedPercent {
 		return OpenAIQuotaLimit{}, false
 	}
@@ -4682,7 +4682,7 @@ func quotaLimitFromMap(values map[string]interface{}, path []string) (OpenAIQuot
 	remaining, hasRemaining := numberFromAnyKeys(values, "remaining", "available", "left", "remaining_messages", "remaining_credits", "remaining_count", "remaining_uses")
 	percent, hasPercent := percentFromAnyKeys(values, "percent_remaining", "remaining_percent", "remaining_percentage", "remaining_pct", "percentage", "pct_remaining")
 	if !hasPercent {
-		if usedPercent, ok := percentFromAnyKeys(values, "used_percent", "used_percentage", "used_pct"); ok {
+		if usedPercent, ok := numberFromAnyKeys(values, "used_percent", "used_percentage", "used_pct"); ok {
 			percent = math.Max(0, 100-usedPercent)
 			hasPercent = true
 			if !hasRemaining {

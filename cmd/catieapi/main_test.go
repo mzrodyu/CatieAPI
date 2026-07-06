@@ -1446,7 +1446,7 @@ func TestImageGenerationsRetryNextOpenAIAccountOnBillingError(t *testing.T) {
 	})
 	server.mu.Unlock()
 
-	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"image","prompt":"retry account"}`, map[string]string{
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"image","prompt":"retry account","n":2}`, map[string]string{
 		"Authorization": "Bearer cat_fixture_live_secret",
 	})
 	if response.Code != http.StatusOK {
@@ -1471,6 +1471,9 @@ func TestImageGenerationsRetryNextOpenAIAccountOnBillingError(t *testing.T) {
 	}
 	if _, ok := tool["action"]; ok {
 		t.Fatalf("codex image tool should not include action: %#v", tool)
+	}
+	if _, ok := tool["n"]; ok {
+		t.Fatalf("codex image tool should not include n: %#v", tool)
 	}
 	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"image-after-retry"`)) {
 		t.Fatalf("image response was not retried successfully: %s", response.Body.String())
@@ -2493,6 +2496,26 @@ func TestParseWhamUsageQuotaLimitsUsesCodexRateLimitWindows(t *testing.T) {
 	monthly := byLabel["Monthly"]
 	if monthly.Remaining != 90 || monthly.PercentRemaining != 90 {
 		t.Fatalf("monthly used_percent not converted: %#v", monthly)
+	}
+}
+
+func TestParseWhamUsageQuotaLimitsTreatsUsedPercentAsWholePercent(t *testing.T) {
+	limits := parseWhamUsageQuotaLimits([]byte(`{
+		"rate_limit":{
+			"primary_window":{"used_percent":1,"limit_window_seconds":18000},
+			"secondary_window":{"used_percent":0,"limit_window_seconds":604800}
+		}
+	}`))
+	byLabel := map[string]OpenAIQuotaLimit{}
+	for _, limit := range limits {
+		byLabel[limit.Label] = limit
+	}
+	primary := byLabel["5h"]
+	if primary.Used != 1 || primary.Remaining != 99 || primary.PercentRemaining != 99 {
+		t.Fatalf("used_percent=1 should mean 1%% used, got %#v", primary)
+	}
+	if !openAIQuotaLimitsHaveRemaining(limits) {
+		t.Fatalf("5h with 99%% remaining should be usable: %#v", limits)
 	}
 }
 
