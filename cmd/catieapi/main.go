@@ -3490,7 +3490,7 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 			} else {
 				attempts++
 				providerErr = s.writeProviderStream(c, call)
-				if shouldFallbackStreamToNonStream(providerErr, channel) {
+				if shouldFallbackStreamToNonStream(providerErr, channel) && !s.shouldUseCompatibleProvider(channel) {
 					attempts++
 					nonStreamCall := call
 					nonStreamCall.Body.Stream = false

@@ -2613,7 +2613,7 @@ func TestOpenAICompatibleProviderStreamsUpstreamResponse(t *testing.T) {
 	}
 }
 
-func TestOpenAICompatibleStreamFallsBackToFakeStreamOnNotFound(t *testing.T) {
+func TestOpenAICompatibleStreamWrapsUpstreamNotFoundAsSSE(t *testing.T) {
 	streamModes := []bool{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
@@ -2623,13 +2623,8 @@ func TestOpenAICompatibleStreamFallsBackToFakeStreamOnNotFound(t *testing.T) {
 			t.Fatalf("decode upstream request: %v", err)
 		}
 		streamModes = append(streamModes, payload.Stream)
-		if payload.Stream {
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"stream endpoint not found","type":"not_found"}}`))
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"chatcmpl_fallback","object":"chat.completion","model":"deepseek-v4","choices":[{"index":0,"message":{"role":"assistant","content":"fallback ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"stream endpoint not found","type":"not_found"}}`))
 	}))
 	defer upstream.Close()
 
@@ -2648,13 +2643,13 @@ func TestOpenAICompatibleStreamFallsBackToFakeStreamOnNotFound(t *testing.T) {
 	chatBody := `{"model":"ds","stream":true,"messages":[{"role":"user","content":"hello"}]}`
 	chat := perform(router, http.MethodPost, "/v1/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
 	if chat.Code != http.StatusOK {
-		t.Fatalf("fallback stream chat status = %d body = %s", chat.Code, chat.Body.String())
+		t.Fatalf("stream error status = %d body = %s", chat.Code, chat.Body.String())
 	}
-	if !reflect.DeepEqual(streamModes, []bool{true, false}) {
+	if !reflect.DeepEqual(streamModes, []bool{true}) {
 		t.Fatalf("upstream stream modes = %#v", streamModes)
 	}
-	if !bytes.Contains(chat.Body.Bytes(), []byte(`fallback ok`)) || !bytes.Contains(chat.Body.Bytes(), []byte("data: [DONE]")) {
-		t.Fatalf("fallback stream response was not returned: %s", chat.Body.String())
+	if !bytes.Contains(chat.Body.Bytes(), []byte(`stream endpoint not found`)) || !bytes.Contains(chat.Body.Bytes(), []byte("data: [DONE]")) {
+		t.Fatalf("stream error was not wrapped as SSE: %s", chat.Body.String())
 	}
 }
 
@@ -2705,10 +2700,10 @@ func TestOpenAICompatibleStreamWrapsFinalUpstreamErrorAsSSE(t *testing.T) {
 	if got := chat.Header().Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
 		t.Fatalf("stream error content-type = %s", got)
 	}
-	if !reflect.DeepEqual(streamModes, []bool{true, false}) {
+	if !reflect.DeepEqual(streamModes, []bool{true}) {
 		t.Fatalf("upstream stream modes = %#v", streamModes)
 	}
-	if !reflect.DeepEqual(models, []string{"doubao-seed-2.0-pro", "doubao-seed-2.0-pro"}) {
+	if !reflect.DeepEqual(models, []string{"doubao-seed-2.0-pro"}) {
 		t.Fatalf("upstream models = %#v", models)
 	}
 	if !bytes.Contains(chat.Body.Bytes(), []byte(`"status":404`)) || !bytes.Contains(chat.Body.Bytes(), []byte("data: [DONE]")) {
