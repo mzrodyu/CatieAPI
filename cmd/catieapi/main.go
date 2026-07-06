@@ -3523,7 +3523,7 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 		}
 		if providerErr != nil {
 			s.recordFailedCall(authUserID, authKeyPrefix, modelCopy.ID, selectedChannel.Name, requestID, providerErr.Code, attempts, startedAt)
-			writeOpenAIError(c, providerErr.Status, providerErr.Code, providerErr.Message, providerErr.Type, stringPtr("model"))
+			writeOpenAIStreamError(c, providerErr, stringPtr("model"))
 			return
 		}
 		billingModel = modelWithChannelPricing(modelCopy, selectedChannel)
@@ -7237,6 +7237,34 @@ func writeOpenAIError(c *gin.Context, status int, code string, message string, e
 			"code":    code,
 		},
 	})
+}
+
+func writeOpenAIStreamError(c *gin.Context, providerErr *ProviderError, param *string) {
+	if providerErr == nil {
+		providerErr = &ProviderError{Status: http.StatusBadGateway, Code: "upstream_error", Message: "Upstream request failed", Type: "api_error"}
+	}
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Status(http.StatusOK)
+	payload := gin.H{
+		"error": gin.H{
+			"message": providerErr.Message,
+			"type":    providerErr.Type,
+			"param":   param,
+			"code":    providerErr.Code,
+			"status":  providerErr.Status,
+		},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		encoded = []byte(`{"error":{"message":"Upstream request failed","type":"api_error","code":"upstream_error"}}`)
+	}
+	_, _ = c.Writer.Write([]byte("data: "))
+	_, _ = c.Writer.Write(encoded)
+	_, _ = c.Writer.Write([]byte("\n\n"))
+	_, _ = c.Writer.Write([]byte("data: [DONE]\n\n"))
+	c.Writer.Flush()
 }
 
 func (s *Server) findUser(id string) *User {

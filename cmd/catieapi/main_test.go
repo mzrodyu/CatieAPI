@@ -2701,6 +2701,64 @@ func TestOpenAICompatibleStreamFallsBackToFakeStreamOnNotFound(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleStreamWrapsFinalUpstreamErrorAsSSE(t *testing.T) {
+	streamModes := []bool{}
+	models := []string{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Model  string `json:"model"`
+			Stream bool   `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		models = append(models, payload.Model)
+		streamModes = append(streamModes, payload.Stream)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"route_not_found","message":"Route not found","type":"invalid_request_error"}}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "compatible",
+		"UPSTREAM_API_KEY": "upstream-secret",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID:     "doubao-seed-2.0-pro",
+		Name:   "doubao-seed-2.0-pro",
+		Vendor: "Doubao",
+		Status: "available",
+	})
+	channel := server.findChannel("chn_1002")
+	channel.BaseURL = upstream.URL + "/api/coding/v3"
+	channel.StreamMode = "real"
+	channel.Models = []string{"doubao-seed-2.0-pro"}
+	server.mu.Unlock()
+
+	chatBody := `{"model":"doubao-seed-2.0-pro","stream":true,"messages":[{"role":"user","content":"hello"}]}`
+	chat := perform(router, http.MethodPost, "/v1/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if chat.Code != http.StatusOK {
+		t.Fatalf("stream error status = %d body = %s", chat.Code, chat.Body.String())
+	}
+	if got := chat.Header().Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
+		t.Fatalf("stream error content-type = %s", got)
+	}
+	if !reflect.DeepEqual(streamModes, []bool{true, false}) {
+		t.Fatalf("upstream stream modes = %#v", streamModes)
+	}
+	if !reflect.DeepEqual(models, []string{"doubao-seed-2.0-pro", "doubao-seed-2.0-pro"}) {
+		t.Fatalf("upstream models = %#v", models)
+	}
+	if !bytes.Contains(chat.Body.Bytes(), []byte(`"status":404`)) || !bytes.Contains(chat.Body.Bytes(), []byte("data: [DONE]")) {
+		t.Fatalf("stream error was not wrapped as SSE: %s", chat.Body.String())
+	}
+}
+
 func TestChannelUpstreamKeyIsEncryptedAtRestAndUsable(t *testing.T) {
 	var upstreamAuth string
 
