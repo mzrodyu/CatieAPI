@@ -3972,6 +3972,9 @@ func shouldFallbackChatGPTCodexDirectImage(providerErr *ProviderError) bool {
 	if providerErr == nil {
 		return false
 	}
+	if isUsageLimitProviderError(providerErr) {
+		return true
+	}
 	if allowedString(providerErr.Code,
 		"upstream_no_image_output",
 		"upstream_invalid_json",

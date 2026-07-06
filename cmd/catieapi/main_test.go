@@ -1698,6 +1698,69 @@ func TestImageGenerationsOpenAIAccountFallsBackWhenCodexDirectImageGatewayTimesO
 	}
 }
 
+func TestImageGenerationsOpenAIAccountFallsBackWhenCodexDirectImageUsageLimited(t *testing.T) {
+	directCalls := 0
+	responsesCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/codex/images/generations":
+			directCalls++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":"usage_limit_reached","message":"The usage limit has been reached","type":"rate_limit_error"}}`))
+		case "/backend-api/codex/responses":
+			responsesCalls++
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(codexImageSSE("fallback-image-direct-limit")))
+		default:
+			t.Fatalf("upstream image path = %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-2", Name: "GPT Image 2", Vendor: "OpenAI", Aliases: []string{"image2"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image_direct_limit", Name: "Image Direct Limit Pool", Provider: "openai", BaseURL: upstream.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-2"},
+		OpenAIAccounts: []OpenAIAccount{
+			{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "healthy", QuotaLimits: []OpenAIQuotaLimit{
+				{Label: "5h", Window: "5h", Limit: 100, Used: 82, Remaining: 18, PercentRemaining: 18},
+				{Label: "Weekly", Window: "weekly", Limit: 100, Used: 13, Remaining: 87, PercentRemaining: 87},
+			}},
+		},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"gpt-image-2","prompt":"fallback direct limit"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
+	}
+	if directCalls != 1 || responsesCalls != 1 {
+		t.Fatalf("unexpected upstream calls direct=%d responses=%d", directCalls, responsesCalls)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"fallback-image-direct-limit"`)) {
+		t.Fatalf("fallback image response was not returned: %s", response.Body.String())
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel := server.findChannel("chn_image_direct_limit")
+	if channel.OpenAIAccounts[0].Status != "healthy" || strings.Contains(channel.OpenAIAccounts[0].LastError, "usage limit") {
+		t.Fatalf("direct limit should not mark account limited after fallback success: %#v", channel.OpenAIAccounts[0])
+	}
+}
+
 func TestImageGenerationsRetryNextOpenAIAccountOnUsageLimit(t *testing.T) {
 	authHeaders := []string{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
