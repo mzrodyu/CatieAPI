@@ -2706,9 +2706,12 @@ func TestDeleteOpenAIAccountRemovesAccountFromChannel(t *testing.T) {
 
 func TestActiveOpenAIAccountsOrdersUsageLimitedLast(t *testing.T) {
 	accounts := []OpenAIAccount{
-		{ID: "limited", AccessToken: "limited-token", Status: "healthy", QuotaLimits: []OpenAIQuotaLimit{{Label: "5h", Limit: 100, Used: 100, Remaining: 0}}},
+		{ID: "limited", AccessToken: "limited-token", Status: "healthy", QuotaLimits: []OpenAIQuotaLimit{{Label: "5h", Limit: 100, Used: 100, Remaining: 0, ResetAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}}},
 		{ID: "healthy", AccessToken: "healthy-token", Status: "healthy", QuotaLimits: []OpenAIQuotaLimit{{Label: "5h", Limit: 100, Remaining: 10, PercentRemaining: 10}}},
+		{ID: "stale-last-error", AccessToken: "stale-last-error-token", Status: "healthy", LastError: "The usage limit has been reached", QuotaLimits: []OpenAIQuotaLimit{{Label: "5h", Limit: 100, Used: 1, Remaining: 99, PercentRemaining: 99}}},
+		{ID: "reset-elapsed", AccessToken: "reset-elapsed-token", Status: "healthy", LastError: "The usage limit has been reached", QuotaLimits: []OpenAIQuotaLimit{{Label: "5h", Limit: 100, Used: 100, Remaining: 0, ResetAt: "2000-01-01T00:00:00Z"}}},
 		{ID: "unchecked", AccessToken: "unchecked-token", Status: "unchecked"},
+		{ID: "last-error-expired", AccessToken: "last-error-expired-token", Status: "unchecked", LastError: "The usage limit has been reached", LastCheckedAt: "2000-01-01T00:00:00Z"},
 		{ID: "invalid", AccessToken: "invalid-token", Status: "invalid"},
 		{ID: "last-error", AccessToken: "last-error-token", Status: "unchecked", LastError: "The usage limit has been reached"},
 	}
@@ -2718,7 +2721,7 @@ func TestActiveOpenAIAccountsOrdersUsageLimitedLast(t *testing.T) {
 	for _, account := range active {
 		ids = append(ids, account.ID)
 	}
-	expected := []string{"healthy", "unchecked", "limited", "last-error"}
+	expected := []string{"healthy", "stale-last-error", "reset-elapsed", "unchecked", "last-error-expired", "limited", "last-error"}
 	if !reflect.DeepEqual(ids, expected) {
 		t.Fatalf("active account order = %#v", ids)
 	}

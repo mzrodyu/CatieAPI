@@ -36,6 +36,7 @@ import (
 const (
 	defaultUpstreamTimeoutSeconds = 600
 	codexDirectImageTimeout       = 45 * time.Second
+	openAIUsageLimitRetryAfter    = 5 * time.Hour
 	defaultOpenAIBaseURL          = "https://api.openai.com/v1"
 	defaultChatGPTAPIBaseURL      = "https://chatgpt.com/backend-api"
 	chatGPTCodexCLIProfile        = "codex_cli_rs"
@@ -5580,10 +5581,62 @@ func activeOpenAIAccounts(accounts []OpenAIAccount) []OpenAIAccount {
 }
 
 func openAIAccountUsageLimited(account OpenAIAccount) bool {
-	if len(account.QuotaLimits) > 0 && !openAIQuotaLimitsHaveRemaining(account.QuotaLimits) {
-		return true
+	if len(account.QuotaLimits) > 0 {
+		if openAIQuotaLimitsHaveRemaining(account.QuotaLimits) {
+			return false
+		}
+		return !openAIQuotaLimitsResetElapsed(account.QuotaLimits)
 	}
-	return usageLimitErrorText(account.LastError)
+	return usageLimitErrorText(account.LastError) && !openAIUsageLimitErrorExpired(account.LastCheckedAt)
+}
+
+func openAIQuotaLimitsResetElapsed(limits []OpenAIQuotaLimit) bool {
+	relevant := []OpenAIQuotaLimit{}
+	for _, limit := range limits {
+		if quotaPriority(limit) == 0 {
+			relevant = append(relevant, limit)
+		}
+	}
+	if len(relevant) == 0 {
+		relevant = limits
+	}
+	for _, limit := range relevant {
+		if openAIQuotaLimitHasRemaining(limit) {
+			return true
+		}
+		if !openAIQuotaLimitResetElapsed(limit) {
+			return false
+		}
+	}
+	return len(relevant) > 0
+}
+
+func openAIQuotaLimitResetElapsed(limit OpenAIQuotaLimit) bool {
+	resetAt := strings.TrimSpace(normalizeQuotaResetAt(limit.ResetAt))
+	if resetAt == "" {
+		return false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		parsed, err := time.Parse(layout, resetAt)
+		if err == nil {
+			return !time.Now().UTC().Before(parsed)
+		}
+	}
+	return false
+}
+
+func openAIUsageLimitErrorExpired(lastCheckedAt string) bool {
+	lastCheckedAt = strings.TrimSpace(lastCheckedAt)
+	if lastCheckedAt == "" {
+		return false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		checkedAt, err := time.Parse(layout, lastCheckedAt)
+		if err == nil {
+			return time.Since(checkedAt) >= openAIUsageLimitRetryAfter
+		}
+	}
+	return false
 }
 
 func (s *Server) markOpenAIAccountInvalid(channelID string, accountID string, message string) {
