@@ -1534,23 +1534,21 @@ func TestImageGenerationsRetryNextOpenAIAccountOnBillingError(t *testing.T) {
 	}
 }
 
-func TestImageGenerationsOpenAIAccountUsesCodexDirectEndpointForGPTImage2(t *testing.T) {
+func TestImageGenerationsOpenAIAccountUsesCodexResponsesForGPTImage2(t *testing.T) {
 	var upstreamAuth string
 	var upstreamAccept string
-	var upstreamBeta string
 	var upstreamPayload map[string]interface{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamAuth = r.Header.Get("Authorization")
 		upstreamAccept = r.Header.Get("Accept")
-		upstreamBeta = r.Header.Get("OpenAI-Beta")
-		if r.URL.Path != "/backend-api/codex/images/generations" {
+		if r.URL.Path != "/backend-api/codex/responses" {
 			t.Fatalf("upstream image path = %s", r.URL.Path)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&upstreamPayload); err != nil {
-			t.Fatalf("decode direct image request: %v", err)
+			t.Fatalf("decode responses image request: %v", err)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"b64_json":"direct-image"}]}`))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(codexImageSSE("responses-image")))
 	}))
 	defer upstream.Close()
 
@@ -1579,17 +1577,22 @@ func TestImageGenerationsOpenAIAccountUsesCodexDirectEndpointForGPTImage2(t *tes
 	if response.Code != http.StatusOK {
 		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
 	}
-	if upstreamAuth != "Bearer good-token" || upstreamAccept != "application/json" || upstreamBeta != "" {
-		t.Fatalf("unexpected direct headers auth=%s accept=%s beta=%s", upstreamAuth, upstreamAccept, upstreamBeta)
+	if upstreamAuth != "Bearer good-token" || upstreamAccept != "text/event-stream" {
+		t.Fatalf("unexpected responses headers auth=%s accept=%s", upstreamAuth, upstreamAccept)
 	}
-	if upstreamPayload["model"] != "gpt-image-2" || upstreamPayload["prompt"] != "direct account" || upstreamPayload["n"] != float64(2) {
-		t.Fatalf("unexpected direct payload = %#v", upstreamPayload)
+	if upstreamPayload["model"] != chatGPTCodexImageModel || upstreamPayload["stream"] != true || upstreamPayload["tool_choice"] == nil {
+		t.Fatalf("unexpected responses payload = %#v", upstreamPayload)
 	}
-	if _, ok := upstreamPayload["stream"]; ok {
-		t.Fatalf("direct image payload should not pass stream: %#v", upstreamPayload)
+	tools, ok := upstreamPayload["tools"].([]interface{})
+	if !ok || len(tools) != 1 {
+		t.Fatalf("unexpected responses tools = %#v", upstreamPayload["tools"])
 	}
-	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"direct-image"`)) {
-		t.Fatalf("direct image response was not proxied: %s", response.Body.String())
+	tool, ok := tools[0].(map[string]interface{})
+	if !ok || tool["type"] != "image_generation" || tool["model"] != "gpt-image-2" {
+		t.Fatalf("unexpected responses tool = %#v", tools[0])
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"responses-image"`)) {
+		t.Fatalf("responses image response was not proxied: %s", response.Body.String())
 	}
 }
 
@@ -1637,11 +1640,67 @@ func TestImageGenerationsOpenAIAccountFallsBackWhenCodexDirectImageIsEmpty(t *te
 	if response.Code != http.StatusOK {
 		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
 	}
-	if directCalls != 1 || responsesCalls != 1 {
+	if directCalls != 0 || responsesCalls != 1 {
 		t.Fatalf("unexpected upstream calls direct=%d responses=%d", directCalls, responsesCalls)
 	}
 	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"fallback-image-empty"`)) {
 		t.Fatalf("fallback image response was not returned: %s", response.Body.String())
+	}
+}
+
+func TestImageGenerationsOpenAIAccountRetriesCodexResponsesMainModelOn504(t *testing.T) {
+	mainModels := []string{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/codex/responses" {
+			t.Fatalf("upstream image path = %s", r.URL.Path)
+		}
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode responses image request: %v", err)
+		}
+		mainModels = append(mainModels, completionPrompt(payload["model"]))
+		if len(mainModels) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusGatewayTimeout)
+			_, _ = w.Write([]byte(`{"error":{"code":"gateway_timeout","message":"Gateway Timeout","type":"api_error"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(codexImageSSE("image-after-main-model-retry")))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-2", Name: "GPT Image 2", Vendor: "OpenAI", Aliases: []string{"image2"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image_main_model_retry", Name: "Image Main Model Retry Pool", Provider: "openai", BaseURL: upstream.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-2"},
+		OpenAIAccounts: []OpenAIAccount{
+			{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "healthy"},
+		},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"gpt-image-2","prompt":"retry main model"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
+	}
+	expectedModels := []string{chatGPTCodexImageModel, "gpt-5.5"}
+	if !reflect.DeepEqual(mainModels, expectedModels) {
+		t.Fatalf("main model sequence = %#v", mainModels)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"image-after-main-model-retry"`)) {
+		t.Fatalf("retry image response was not returned: %s", response.Body.String())
 	}
 }
 
@@ -1690,7 +1749,7 @@ func TestImageGenerationsOpenAIAccountFallsBackWhenCodexDirectImageGatewayTimesO
 	if response.Code != http.StatusOK {
 		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
 	}
-	if directCalls != 1 || responsesCalls != 1 {
+	if directCalls != 0 || responsesCalls != 1 {
 		t.Fatalf("unexpected upstream calls direct=%d responses=%d", directCalls, responsesCalls)
 	}
 	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"fallback-image-504"`)) {
@@ -1746,7 +1805,7 @@ func TestImageGenerationsOpenAIAccountFallsBackWhenCodexDirectImageUsageLimited(
 	if response.Code != http.StatusOK {
 		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
 	}
-	if directCalls != 1 || responsesCalls != 1 {
+	if directCalls != 0 || responsesCalls != 1 {
 		t.Fatalf("unexpected upstream calls direct=%d responses=%d", directCalls, responsesCalls)
 	}
 	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"fallback-image-direct-limit"`)) {
@@ -1869,7 +1928,8 @@ func TestImageGenerationsRetryNextOpenAIAccountOnTransientUpstreamError(t *testi
 	if response.Code != http.StatusOK {
 		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
 	}
-	if len(authHeaders) != 2 || authHeaders[0] != "Bearer gateway-timeout-token" || authHeaders[1] != "Bearer good-token" {
+	expectedAuthHeaders := []string{"Bearer gateway-timeout-token", "Bearer gateway-timeout-token", "Bearer gateway-timeout-token", "Bearer good-token"}
+	if !reflect.DeepEqual(authHeaders, expectedAuthHeaders) {
 		t.Fatalf("upstream auth sequence = %#v", authHeaders)
 	}
 	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"image-after-504-retry"`)) {
@@ -2645,10 +2705,10 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 			default:
 				t.Fatalf("unexpected image auth = %s", auth)
 			}
-		case "/backend-api/codex/images/generations":
+		case "/backend-api/codex/responses":
 			codexImageAuth = auth
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"b64_json":"image-after-check"}]}`))
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(codexImageSSE("image-after-check")))
 		default:
 			t.Fatalf("upstream path = %s", r.URL.Path)
 		}

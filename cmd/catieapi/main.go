@@ -3890,16 +3890,25 @@ func (s *Server) streamChatGPTCodexWithAccount(c *gin.Context, call GatewayCall,
 }
 
 func (s *Server) callChatGPTCodexImageWithAccount(call ImageGatewayCall, account OpenAIAccount, accessToken string) (gin.H, *ProviderError) {
-	if directModel := chatGPTCodexDirectImageModel(call); directModel != "" {
-		body, providerErr := s.callChatGPTCodexDirectImageWithAccount(call, account, accessToken, directModel)
+	var lastErr *ProviderError
+	for _, mainModel := range chatGPTCodexImageMainModels() {
+		body, providerErr := s.callChatGPTCodexImageResponsesWithAccount(call, account, accessToken, mainModel)
 		if providerErr == nil {
 			return body, nil
 		}
-		if !shouldFallbackChatGPTCodexDirectImage(providerErr) {
+		lastErr = providerErr
+		if !shouldRetryChatGPTCodexImageMainModel(providerErr) {
 			return nil, providerErr
 		}
 	}
-	encoded, providerErr := buildChatGPTCodexImagePayload(call)
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "No Codex image model is configured", Type: "api_error"}
+}
+
+func (s *Server) callChatGPTCodexImageResponsesWithAccount(call ImageGatewayCall, account OpenAIAccount, accessToken string, mainModel string) (gin.H, *ProviderError) {
+	encoded, providerErr := buildChatGPTCodexImagePayload(call, mainModel)
 	if providerErr != nil {
 		return nil, providerErr
 	}
@@ -3930,6 +3939,24 @@ func (s *Server) callChatGPTCodexImageWithAccount(call ImageGatewayCall, account
 		created = unixNow()
 	}
 	return gin.H{"created": created, "data": parsed.Images}, nil
+}
+
+func chatGPTCodexImageMainModels() []string {
+	return []string{chatGPTCodexImageModel, "gpt-5.5", "gpt-5.4"}
+}
+
+func shouldRetryChatGPTCodexImageMainModel(providerErr *ProviderError) bool {
+	if providerErr == nil {
+		return false
+	}
+	if providerErr.Status == http.StatusGatewayTimeout || providerErr.Code == "upstream_timeout" {
+		return true
+	}
+	return allowedString(providerErr.Code,
+		"upstream_unreachable",
+		"upstream_read_error",
+		"upstream_invalid_json",
+	)
 }
 
 func (s *Server) callChatGPTCodexDirectImageWithAccount(call ImageGatewayCall, account OpenAIAccount, accessToken string, model string) (gin.H, *ProviderError) {
@@ -4192,7 +4219,11 @@ func buildChatGPTCodexChatPayload(call GatewayCall, stream bool) ([]byte, *Provi
 	return encoded, nil
 }
 
-func buildChatGPTCodexImagePayload(call ImageGatewayCall) ([]byte, *ProviderError) {
+func buildChatGPTCodexImagePayload(call ImageGatewayCall, mainModel string) ([]byte, *ProviderError) {
+	mainModel = strings.TrimSpace(mainModel)
+	if mainModel == "" {
+		mainModel = chatGPTCodexImageModel
+	}
 	tool := gin.H{
 		"type":          "image_generation",
 		"action":        "generate",
@@ -4210,7 +4241,7 @@ func buildChatGPTCodexImagePayload(call ImageGatewayCall) ([]byte, *ProviderErro
 		}
 	}
 	payload := gin.H{
-		"model":               chatGPTCodexImageModel,
+		"model":               mainModel,
 		"stream":              true,
 		"store":               false,
 		"parallel_tool_calls": true,
@@ -4523,11 +4554,14 @@ func codexImageFromMap(payload map[string]interface{}) gin.H {
 	if result == "" {
 		result = strings.TrimSpace(completionPrompt(payload["b64_json"]))
 	}
-	if result == "" || (itemType != "image_generation_call" && payload["result"] == nil && payload["b64_json"] == nil) {
+	if result == "" {
+		result = strings.TrimSpace(completionPrompt(payload["partial_image_b64"]))
+	}
+	if result == "" || (itemType != "image_generation_call" && itemType != "response.image_generation_call.partial_image" && payload["result"] == nil && payload["b64_json"] == nil && payload["partial_image_b64"] == nil) {
 		return nil
 	}
 	image := gin.H{"b64_json": result}
-	for _, key := range []string{"revised_prompt", "output_format", "quality"} {
+	for _, key := range []string{"revised_prompt", "output_format", "quality", "size", "background"} {
 		if value := strings.TrimSpace(completionPrompt(payload[key])); value != "" && value != "null" {
 			image[key] = value
 		}
