@@ -4038,10 +4038,9 @@ func (s *Server) newChatGPTCodexRequest(encoded []byte, accessToken string, acco
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "text/event-stream")
 	request.Header.Set("Connection", "Keep-Alive")
-	request.Header.Set("OpenAI-Beta", "responses=experimental")
-	setChatGPTCodexClientHeaders(request, account, true)
+	setChatGPTCodexClientHeaders(request, account)
 	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
-		setHeaderPreserveCase(request.Header, "ChatGPT-Account-Id", accountID)
+		setHeaderPreserveCase(request.Header, "Chatgpt-Account-Id", accountID)
 	}
 	return request, nil
 }
@@ -4055,9 +4054,9 @@ func (s *Server) newChatGPTCodexDirectImageRequest(encoded []byte, accessToken s
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Connection", "Keep-Alive")
-	setChatGPTCodexClientHeaders(request, account, false)
+	setChatGPTCodexClientHeaders(request, account)
 	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
-		setHeaderPreserveCase(request.Header, "ChatGPT-Account-Id", accountID)
+		setHeaderPreserveCase(request.Header, "Chatgpt-Account-Id", accountID)
 	}
 	return request, nil
 }
@@ -4077,16 +4076,13 @@ type chatGPTCodexClientProfile struct {
 	Version    string
 }
 
-func setChatGPTCodexClientHeaders(request *http.Request, account OpenAIAccount, responses bool) {
+func setChatGPTCodexClientHeaders(request *http.Request, account OpenAIAccount) {
 	profile := chatGPTCodexClientProfileForAccount(account)
 	setHeaderPreserveCase(request.Header, "Originator", profile.Originator)
 	setHeaderPreserveCase(request.Header, "User-Agent", profile.UserAgent)
 	setHeaderPreserveCase(request.Header, "Version", profile.Version)
 	if profile.Name == chatGPTCodexTUIProfile || strings.Contains(profile.UserAgent, "Mac OS") {
 		setHeaderPreserveCase(request.Header, "Session_id", randomUUID())
-	}
-	if responses {
-		setHeaderPreserveCase(request.Header, "OpenAI-Beta", "responses=experimental")
 	}
 }
 
@@ -4117,10 +4113,10 @@ func chatGPTCodexClientProfileForAccount(account OpenAIAccount) chatGPTCodexClie
 		}
 	default:
 		return chatGPTCodexClientProfile{
-			Name:       chatGPTCodexCLIProfile,
-			Originator: chatGPTCodexCLIProfile,
-			UserAgent:  chatGPTCodexCLIUserAgent,
-			Version:    chatGPTCodexVersion,
+			Name:       chatGPTCodexTUIProfile,
+			Originator: chatGPTCodexTUIProfile,
+			UserAgent:  chatGPTCodexTUIUserAgent,
+			Version:    chatGPTCodexTUIVersion,
 		}
 	}
 }
@@ -4136,7 +4132,7 @@ func codexClientProfileForImport(source string, explicit string) string {
 	if isCodexProxyImportSource(source) {
 		return chatGPTCodexTUIProfile
 	}
-	return chatGPTCodexCLIProfile
+	return chatGPTCodexTUIProfile
 }
 
 func isCodexProxyImportSource(source string) bool {
@@ -4804,9 +4800,9 @@ func (s *Server) checkOpenAIAccountUsage(accessToken string, account OpenAIAccou
 	}
 	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
 	request.Header.Set("Accept", "application/json")
-	setChatGPTCodexClientHeaders(request, account, false)
+	setChatGPTCodexClientHeaders(request, account)
 	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
-		setHeaderPreserveCase(request.Header, "ChatGPT-Account-Id", accountID)
+		setHeaderPreserveCase(request.Header, "Chatgpt-Account-Id", accountID)
 	}
 	response, err := s.httpClient.Do(request)
 	if err != nil {

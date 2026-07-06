@@ -939,8 +939,8 @@ func TestOpenAIAccountPoolChatUsesChatGPTCodexResponses(t *testing.T) {
 	if upstreamPath != "/backend-api/codex/responses" || upstreamAuth != "Bearer oauth-token" {
 		t.Fatalf("unexpected codex upstream path/auth = %s %s", upstreamPath, upstreamAuth)
 	}
-	if upstreamBeta != "responses=experimental" || upstreamOriginator != chatGPTCodexCLIProfile || upstreamAccountID != "chatgpt-account" ||
-		upstreamUserAgent != chatGPTCodexCLIUserAgent || upstreamVersion != chatGPTCodexVersion {
+	if upstreamBeta != "" || upstreamOriginator != chatGPTCodexTUIProfile || upstreamAccountID != "chatgpt-account" ||
+		upstreamUserAgent != chatGPTCodexTUIUserAgent || upstreamVersion != chatGPTCodexTUIVersion {
 		t.Fatalf("missing codex headers beta=%s originator=%s account=%s ua=%s version=%s", upstreamBeta, upstreamOriginator, upstreamAccountID, upstreamUserAgent, upstreamVersion)
 	}
 	if upstreamPayload["model"] != "gpt-5.5" || upstreamPayload["stream"] != true || upstreamPayload["store"] != false {
