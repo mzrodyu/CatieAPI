@@ -3780,6 +3780,7 @@ type chatGPTCodexParseResult struct {
 	Images        []gin.H
 	Usage         gin.H
 	Created       int64
+	Error         *ProviderError
 	imageSeen     map[string]bool
 }
 
@@ -4066,6 +4067,9 @@ func (s *Server) callChatGPTCodexImageResponsesWithAccount(call ImageGatewayCall
 	}
 
 	parsed := parseChatGPTCodexResponse(content)
+	if parsed.Error != nil && len(parsed.Images) == 0 {
+		return nil, parsed.Error
+	}
 	if len(parsed.Images) == 0 {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "Upstream returned no image data", Type: "api_error"}
 	}
@@ -4693,6 +4697,9 @@ func collectCodexPayload(payload map[string]interface{}, result *chatGPTCodexPar
 	if result == nil || payload == nil {
 		return
 	}
+	if providerErr := codexProviderErrorFromPayload(payload); providerErr != nil {
+		result.Error = providerErr
+	}
 	if delta := codexOutputTextDelta(payload); delta != "" {
 		result.Text += delta
 	}
@@ -4721,6 +4728,86 @@ func collectCodexPayload(payload map[string]interface{}, result *chatGPTCodexPar
 	if item, ok := payload["item"].(map[string]interface{}); ok {
 		collectCodexImagesFromMap(item, result)
 	}
+}
+
+func codexProviderErrorFromPayload(payload map[string]interface{}) *ProviderError {
+	eventType := strings.ToLower(strings.TrimSpace(completionPrompt(payload["type"])))
+	switch eventType {
+	case "error":
+		return providerErrorFromCodexErrorValue(payload["error"], http.StatusBadGateway)
+	case "response.failed":
+		if response, ok := payload["response"].(map[string]interface{}); ok {
+			return providerErrorFromCodexErrorValue(response["error"], http.StatusBadGateway)
+		}
+	case "response.incomplete":
+		reason := ""
+		if response, ok := payload["response"].(map[string]interface{}); ok {
+			reason = strings.TrimSpace(completionPrompt(response["incomplete_details"]))
+			if details, ok := response["incomplete_details"].(map[string]interface{}); ok {
+				reason = firstNonEmptyString(completionPrompt(details["reason"]), reason)
+			}
+		}
+		message := "Upstream response incomplete before returning image data"
+		if reason != "" && reason != "null" {
+			message += ": " + reason
+		}
+		return &ProviderError{Status: http.StatusGatewayTimeout, Code: "upstream_timeout", Message: message, Type: "api_error"}
+	}
+	return nil
+}
+
+func providerErrorFromCodexErrorValue(value interface{}, fallbackStatus int) *ProviderError {
+	errorMap, ok := value.(map[string]interface{})
+	if !ok || errorMap == nil {
+		message := strings.TrimSpace(completionPrompt(value))
+		if message == "" || message == "null" {
+			return nil
+		}
+		return &ProviderError{Status: fallbackStatus, Code: "upstream_error", Message: message, Type: "api_error"}
+	}
+	code := sanitizeErrorCode(completionPrompt(errorMap["code"]))
+	if code == "" || code == "null" {
+		code = "upstream_error"
+	} else if !strings.HasPrefix(code, "upstream_") {
+		code = "upstream_" + code
+	}
+	message := strings.TrimSpace(completionPrompt(errorMap["message"]))
+	if message == "" || message == "null" {
+		message = "Upstream returned an error"
+	}
+	errorType := strings.TrimSpace(completionPrompt(errorMap["type"]))
+	if errorType == "" || errorType == "null" {
+		errorType = "api_error"
+	}
+	status := codexErrorStatus(code, message, errorType, fallbackStatus)
+	if imagePermissionErrorText(code, message, errorType) {
+		code = "upstream_missing_image_scope"
+	}
+	return &ProviderError{Status: status, Code: code, Message: message, Type: errorType}
+}
+
+func codexErrorStatus(code, message, errorType string, fallbackStatus int) int {
+	if usageLimitErrorText(code, message, errorType) {
+		return http.StatusTooManyRequests
+	}
+	if billingErrorText(code, message, errorType) {
+		return http.StatusPaymentRequired
+	}
+	if strings.Contains(strings.ToLower(errorType), "invalid_request") || strings.Contains(strings.ToLower(code), "invalid_request") {
+		return http.StatusBadRequest
+	}
+	if fallbackStatus > 0 {
+		return fallbackStatus
+	}
+	return http.StatusBadGateway
+}
+
+func billingErrorText(parts ...string) bool {
+	text := strings.ToLower(strings.Join(parts, " "))
+	return strings.Contains(text, "billing") ||
+		strings.Contains(text, "payment") ||
+		strings.Contains(text, "insufficient_quota") ||
+		strings.Contains(text, "quota")
 }
 
 func codexOutputTextDelta(payload map[string]interface{}) string {

@@ -47,6 +47,10 @@ func codexImageSSE(b64 string) string {
 	return fmt.Sprintf("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"result\":%q}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"created_at\":1780000000,\"output\":[]}}\n\ndata: [DONE]\n\n", b64)
 }
 
+func codexImageCompletedSSE(b64 string) string {
+	return fmt.Sprintf("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":1780000000,\"output\":[{\"type\":\"image_generation_call\",\"result\":%q,\"size\":\"1024x1024\"}]}}\n\ndata: [DONE]\n\n", b64)
+}
+
 func seedGatewayFixtures(server *Server) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -1593,6 +1597,61 @@ func TestImageGenerationsOpenAIAccountUsesCodexResponsesForGPTImage2(t *testing.
 	}
 	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"responses-image"`)) {
 		t.Fatalf("responses image response was not proxied: %s", response.Body.String())
+	}
+}
+
+func TestImageGenerationsOpenAIAccountReadsCompletedOutputImage(t *testing.T) {
+	var upstreamPayload map[string]interface{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/codex/responses" {
+			t.Fatalf("upstream image path = %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamPayload); err != nil {
+			t.Fatalf("decode responses image request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(codexImageCompletedSSE("completed-image")))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-2", Name: "GPT Image 2", Vendor: "OpenAI", Aliases: []string{"image2"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image_completed", Name: "Image Completed Pool", Provider: "openai", BaseURL: upstream.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-2"},
+		OpenAIAccounts: []OpenAIAccount{
+			{ID: "oaiacc_completed", Email: "completed@example.com", AccessToken: "completed-token", Status: "healthy"},
+		},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"gpt-image-2","prompt":"plain image","n":2}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
+	}
+	tools, ok := upstreamPayload["tools"].([]interface{})
+	if !ok || len(tools) != 1 {
+		t.Fatalf("unexpected responses tools = %#v", upstreamPayload["tools"])
+	}
+	tool, ok := tools[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected responses tool = %#v", tools[0])
+	}
+	if _, exists := tool["n"]; exists {
+		t.Fatalf("responses image tool should not include n: %#v", tool)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"completed-image"`)) {
+		t.Fatalf("responses completed image response was not proxied: %s", response.Body.String())
 	}
 }
 
