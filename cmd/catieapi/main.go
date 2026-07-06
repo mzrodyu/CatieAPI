@@ -4376,11 +4376,6 @@ func buildChatGPTCodexImagePayload(call ImageGatewayCall, mainModel string) ([]b
 			tool[key] = value
 		}
 	}
-	if operation == "edit" {
-		if value, ok := call.Body.Payload["n"]; ok {
-			tool["n"] = value
-		}
-	}
 	content := []gin.H{{"type": "input_text", "text": call.Body.Prompt}}
 	if operation == "edit" {
 		images := imageURLsFromPayload(call.Body.Payload)

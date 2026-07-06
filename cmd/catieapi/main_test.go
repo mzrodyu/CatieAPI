@@ -1640,6 +1640,9 @@ func TestImageEditsOpenAIAccountUsesCodexResponsesMultipart(t *testing.T) {
 	if err := writer.WriteField("input_fidelity", "high"); err != nil {
 		t.Fatal(err)
 	}
+	if err := writer.WriteField("n", "2"); err != nil {
+		t.Fatal(err)
+	}
 	imagePart, err := writer.CreateFormFile("image", "source.png")
 	if err != nil {
 		t.Fatal(err)
@@ -1674,6 +1677,9 @@ func TestImageEditsOpenAIAccountUsesCodexResponsesMultipart(t *testing.T) {
 	tool, ok := tools[0].(map[string]interface{})
 	if !ok || tool["action"] != "edit" || tool["model"] != "gpt-image-2" || tool["input_fidelity"] != "high" {
 		t.Fatalf("unexpected responses tool = %#v", tools[0])
+	}
+	if _, exists := tool["n"]; exists {
+		t.Fatalf("responses image tool should not include n: %#v", tool)
 	}
 	mask, ok := tool["input_image_mask"].(map[string]interface{})
 	if !ok || !strings.HasPrefix(fmt.Sprint(mask["image_url"]), "data:image/") {
