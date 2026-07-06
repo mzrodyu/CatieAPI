@@ -569,6 +569,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.POST("/channels", s.createChannel)
 	admin.POST("/channels/:id/import-openai-accounts", s.importOpenAIAccounts)
 	admin.POST("/channels/:id/openai-accounts/check", s.checkOpenAIAccounts)
+	admin.DELETE("/channels/:id/openai-accounts/:accountId", s.deleteOpenAIAccount)
 	admin.PATCH("/channels/:id", s.updateChannel)
 	admin.DELETE("/channels/:id", s.deleteChannel)
 	admin.POST("/channels/:id/check", s.checkChannel)
@@ -2409,6 +2410,36 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 	})
 }
 
+func (s *Server) deleteOpenAIAccount(c *gin.Context) {
+	channelID := c.Param("id")
+	accountID := c.Param("accountId")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	channel := s.findChannel(channelID)
+	if channel == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
+		return
+	}
+	for index := range channel.OpenAIAccounts {
+		if channel.OpenAIAccounts[index].ID != accountID {
+			continue
+		}
+		channel.OpenAIAccounts = append(channel.OpenAIAccounts[:index], channel.OpenAIAccounts[index+1:]...)
+		if len(channel.OpenAIAccounts) == 0 && isCodexChannel(*channel) {
+			channel.Status = "disabled"
+			channel.LastError = "No OpenAI accounts remain in this channel"
+			channel.LastCheckedAt = now()
+		}
+		s.saveStateLocked()
+		c.JSON(http.StatusOK, gin.H{
+			"deleted": true,
+			"channel": publicChannel(*channel),
+		})
+		return
+	}
+	c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "OpenAI account not found"}})
+}
+
 func (s *Server) updateChannel(c *gin.Context) {
 	var patch map[string]interface{}
 	if err := c.ShouldBindJSON(&patch); err != nil {
@@ -3535,6 +3566,9 @@ func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *Provi
 			if shouldInvalidateOpenAIAccountForImage(providerErr) {
 				invalidatedAccounts++
 				s.markOpenAIAccountInvalid(call.Channel.ID, account.ID, providerErr.Message)
+				continue
+			}
+			if retryableProviderError(providerErr) {
 				continue
 			}
 			return nil, providerErr

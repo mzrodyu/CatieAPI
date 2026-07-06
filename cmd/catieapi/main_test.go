@@ -1553,6 +1553,66 @@ func TestImageGenerationsRetryNextOpenAIAccountOnUsageLimit(t *testing.T) {
 	}
 }
 
+func TestImageGenerationsRetryNextOpenAIAccountOnTransientUpstreamError(t *testing.T) {
+	authHeaders := []string{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		authHeaders = append(authHeaders, auth)
+		if r.URL.Path != "/backend-api/codex/responses" {
+			t.Fatalf("upstream image path = %s", r.URL.Path)
+		}
+		if auth == "Bearer gateway-timeout-token" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusGatewayTimeout)
+			_, _ = w.Write([]byte(`{"error":{"code":"gateway_timeout","message":"temporary upstream timeout","type":"server_error"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(codexImageSSE("image-after-504-retry")))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-1", Name: "GPT Image", Vendor: "OpenAI", Aliases: []string{"image"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image_pool", Name: "Image Pool", Provider: "openai", BaseURL: upstream.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-1"},
+		OpenAIAccounts: []OpenAIAccount{
+			{ID: "oaiacc_504", Email: "timeout@example.com", AccessToken: "gateway-timeout-token", Status: "healthy"},
+			{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "healthy"},
+		},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"image","prompt":"retry transient"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
+	}
+	if len(authHeaders) != 2 || authHeaders[0] != "Bearer gateway-timeout-token" || authHeaders[1] != "Bearer good-token" {
+		t.Fatalf("upstream auth sequence = %#v", authHeaders)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"image-after-504-retry"`)) {
+		t.Fatalf("image response was not retried successfully: %s", response.Body.String())
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel := server.findChannel("chn_image_pool")
+	if channel.OpenAIAccounts[0].Status != "healthy" || channel.OpenAIAccounts[0].LastError != "" {
+		t.Fatalf("transient 504 account should not be marked bad: %#v", channel.OpenAIAccounts[0])
+	}
+}
+
 func TestImageGenerationsRetryNextOpenAIAccountOnMissingImageScope(t *testing.T) {
 	authHeaders := []string{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2399,6 +2459,34 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	}
 	if !bytes.Contains(imageResponse.Body.Bytes(), []byte(`"b64_json":"image-after-check"`)) {
 		t.Fatalf("image response was not proxied after check: %s", imageResponse.Body.String())
+	}
+}
+
+func TestDeleteOpenAIAccountRemovesAccountFromChannel(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	channel := server.findChannel("chn_1002")
+	channel.OpenAIAccounts = []OpenAIAccount{
+		{ID: "oaiacc_keep", Email: "keep@example.com", AccessToken: "keep-token", Status: "healthy"},
+		{ID: "oaiacc_delete", Email: "delete@example.com", AccessToken: "delete-token", Status: "healthy"},
+	}
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodDelete, "/api/channels/chn_1002/openai-accounts/oaiacc_delete", "", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("delete account status = %d body = %s", response.Code, response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"deleted":true`)) || bytes.Contains(response.Body.Bytes(), []byte("delete@example.com")) {
+		t.Fatalf("delete account response did not remove account: %s", response.Body.String())
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel = server.findChannel("chn_1002")
+	if len(channel.OpenAIAccounts) != 1 || channel.OpenAIAccounts[0].ID != "oaiacc_keep" {
+		t.Fatalf("channel accounts after delete = %#v", channel.OpenAIAccounts)
 	}
 }
 

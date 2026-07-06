@@ -764,6 +764,16 @@ function App() {
     window.setTimeout(() => setToast(""), 3000);
   }
 
+  async function deleteOpenAIAccount(channelId: string, accountId: string) {
+    const result = await fetchJson<{ deleted: boolean; channel: Channel }>(
+      `/api/channels/${encodeURIComponent(channelId)}/openai-accounts/${encodeURIComponent(accountId)}`,
+      { method: "DELETE" }
+    );
+    setChannels((current) => current.map((channel) => (channel.id === result.channel.id ? normalizeChannel(result.channel) : channel)));
+    setToast("账号已删除");
+    window.setTimeout(() => setToast(""), 1800);
+  }
+
   async function createModel(model: ModelCreate) {
     const data = await fetchJson<{ model: ModelItem }>("/api/models", {
       method: "POST",
@@ -976,7 +986,7 @@ function App() {
         )}
         {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} onUpdateKey={updateAPIKey} onDeleteKey={deleteAPIKey} />}
         {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} onUpdate={updateModel} onDelete={deleteModel} />}
-        {active === "drawing" && <DrawingView channels={channels} onCreate={createChannel} onImport={importOpenAIAccounts} onCheckAccounts={checkOpenAIAccounts} onUpdate={updateChannel} />}
+        {active === "drawing" && <DrawingView channels={channels} onCreate={createChannel} onImport={importOpenAIAccounts} onCheckAccounts={checkOpenAIAccounts} onDeleteAccount={deleteOpenAIAccount} onUpdate={updateChannel} />}
         {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onImport={importOpenAIAccounts} onDelete={deleteChannel} onSyncModels={syncChannelModels} onCheck={checkChannel} />}
         {active === "logs" && <LogsView logs={logs} onCopy={copyAndToast} />}
         {active === "settings" && <SettingsView models={models} channels={channels} />}
@@ -2322,12 +2332,14 @@ function DrawingView({
   onCreate,
   onImport,
   onCheckAccounts,
+  onDeleteAccount,
   onUpdate
 }: {
   channels: Channel[];
   onCreate: () => Promise<void>;
   onImport: (channelId: string, file: File) => Promise<void>;
   onCheckAccounts: (channelId: string) => Promise<void>;
+  onDeleteAccount: (channelId: string, accountId: string) => Promise<void>;
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
 }) {
   const drawingChannels = channels.filter((channel) => channel.provider === "codex" || channel.provider === "openai" || arrayOf(channel.models).some((model) => model.includes("image")));
@@ -2363,6 +2375,17 @@ function DrawingView({
         provider: channel.provider || "codex",
         models: arrayOf(channel.models).length ? channel.models : defaultCodexModels.split(",").map((model) => model.trim())
       });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function deleteAccount(channel: Channel, account: OpenAIAccount) {
+    const label = account.email || account.name || account.accountId || account.id;
+    if (!window.confirm(`删除账号「${label}」？`)) return;
+    setBusy(`delete-account:${account.id}`);
+    try {
+      await onDeleteAccount(channel.id, account.id);
     } finally {
       setBusy("");
     }
@@ -2436,6 +2459,14 @@ function DrawingView({
                         <Badge tone={account.status === "healthy" ? "healthy" : account.status === "invalid" ? "disabled" : "standby"}>
                           {account.status === "healthy" ? "可用" : account.status === "invalid" ? "无效" : "未验证"}
                         </Badge>
+                        <button
+                          type="button"
+                          className="danger-button compact-button"
+                          disabled={busy !== ""}
+                          onClick={() => deleteAccount(channel, account)}
+                        >
+                          {busy === `delete-account:${account.id}` ? "删除中" : "删除"}
+                        </button>
                       </div>
                     </div>
                   ))}
