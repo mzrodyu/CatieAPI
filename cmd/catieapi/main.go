@@ -3490,6 +3490,24 @@ func (s *Server) handleChatCompletionWithTransform(c *gin.Context, body ChatRequ
 			} else {
 				attempts++
 				providerErr = s.writeProviderStream(c, call)
+				if shouldFallbackStreamToNonStream(providerErr, channel) {
+					attempts++
+					nonStreamCall := call
+					nonStreamCall.Body.Stream = false
+					if nonStreamCall.Body.Payload != nil {
+						payload := gin.H{}
+						for key, value := range nonStreamCall.Body.Payload {
+							payload[key] = value
+						}
+						payload["stream"] = false
+						nonStreamCall.Body.Payload = payload
+					}
+					responseBody, providerErr = s.callProvider(nonStreamCall)
+					if providerErr == nil {
+						streamMode = "fake"
+						s.writeFakeProviderStream(c, call, responseBody)
+					}
+				}
 			}
 			if providerErr == nil {
 				selectedChannel = channel
@@ -5887,6 +5905,15 @@ func (s *Server) shouldUseCompatibleProvider(channel Channel) bool {
 		return true
 	}
 	return strings.TrimSpace(channel.BaseURL) != "" && (strings.TrimSpace(channel.UpstreamAPIKey) != "" || len(channel.OpenAIAccounts) > 0 || strings.TrimSpace(s.upstreamAPIKey) != "")
+}
+
+func shouldFallbackStreamToNonStream(providerErr *ProviderError, channel Channel) bool {
+	if providerErr == nil || isCodexChannel(channel) {
+		return false
+	}
+	return providerErr.Status == http.StatusNotFound ||
+		providerErr.Status == http.StatusMethodNotAllowed ||
+		providerErr.Status == http.StatusNotImplemented
 }
 
 func (s *Server) newOpenAICompatibleRequest(call GatewayCall, stream bool) (*http.Request, *ProviderError) {

@@ -2577,6 +2577,51 @@ func TestOpenAICompatibleProviderStreamsUpstreamResponse(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleStreamFallsBackToFakeStreamOnNotFound(t *testing.T) {
+	streamModes := []bool{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		streamModes = append(streamModes, payload.Stream)
+		if payload.Stream {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"stream endpoint not found","type":"not_found"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_fallback","object":"chat.completion","model":"deepseek-v4","choices":[{"index":0,"message":{"role":"assistant","content":"fallback ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "compatible",
+		"UPSTREAM_API_KEY": "upstream-secret",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.findChannel("chn_1002").BaseURL = upstream.URL + "/v1"
+	server.findChannel("chn_1002").StreamMode = "real"
+	server.mu.Unlock()
+
+	chatBody := `{"model":"ds","stream":true,"messages":[{"role":"user","content":"hello"}]}`
+	chat := perform(router, http.MethodPost, "/v1/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if chat.Code != http.StatusOK {
+		t.Fatalf("fallback stream chat status = %d body = %s", chat.Code, chat.Body.String())
+	}
+	if !reflect.DeepEqual(streamModes, []bool{true, false}) {
+		t.Fatalf("upstream stream modes = %#v", streamModes)
+	}
+	if !bytes.Contains(chat.Body.Bytes(), []byte(`fallback ok`)) || !bytes.Contains(chat.Body.Bytes(), []byte("data: [DONE]")) {
+		t.Fatalf("fallback stream response was not returned: %s", chat.Body.String())
+	}
+}
+
 func TestChannelUpstreamKeyIsEncryptedAtRestAndUsable(t *testing.T) {
 	var upstreamAuth string
 
