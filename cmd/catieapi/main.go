@@ -3738,41 +3738,34 @@ func (s *Server) callOpenAICompatible(call GatewayCall) (gin.H, *ProviderError) 
 		return s.callChatGPTCodex(call)
 	}
 
-	endpoints := openAICompatibleChatEndpointCandidates(call.Channel.BaseURL)
-	for index, endpoint := range endpoints {
-		request, providerErr := s.newOpenAICompatibleRequest(call, false, endpoint)
-		if providerErr != nil {
-			return nil, providerErr
-		}
-
-		response, err := s.httpClient.Do(request)
-		if err != nil {
-			return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
-		}
-
-		content, err := io.ReadAll(response.Body)
-		_ = response.Body.Close()
-		if err != nil {
-			return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
-		}
-		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			providerErr := providerErrorFromUpstream(response.StatusCode, content)
-			if shouldRetryOpenAICompatibleEndpoint(providerErr) && index < len(endpoints)-1 {
-				continue
-			}
-			return nil, providerErr
-		}
-
-		var body gin.H
-		if err := json.Unmarshal(content, &body); err != nil {
-			return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "Upstream returned invalid JSON", Type: "api_error"}
-		}
-		if _, ok := body["model"]; !ok {
-			body["model"] = call.Model.ID
-		}
-		return body, nil
+	endpoint := openAICompatibleChatEndpoint(call.Channel.BaseURL)
+	request, providerErr := s.newOpenAICompatibleRequest(call, false, endpoint)
+	if providerErr != nil {
+		return nil, providerErr
 	}
-	return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "Channel baseUrl is required", Type: "api_error"}
+
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+
+	content, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, providerErrorFromUpstream(response.StatusCode, content)
+	}
+
+	var body gin.H
+	if err := json.Unmarshal(content, &body); err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "Upstream returned invalid JSON", Type: "api_error"}
+	}
+	if _, ok := body["model"]; !ok {
+		body["model"] = call.Model.ID
+	}
+	return body, nil
 }
 
 func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *ProviderError) {
@@ -5881,37 +5874,30 @@ func (s *Server) streamOpenAICompatible(c *gin.Context, call GatewayCall) *Provi
 		return s.streamChatGPTCodex(c, call)
 	}
 
-	endpoints := openAICompatibleChatEndpointCandidates(call.Channel.BaseURL)
-	for index, endpoint := range endpoints {
-		request, providerErr := s.newOpenAICompatibleRequest(call, true, endpoint)
-		if providerErr != nil {
-			return providerErr
-		}
-
-		response, err := s.httpClient.Do(request)
-		if err != nil {
-			return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
-		}
-
-		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			content, _ := io.ReadAll(response.Body)
-			_ = response.Body.Close()
-			providerErr := providerErrorFromUpstream(response.StatusCode, content)
-			if shouldRetryOpenAICompatibleEndpoint(providerErr) && index < len(endpoints)-1 {
-				continue
-			}
-			return providerErr
-		}
-
-		c.Header("Content-Type", "text/event-stream")
-		c.Header("Cache-Control", "no-cache")
-		c.Header("Connection", "keep-alive")
-		_, _ = io.Copy(c.Writer, response.Body)
-		_ = response.Body.Close()
-		c.Writer.Flush()
-		return nil
+	endpoint := openAICompatibleChatEndpoint(call.Channel.BaseURL)
+	request, providerErr := s.newOpenAICompatibleRequest(call, true, endpoint)
+	if providerErr != nil {
+		return providerErr
 	}
-	return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "Channel baseUrl is required", Type: "api_error"}
+
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		content, _ := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		return providerErrorFromUpstream(response.StatusCode, content)
+	}
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	_, _ = io.Copy(c.Writer, response.Body)
+	_ = response.Body.Close()
+	c.Writer.Flush()
+	return nil
 }
 
 func (s *Server) shouldUseCompatibleProvider(channel Channel) bool {
@@ -5977,11 +5963,6 @@ func (s *Server) newOpenAICompatibleRequest(call GatewayCall, stream bool, endpo
 	}
 	request.Header.Set("Authorization", "Bearer "+upstreamKey)
 	request.Header.Set("Content-Type", "application/json")
-	if stream {
-		request.Header.Set("Accept", "text/event-stream")
-	} else {
-		request.Header.Set("Accept", "application/json")
-	}
 	request.Header.Set("X-Request-ID", call.RequestID)
 	return request, nil
 }
@@ -8751,6 +8732,17 @@ func normalizeRequestPath(value string) string {
 		return "/"
 	}
 	return normalized
+}
+
+func openAICompatibleChatEndpoint(base string) string {
+	apiBase := strings.TrimRight(strings.TrimSpace(base), "/")
+	for _, suffix := range []string{"/chat/completions", "/completions", "/models"} {
+		if strings.HasSuffix(apiBase, suffix) {
+			apiBase = strings.TrimRight(apiBase[:len(apiBase)-len(suffix)], "/")
+			break
+		}
+	}
+	return joinURL(apiBase, "chat/completions")
 }
 
 func openAICompatibleChatEndpointCandidates(base string) []string {

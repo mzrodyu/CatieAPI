@@ -1466,49 +1466,6 @@ func TestOpenAICompatibleProviderAcceptsCompleteChatEndpointBaseURL(t *testing.T
 	}
 }
 
-func TestOpenAICompatibleProviderRetriesV1EndpointForBareBaseURL(t *testing.T) {
-	upstreamPaths := []string{}
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamPaths = append(upstreamPaths, r.URL.Path)
-		if r.URL.Path == "/chat/completions" {
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte(`{"error":{"code":"route_not_found","message":"Route not found","type":"invalid_request_error"}}`))
-			return
-		}
-		if r.URL.Path != "/v1/chat/completions" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"chatcmpl_v1","object":"chat.completion","model":"deepseek-v4","choices":[{"index":0,"message":{"role":"assistant","content":"v1 endpoint ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
-	}))
-	defer upstream.Close()
-
-	withEnv(t, map[string]string{
-		"PERSISTENCE":      "memory",
-		"PROVIDER_MODE":    "compatible",
-		"UPSTREAM_API_KEY": "upstream-secret",
-	})
-	server, router := testServerRouter(t)
-	seedGatewayFixtures(server)
-	server.mu.Lock()
-	server.findChannel("chn_1002").BaseURL = upstream.URL
-	server.mu.Unlock()
-
-	chatBody := `{"model":"ds","messages":[{"role":"user","content":"hello"}]}`
-	chat := perform(router, http.MethodPost, "/v1/chat/completions", chatBody, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
-	if chat.Code != http.StatusOK {
-		t.Fatalf("chat status = %d body = %s", chat.Code, chat.Body.String())
-	}
-	if !reflect.DeepEqual(upstreamPaths, []string{"/chat/completions", "/v1/chat/completions"}) {
-		t.Fatalf("upstream paths = %#v", upstreamPaths)
-	}
-	if !bytes.Contains(chat.Body.Bytes(), []byte(`v1 endpoint ok`)) {
-		t.Fatalf("v1 endpoint response was not returned: %s", chat.Body.String())
-	}
-}
-
 func TestGatewayFailsOverToNextChannelOnRetryableError(t *testing.T) {
 	firstCalls := 0
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
