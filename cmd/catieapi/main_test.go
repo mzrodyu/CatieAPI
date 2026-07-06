@@ -1593,6 +1593,111 @@ func TestImageGenerationsOpenAIAccountUsesCodexDirectEndpointForGPTImage2(t *tes
 	}
 }
 
+func TestImageGenerationsOpenAIAccountFallsBackWhenCodexDirectImageIsEmpty(t *testing.T) {
+	directCalls := 0
+	responsesCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/codex/images/generations":
+			directCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"created":1780000000,"data":[]}`))
+		case "/backend-api/codex/responses":
+			responsesCalls++
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(codexImageSSE("fallback-image-empty")))
+		default:
+			t.Fatalf("upstream image path = %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-2", Name: "GPT Image 2", Vendor: "OpenAI", Aliases: []string{"image2"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image_direct_empty", Name: "Image Direct Empty Pool", Provider: "openai", BaseURL: upstream.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-2"},
+		OpenAIAccounts: []OpenAIAccount{
+			{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "healthy"},
+		},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"gpt-image-2","prompt":"fallback empty"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
+	}
+	if directCalls != 1 || responsesCalls != 1 {
+		t.Fatalf("unexpected upstream calls direct=%d responses=%d", directCalls, responsesCalls)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"fallback-image-empty"`)) {
+		t.Fatalf("fallback image response was not returned: %s", response.Body.String())
+	}
+}
+
+func TestImageGenerationsOpenAIAccountFallsBackWhenCodexDirectImageGatewayTimesOut(t *testing.T) {
+	directCalls := 0
+	responsesCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/codex/images/generations":
+			directCalls++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusGatewayTimeout)
+			_, _ = w.Write([]byte(`{"error":{"code":"gateway_timeout","message":"Gateway Timeout","type":"api_error"}}`))
+		case "/backend-api/codex/responses":
+			responsesCalls++
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(codexImageSSE("fallback-image-504")))
+		default:
+			t.Fatalf("upstream image path = %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-2", Name: "GPT Image 2", Vendor: "OpenAI", Aliases: []string{"image2"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image_direct_504", Name: "Image Direct Timeout Pool", Provider: "openai", BaseURL: upstream.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-2"},
+		OpenAIAccounts: []OpenAIAccount{
+			{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", Status: "healthy"},
+		},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"gpt-image-2","prompt":"fallback 504"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("image generation status = %d body = %s", response.Code, response.Body.String())
+	}
+	if directCalls != 1 || responsesCalls != 1 {
+		t.Fatalf("unexpected upstream calls direct=%d responses=%d", directCalls, responsesCalls)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"fallback-image-504"`)) {
+		t.Fatalf("fallback image response was not returned: %s", response.Body.String())
+	}
+}
+
 func TestImageGenerationsRetryNextOpenAIAccountOnUsageLimit(t *testing.T) {
 	authHeaders := []string{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

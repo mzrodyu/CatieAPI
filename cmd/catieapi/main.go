@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -34,6 +35,7 @@ import (
 
 const (
 	defaultUpstreamTimeoutSeconds = 600
+	codexDirectImageTimeout       = 45 * time.Second
 	defaultOpenAIBaseURL          = "https://api.openai.com/v1"
 	defaultChatGPTAPIBaseURL      = "https://chatgpt.com/backend-api"
 	chatGPTCodexCLIProfile        = "codex_cli_rs"
@@ -3888,7 +3890,13 @@ func (s *Server) streamChatGPTCodexWithAccount(c *gin.Context, call GatewayCall,
 
 func (s *Server) callChatGPTCodexImageWithAccount(call ImageGatewayCall, account OpenAIAccount, accessToken string) (gin.H, *ProviderError) {
 	if directModel := chatGPTCodexDirectImageModel(call); directModel != "" {
-		return s.callChatGPTCodexDirectImageWithAccount(call, account, accessToken, directModel)
+		body, providerErr := s.callChatGPTCodexDirectImageWithAccount(call, account, accessToken, directModel)
+		if providerErr == nil {
+			return body, nil
+		}
+		if !shouldFallbackChatGPTCodexDirectImage(providerErr) {
+			return nil, providerErr
+		}
 	}
 	encoded, providerErr := buildChatGPTCodexImagePayload(call)
 	if providerErr != nil {
@@ -3932,6 +3940,9 @@ func (s *Server) callChatGPTCodexDirectImageWithAccount(call ImageGatewayCall, a
 	if providerErr != nil {
 		return nil, providerErr
 	}
+	ctx, cancel := context.WithTimeout(request.Context(), codexDirectImageTimeout)
+	defer cancel()
+	request = request.WithContext(ctx)
 	response, err := s.httpClient.Do(request)
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
@@ -3950,7 +3961,68 @@ func (s *Server) callChatGPTCodexDirectImageWithAccount(call ImageGatewayCall, a
 	if err := json.Unmarshal(content, &body); err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "Upstream returned invalid JSON", Type: "api_error"}
 	}
+	if !chatGPTCodexDirectImageHasData(body) {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_no_image_output", Message: "Upstream returned no image data", Type: "api_error"}
+	}
 	return body, nil
+}
+
+func shouldFallbackChatGPTCodexDirectImage(providerErr *ProviderError) bool {
+	if providerErr == nil {
+		return false
+	}
+	if allowedString(providerErr.Code,
+		"upstream_no_image_output",
+		"upstream_invalid_json",
+		"upstream_unreachable",
+		"upstream_read_error",
+		"upstream_timeout",
+	) {
+		return true
+	}
+	return providerErr.Status == http.StatusGatewayTimeout || (providerErr.Status >= http.StatusInternalServerError && strings.HasPrefix(providerErr.Code, "upstream_"))
+}
+
+func chatGPTCodexDirectImageHasData(body gin.H) bool {
+	if directImageMapHasData(body) {
+		return true
+	}
+	switch data := body["data"].(type) {
+	case []interface{}:
+		for _, item := range data {
+			if directImageItemHasData(item) {
+				return true
+			}
+		}
+	case []gin.H:
+		for _, item := range data {
+			if directImageMapHasData(item) {
+				return true
+			}
+		}
+	case []map[string]interface{}:
+		for _, item := range data {
+			if directImageMapHasData(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func directImageItemHasData(item interface{}) bool {
+	switch typed := item.(type) {
+	case map[string]interface{}:
+		return directImageMapHasData(typed)
+	case gin.H:
+		return directImageMapHasData(typed)
+	default:
+		return false
+	}
+}
+
+func directImageMapHasData(item map[string]interface{}) bool {
+	return strings.TrimSpace(completionPrompt(item["b64_json"])) != "" || strings.TrimSpace(completionPrompt(item["url"])) != ""
 }
 
 func (s *Server) newChatGPTCodexRequest(encoded []byte, accessToken string, account OpenAIAccount) (*http.Request, *ProviderError) {
