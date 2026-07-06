@@ -36,9 +36,14 @@ const (
 	defaultUpstreamTimeoutSeconds = 600
 	defaultOpenAIBaseURL          = "https://api.openai.com/v1"
 	defaultChatGPTAPIBaseURL      = "https://chatgpt.com/backend-api"
-	chatGPTCodexUserAgent         = "codex_cli_rs/0.125.0 (Ubuntu 22.4.0; x86_64) xterm-256color"
+	chatGPTCodexCLIProfile        = "codex_cli_rs"
+	chatGPTCodexTUIProfile        = "codex-tui"
+	chatGPTCodexVSCodeProfile     = "codex_vscode"
+	chatGPTCodexCLIUserAgent      = "codex_cli_rs/0.125.0 (Ubuntu 22.4.0; x86_64) xterm-256color"
+	chatGPTCodexTUIUserAgent      = "codex-tui/0.135.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.135.0)"
+	chatGPTCodexVSCodeUserAgent   = "codex_vscode/0.125.0"
 	chatGPTCodexVersion           = "0.125.0"
-	chatGPTCodexOriginator        = "codex_cli_rs"
+	chatGPTCodexTUIVersion        = "0.135.0"
 	chatGPTCodexImageModel        = "gpt-5.4-mini"
 	openAIAuthClientID            = "app_EMoamEEZ73f0CkXaXp7hrann"
 )
@@ -205,6 +210,7 @@ type OpenAIAccount struct {
 	LastRefresh   string             `json:"lastRefresh,omitempty"`
 	PlanType      string             `json:"planType,omitempty"`
 	Source        string             `json:"source,omitempty"`
+	ClientProfile string             `json:"clientProfile,omitempty"`
 	ImportedAt    string             `json:"importedAt,omitempty"`
 	Status        string             `json:"status,omitempty"`
 	LastCheckedAt string             `json:"lastCheckedAt,omitempty"`
@@ -222,6 +228,7 @@ type PublicOpenAIAccount struct {
 	LastRefresh   string             `json:"lastRefresh,omitempty"`
 	PlanType      string             `json:"planType,omitempty"`
 	Source        string             `json:"source,omitempty"`
+	ClientProfile string             `json:"clientProfile,omitempty"`
 	ImportedAt    string             `json:"importedAt,omitempty"`
 	Status        string             `json:"status,omitempty"`
 	LastCheckedAt string             `json:"lastCheckedAt,omitempty"`
@@ -241,17 +248,18 @@ type OpenAIQuotaLimit struct {
 }
 
 type ImportedOpenAIAccount struct {
-	Name         string
-	Email        string
-	AccessToken  string
-	RefreshToken string
-	IDToken      string
-	AccountID    string
-	UserID       string
-	ExpiresAt    string
-	LastRefresh  string
-	PlanType     string
-	Source       string
+	Name          string
+	Email         string
+	AccessToken   string
+	RefreshToken  string
+	IDToken       string
+	AccountID     string
+	UserID        string
+	ExpiresAt     string
+	LastRefresh   string
+	PlanType      string
+	Source        string
+	ClientProfile string
 }
 
 type OpenAIAccountCheckResult struct {
@@ -2287,20 +2295,21 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 			}
 		}
 		stored := OpenAIAccount{
-			ID:           newID("oaiacc"),
-			Name:         account.Name,
-			Email:        account.Email,
-			AccessToken:  protectedKey,
-			RefreshToken: protectedRefresh,
-			IDToken:      protectedID,
-			AccountID:    account.AccountID,
-			UserID:       account.UserID,
-			ExpiresAt:    account.ExpiresAt,
-			LastRefresh:  account.LastRefresh,
-			PlanType:     account.PlanType,
-			Source:       account.Source,
-			ImportedAt:   time.Now().UTC().Format(time.RFC3339),
-			Status:       "unchecked",
+			ID:            newID("oaiacc"),
+			Name:          account.Name,
+			Email:         account.Email,
+			AccessToken:   protectedKey,
+			RefreshToken:  protectedRefresh,
+			IDToken:       protectedID,
+			AccountID:     account.AccountID,
+			UserID:        account.UserID,
+			ExpiresAt:     account.ExpiresAt,
+			LastRefresh:   account.LastRefresh,
+			PlanType:      account.PlanType,
+			Source:        account.Source,
+			ClientProfile: codexClientProfileForImport(account.Source, account.ClientProfile),
+			ImportedAt:    time.Now().UTC().Format(time.RFC3339),
+			Status:        "unchecked",
 		}
 		channel.OpenAIAccounts = append(channel.OpenAIAccounts, stored)
 		importedAccounts = append(importedAccounts, publicOpenAIAccount(stored))
@@ -3921,17 +3930,106 @@ func (s *Server) newChatGPTCodexRequest(encoded []byte, accessToken string, acco
 	request.Header.Set("Accept", "text/event-stream")
 	request.Header.Set("Connection", "Keep-Alive")
 	request.Header.Set("OpenAI-Beta", "responses=experimental")
-	request.Header.Set("Originator", chatGPTCodexOriginator)
-	request.Header.Set("User-Agent", chatGPTCodexUserAgent)
-	request.Header.Set("Version", chatGPTCodexVersion)
+	setChatGPTCodexClientHeaders(request, account, true)
 	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
-		request.Header.Set("Chatgpt-Account-Id", accountID)
+		setHeaderPreserveCase(request.Header, "ChatGPT-Account-Id", accountID)
 	}
 	return request, nil
 }
 
 func (s *Server) chatGPTCodexResponsesURL() string {
 	return joinURL(s.chatGPTAPIBase, "codex/responses")
+}
+
+type chatGPTCodexClientProfile struct {
+	Name       string
+	Originator string
+	UserAgent  string
+	Version    string
+}
+
+func setChatGPTCodexClientHeaders(request *http.Request, account OpenAIAccount, responses bool) {
+	profile := chatGPTCodexClientProfileForAccount(account)
+	setHeaderPreserveCase(request.Header, "Originator", profile.Originator)
+	setHeaderPreserveCase(request.Header, "User-Agent", profile.UserAgent)
+	setHeaderPreserveCase(request.Header, "Version", profile.Version)
+	if profile.Name == chatGPTCodexTUIProfile || strings.Contains(profile.UserAgent, "Mac OS") {
+		setHeaderPreserveCase(request.Header, "Session_id", randomUUID())
+	}
+	if responses {
+		setHeaderPreserveCase(request.Header, "OpenAI-Beta", "responses=experimental")
+	}
+}
+
+func setHeaderPreserveCase(headers http.Header, key string, value string) {
+	if strings.TrimSpace(value) == "" {
+		return
+	}
+	headers.Del(key)
+	headers[key] = []string{value}
+}
+
+func chatGPTCodexClientProfileForAccount(account OpenAIAccount) chatGPTCodexClientProfile {
+	name := codexClientProfileForImport(account.Source, account.ClientProfile)
+	switch name {
+	case chatGPTCodexTUIProfile:
+		return chatGPTCodexClientProfile{
+			Name:       chatGPTCodexTUIProfile,
+			Originator: chatGPTCodexTUIProfile,
+			UserAgent:  chatGPTCodexTUIUserAgent,
+			Version:    chatGPTCodexTUIVersion,
+		}
+	case chatGPTCodexVSCodeProfile:
+		return chatGPTCodexClientProfile{
+			Name:       chatGPTCodexVSCodeProfile,
+			Originator: chatGPTCodexVSCodeProfile,
+			UserAgent:  chatGPTCodexVSCodeUserAgent,
+			Version:    chatGPTCodexVersion,
+		}
+	default:
+		return chatGPTCodexClientProfile{
+			Name:       chatGPTCodexCLIProfile,
+			Originator: chatGPTCodexCLIProfile,
+			UserAgent:  chatGPTCodexCLIUserAgent,
+			Version:    chatGPTCodexVersion,
+		}
+	}
+}
+
+func codexClientProfileForImport(source string, explicit string) string {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if profile := normalizeCodexClientProfile(explicit); profile != "" {
+		if isCodexProxyImportSource(source) && profile == chatGPTCodexVSCodeProfile {
+			return chatGPTCodexTUIProfile
+		}
+		return profile
+	}
+	if isCodexProxyImportSource(source) {
+		return chatGPTCodexTUIProfile
+	}
+	return chatGPTCodexCLIProfile
+}
+
+func isCodexProxyImportSource(source string) bool {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "cpa", "sub2api", "sub2":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeCodexClientProfile(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "tui", "codex-tui", "codex_tui", "codex tui":
+		return chatGPTCodexTUIProfile
+	case "vscode", "codex_vscode", "vs-code", "vs_code":
+		return chatGPTCodexVSCodeProfile
+	case "cli", "codex_cli", "codex_cli_rs", "codex-cli-rs":
+		return chatGPTCodexCLIProfile
+	default:
+		return ""
+	}
 }
 
 func buildChatGPTCodexChatPayload(call GatewayCall, stream bool) ([]byte, *ProviderError) {
@@ -3972,6 +4070,7 @@ func buildChatGPTCodexChatPayload(call GatewayCall, stream bool) ([]byte, *Provi
 func buildChatGPTCodexImagePayload(call ImageGatewayCall) ([]byte, *ProviderError) {
 	tool := gin.H{
 		"type":          "image_generation",
+		"action":        "generate",
 		"model":         call.Model.ID,
 		"output_format": "png",
 	}
@@ -4538,8 +4637,9 @@ func (s *Server) checkOpenAIAccountUsage(accessToken string, account OpenAIAccou
 	}
 	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
 	request.Header.Set("Accept", "application/json")
+	setChatGPTCodexClientHeaders(request, account, false)
 	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
-		request.Header.Set("Chatgpt-Account-Id", accountID)
+		setHeaderPreserveCase(request.Header, "ChatGPT-Account-Id", accountID)
 	}
 	response, err := s.httpClient.Do(request)
 	if err != nil {
@@ -5103,20 +5203,16 @@ func jwtExpiry(token string) (time.Time, bool) {
 }
 
 func (s *Server) refreshOpenAIAccount(refreshToken string) (OpenAIRefreshResult, error) {
-	payload := gin.H{
-		"client_id":     openAIAuthClientID,
-		"grant_type":    "refresh_token",
-		"refresh_token": refreshToken,
-	}
-	encoded, err := json.Marshal(payload)
+	form := url.Values{}
+	form.Set("client_id", openAIAuthClientID)
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refreshToken)
+	form.Set("scope", "openid profile email")
+	request, err := http.NewRequest(http.MethodPost, joinURL(s.openAIAuthBase, "oauth/token"), strings.NewReader(form.Encode()))
 	if err != nil {
 		return OpenAIRefreshResult{}, err
 	}
-	request, err := http.NewRequest(http.MethodPost, joinURL(s.openAIAuthBase, "oauth/token"), bytes.NewReader(encoded))
-	if err != nil {
-		return OpenAIRefreshResult{}, err
-	}
-	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept", "application/json")
 	response, err := s.httpClient.Do(request)
 	if err != nil {
@@ -5926,6 +6022,11 @@ func parseOpenAIAccountImport(payload map[string]interface{}) []ImportedOpenAIAc
 					stringFromMapAnyKeys(item, "plan_type", "planType"),
 				),
 				Source: "sub2api",
+				ClientProfile: firstNonEmptyString(
+					stringFromMapAnyKeys(credentials, "client_profile", "clientProfile", "codex_client_profile", "codexClientProfile"),
+					stringFromMapAnyKeys(tokens, "client_profile", "clientProfile", "codex_client_profile", "codexClientProfile"),
+					stringFromMapAnyKeys(item, "client_profile", "clientProfile", "codex_client_profile", "codexClientProfile", "originator"),
+				),
 			}
 			if account.Email == "" && strings.Contains(account.Name, "@") {
 				account.Email = account.Name
@@ -5938,17 +6039,18 @@ func parseOpenAIAccountImport(payload map[string]interface{}) []ImportedOpenAIAc
 		stringFromMapAnyKeys(payload, "refresh_token", "refreshToken", "chatgpt_refresh_token") != "" ||
 		stringFromMapAnyKeys(payload, "id_token", "idToken") != "" {
 		account := ImportedOpenAIAccount{
-			Name:         stringFromMapAnyKeys(payload, "email", "name", "username"),
-			Email:        stringFromMap(payload, "email"),
-			AccessToken:  stringFromMapAnyKeys(payload, "access_token", "accessToken"),
-			RefreshToken: stringFromMapAnyKeys(payload, "refresh_token", "refreshToken", "chatgpt_refresh_token"),
-			IDToken:      stringFromMapAnyKeys(payload, "id_token", "idToken"),
-			AccountID:    stringFromMapAnyKeys(payload, "account_id", "accountId", "chatgpt_account_id"),
-			UserID:       stringFromMapAnyKeys(payload, "chatgpt_user_id", "user_id", "userId"),
-			ExpiresAt:    stringFromMapAnyKeys(payload, "expired", "expires_at", "expiresAt"),
-			LastRefresh:  stringFromMapAnyKeys(payload, "last_refresh", "lastRefresh"),
-			PlanType:     stringFromMapAnyKeys(payload, "plan_type", "planType"),
-			Source:       "cpa",
+			Name:          stringFromMapAnyKeys(payload, "email", "name", "username"),
+			Email:         stringFromMap(payload, "email"),
+			AccessToken:   stringFromMapAnyKeys(payload, "access_token", "accessToken"),
+			RefreshToken:  stringFromMapAnyKeys(payload, "refresh_token", "refreshToken", "chatgpt_refresh_token"),
+			IDToken:       stringFromMapAnyKeys(payload, "id_token", "idToken"),
+			AccountID:     stringFromMapAnyKeys(payload, "account_id", "accountId", "chatgpt_account_id"),
+			UserID:        stringFromMapAnyKeys(payload, "chatgpt_user_id", "user_id", "userId"),
+			ExpiresAt:     stringFromMapAnyKeys(payload, "expired", "expires_at", "expiresAt"),
+			LastRefresh:   stringFromMapAnyKeys(payload, "last_refresh", "lastRefresh"),
+			PlanType:      stringFromMapAnyKeys(payload, "plan_type", "planType"),
+			Source:        "cpa",
+			ClientProfile: stringFromMapAnyKeys(payload, "client_profile", "clientProfile", "codex_client_profile", "codexClientProfile", "originator"),
 		}
 		return []ImportedOpenAIAccount{account}
 	}
@@ -7353,6 +7455,14 @@ func randomHex(length int) string {
 	return hex.EncodeToString(buffer)
 }
 
+func randomUUID() string {
+	raw := randomHex(16)
+	if len(raw) != 32 {
+		return raw
+	}
+	return fmt.Sprintf("%s-%s-%s-%s-%s", raw[:8], raw[8:12], raw[12:16], raw[16:20], raw[20:])
+}
+
 func bearerToken(authHeader string) string {
 	authHeader = strings.TrimSpace(authHeader)
 	if authHeader == "" {
@@ -7792,6 +7902,7 @@ func publicOpenAIAccount(account OpenAIAccount) PublicOpenAIAccount {
 		LastRefresh:   account.LastRefresh,
 		PlanType:      account.PlanType,
 		Source:        account.Source,
+		ClientProfile: codexClientProfileForImport(account.Source, account.ClientProfile),
 		ImportedAt:    account.ImportedAt,
 		Status:        firstNonEmptyString(account.Status, "unchecked"),
 		LastCheckedAt: account.LastCheckedAt,

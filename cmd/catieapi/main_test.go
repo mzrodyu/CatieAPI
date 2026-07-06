@@ -895,12 +895,16 @@ func TestOpenAIAccountPoolChatUsesChatGPTCodexResponses(t *testing.T) {
 	var upstreamBeta string
 	var upstreamOriginator string
 	var upstreamAccountID string
+	var upstreamUserAgent string
+	var upstreamVersion string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamAuth = r.Header.Get("Authorization")
 		upstreamPath = r.URL.Path
 		upstreamBeta = r.Header.Get("OpenAI-Beta")
 		upstreamOriginator = r.Header.Get("Originator")
 		upstreamAccountID = r.Header.Get("Chatgpt-Account-Id")
+		upstreamUserAgent = r.Header.Get("User-Agent")
+		upstreamVersion = r.Header.Get("Version")
 		if r.URL.Path != "/backend-api/codex/responses" {
 			t.Fatalf("upstream path = %s", r.URL.Path)
 		}
@@ -935,14 +939,57 @@ func TestOpenAIAccountPoolChatUsesChatGPTCodexResponses(t *testing.T) {
 	if upstreamPath != "/backend-api/codex/responses" || upstreamAuth != "Bearer oauth-token" {
 		t.Fatalf("unexpected codex upstream path/auth = %s %s", upstreamPath, upstreamAuth)
 	}
-	if upstreamBeta != "responses=experimental" || upstreamOriginator != chatGPTCodexOriginator || upstreamAccountID != "chatgpt-account" {
-		t.Fatalf("missing codex headers beta=%s originator=%s account=%s", upstreamBeta, upstreamOriginator, upstreamAccountID)
+	if upstreamBeta != "responses=experimental" || upstreamOriginator != chatGPTCodexCLIProfile || upstreamAccountID != "chatgpt-account" ||
+		upstreamUserAgent != chatGPTCodexCLIUserAgent || upstreamVersion != chatGPTCodexVersion {
+		t.Fatalf("missing codex headers beta=%s originator=%s account=%s ua=%s version=%s", upstreamBeta, upstreamOriginator, upstreamAccountID, upstreamUserAgent, upstreamVersion)
 	}
 	if upstreamPayload["model"] != "gpt-5.5" || upstreamPayload["stream"] != true || upstreamPayload["store"] != false {
 		t.Fatalf("unexpected codex payload = %#v", upstreamPayload)
 	}
 	if !bytes.Contains(response.Body.Bytes(), []byte(`"content":"hello from codex"`)) {
 		t.Fatalf("chat response was not converted: %s", response.Body.String())
+	}
+}
+
+func TestOpenAIAccountPoolChatUsesImportedClientProfile(t *testing.T) {
+	var upstreamOriginator string
+	var upstreamUserAgent string
+	var upstreamVersion string
+	var upstreamSessionID string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamOriginator = r.Header.Get("Originator")
+		upstreamUserAgent = r.Header.Get("User-Agent")
+		upstreamVersion = r.Header.Get("Version")
+		upstreamSessionID = r.Header.Get("Session_id")
+		if r.URL.Path != "/backend-api/codex/responses" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(codexChatSSE("hello from imported profile")))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	channel := server.findChannel("chn_1001")
+	channel.OpenAIAccounts = []OpenAIAccount{
+		{ID: "oaiacc_cpa", Email: "cpa@example.com", AccessToken: "oauth-token", Source: "cpa", Status: "healthy"},
+	}
+	server.mu.Unlock()
+
+	body := `{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}`
+	response := perform(router, http.MethodPost, "/v1/chat/completions", body, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("chat status = %d body = %s", response.Code, response.Body.String())
+	}
+	if upstreamOriginator != chatGPTCodexTUIProfile || upstreamUserAgent != chatGPTCodexTUIUserAgent || upstreamVersion != chatGPTCodexTUIVersion || upstreamSessionID == "" {
+		t.Fatalf("unexpected imported codex profile originator=%s ua=%s version=%s", upstreamOriginator, upstreamUserAgent, upstreamVersion)
 	}
 }
 
@@ -1466,11 +1513,8 @@ func TestImageGenerationsRetryNextOpenAIAccountOnBillingError(t *testing.T) {
 	if !ok {
 		t.Fatalf("unexpected codex image tool = %#v", tools[0])
 	}
-	if tool["type"] != "image_generation" || tool["model"] != "gpt-image-1" || tool["output_format"] != "png" {
+	if tool["type"] != "image_generation" || tool["action"] != "generate" || tool["model"] != "gpt-image-1" || tool["output_format"] != "png" {
 		t.Fatalf("unexpected codex image tool payload = %#v", tool)
-	}
-	if _, ok := tool["action"]; ok {
-		t.Fatalf("codex image tool should not include action: %#v", tool)
 	}
 	if _, ok := tool["n"]; ok {
 		t.Fatalf("codex image tool should not include n: %#v", tool)
@@ -1998,6 +2042,9 @@ func TestImportCPAJSONAddsEncryptedAccountToChannel(t *testing.T) {
 	if channel == nil || len(channel.OpenAIAccounts) != 1 {
 		t.Fatalf("channel account count = %#v", channel)
 	}
+	if channel.OpenAIAccounts[0].ClientProfile != chatGPTCodexTUIProfile {
+		t.Fatalf("CPA account client profile = %s", channel.OpenAIAccounts[0].ClientProfile)
+	}
 }
 
 func TestImportSub2APIJSONAddsAccountsToExistingChannel(t *testing.T) {
@@ -2082,7 +2129,8 @@ func TestImportSub2APIJSONAddsAccountsToExistingChannel(t *testing.T) {
 	if channel.OpenAIAccounts[2].Email != "third@example.com" ||
 		channel.OpenAIAccounts[2].AccountID != "acc_third" ||
 		channel.OpenAIAccounts[2].UserID != "user_third" ||
-		channel.OpenAIAccounts[2].ExpiresAt != "2026-07-06T02:00:00Z" {
+		channel.OpenAIAccounts[2].ExpiresAt != "2026-07-06T02:00:00Z" ||
+		channel.OpenAIAccounts[2].ClientProfile != chatGPTCodexTUIProfile {
 		t.Fatalf("Sub2 codex_auth token fields were not imported: %#v", channel.OpenAIAccounts[2])
 	}
 	upstreamKey, err := server.channelUpstreamKey(*channel)
@@ -2135,7 +2183,8 @@ func TestParseOpenAIAccountImportSupportsCamelCaseCPAAndSub2API(t *testing.T) {
 		accounts[0].RefreshToken != "sub-refresh-token" ||
 		accounts[0].AccountID != "acc_sub_camel" ||
 		accounts[0].UserID != "user_sub_camel" ||
-		accounts[0].PlanType != "pro" {
+		accounts[0].PlanType != "pro" ||
+		codexClientProfileForImport(accounts[0].Source, accounts[0].ClientProfile) != chatGPTCodexTUIProfile {
 		t.Fatalf("camel Sub2API fields were not parsed: %#v", accounts[0])
 	}
 
@@ -2157,7 +2206,8 @@ func TestParseOpenAIAccountImportSupportsCamelCaseCPAAndSub2API(t *testing.T) {
 		accounts[0].IDToken != "cpa-id-token" ||
 		accounts[0].AccountID != "acc_cpa_camel" ||
 		accounts[0].UserID != "user_cpa_camel" ||
-		accounts[0].ExpiresAt != "2026-07-06T03:00:00Z" {
+		accounts[0].ExpiresAt != "2026-07-06T03:00:00Z" ||
+		codexClientProfileForImport(accounts[0].Source, accounts[0].ClientProfile) != chatGPTCodexTUIProfile {
 		t.Fatalf("camel CPA fields were not parsed: %#v", accounts[0])
 	}
 }
@@ -2608,14 +2658,15 @@ func TestParseWhamUsageQuotaLimitsTreatsUsedPercentAsWholePercent(t *testing.T) 
 }
 
 func TestCheckOpenAIAccountRefreshesExpiredAccessTokenBeforeUsage(t *testing.T) {
-	var refreshPayload map[string]interface{}
+	var refreshPayload url.Values
 	var usageAuth string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/oauth/token":
-			if err := json.NewDecoder(r.Body).Decode(&refreshPayload); err != nil {
-				t.Fatalf("decode refresh request: %v", err)
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse refresh request: %v", err)
 			}
+			refreshPayload = r.Form
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"access_token":"fresh-token","refresh_token":"fresh-refresh","expires_in":3600}`))
 		case "/backend-api/wham/usage":
@@ -2653,7 +2704,10 @@ func TestCheckOpenAIAccountRefreshesExpiredAccessTokenBeforeUsage(t *testing.T) 
 	if response.Code != http.StatusOK {
 		t.Fatalf("check accounts status = %d body = %s", response.Code, response.Body.String())
 	}
-	if refreshPayload["client_id"] != openAIAuthClientID || refreshPayload["grant_type"] != "refresh_token" || refreshPayload["refresh_token"] != "refresh-token" {
+	if refreshPayload.Get("client_id") != openAIAuthClientID ||
+		refreshPayload.Get("grant_type") != "refresh_token" ||
+		refreshPayload.Get("refresh_token") != "refresh-token" ||
+		refreshPayload.Get("scope") != "openid profile email" {
 		t.Fatalf("unexpected refresh payload = %#v", refreshPayload)
 	}
 	if usageAuth != "Bearer fresh-token" {
