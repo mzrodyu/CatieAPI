@@ -56,7 +56,11 @@ const response = await client.chat.completions.create({
 
 ## License
 
-MIT License. Copyright (c) 2026 Catie.
+PolyForm Noncommercial License 1.0.0. Copyright (c) 2026 Catie.
+
+本项目源码公开用于学习、研究、评估和非商业自部署。未经作者书面许可，不允许商业使用、SaaS 转售、二次闭源分发，或作为商业产品、商业服务的一部分提供。
+
+商业授权请联系作者单独协商。
 
 ## 核心模块
 
