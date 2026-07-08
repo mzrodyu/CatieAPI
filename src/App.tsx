@@ -56,6 +56,7 @@ type Channel = {
   inputPricePer1K: number;
   outputPricePer1K: number;
   pricingConfigured: boolean;
+  webEndpoint?: boolean;
   lastCheckedAt: string;
   lastError: string;
 };
@@ -2955,6 +2956,7 @@ function ChannelEditor({
   const [modelSource, setModelSource] = useState<"saved" | "template" | "manual" | "synced">("saved");
   const [inputPrice, setInputPrice] = useState(String(channel.inputPricePer1K || 0));
   const [outputPrice, setOutputPrice] = useState(String(channel.outputPricePer1K || 0));
+  const [webEndpoint, setWebEndpoint] = useState(Boolean(channel.webEndpoint));
   const [upstreamApiKey, setUpstreamApiKey] = useState("");
   const [busy, setBusy] = useState("");
   const accountCount = channel.openaiAccountCount ?? channel.openaiAccounts?.length ?? 0;
@@ -2974,8 +2976,9 @@ function ChannelEditor({
     setModelSource("saved");
     setInputPrice(String(channel.inputPricePer1K || 0));
     setOutputPrice(String(channel.outputPricePer1K || 0));
+    setWebEndpoint(Boolean(channel.webEndpoint));
     setUpstreamApiKey("");
-  }, [channel.id, channel.name, channel.provider, channel.streamMode, channel.baseUrl, channel.models, channel.inputPricePer1K, channel.outputPricePer1K]);
+  }, [channel.id, channel.name, channel.provider, channel.streamMode, channel.baseUrl, channel.models, channel.inputPricePer1K, channel.outputPricePer1K, channel.webEndpoint]);
 
   async function save() {
     const patch = currentChannelPatch();
@@ -3003,6 +3006,7 @@ function ChannelEditor({
       baseUrl: normalizedBaseUrl,
       inputPricePer1K: Number(inputPrice) || 0,
       outputPricePer1K: Number(outputPrice) || 0,
+      webEndpoint,
       models: models
         .split(",")
         .map((model) => model.trim())
@@ -3107,6 +3111,26 @@ function ChannelEditor({
           </button>
         ))}
       </div>
+
+      {(provider === "codex" || accountCount > 0) && (
+        <div className="setting">
+          <div>
+            <span>网页对话接口</span>
+            <small>开启后走 ChatGPT 网页对话接口，把 Plus 订阅账号包装成 API</small>
+          </div>
+          <div className="setting-value">
+            <button
+              type="button"
+              className={webEndpoint ? "ios-switch is-on" : "ios-switch"}
+              aria-label={webEndpoint ? "关闭网页对话接口" : "开启网页对话接口"}
+              aria-pressed={webEndpoint}
+              onClick={() => setWebEndpoint((value) => !value)}
+            >
+              <span />
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="channel-form-grid">
         <label>

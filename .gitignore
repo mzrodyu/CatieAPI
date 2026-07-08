@@ -4,6 +4,8 @@ dist/
 .playwright-cli/
 .codex/
 .agents/
+.kiro/
+.vscode/
 data/
 output/
 .env

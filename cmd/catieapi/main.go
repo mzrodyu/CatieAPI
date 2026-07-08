@@ -182,6 +182,7 @@ type Channel struct {
 	InputPricePer1K   float64         `json:"inputPricePer1K"`
 	OutputPricePer1K  float64         `json:"outputPricePer1K"`
 	PricingConfigured bool            `json:"pricingConfigured"`
+	WebEndpoint       bool            `json:"webEndpoint,omitempty"`
 	LastCheckedAt     string          `json:"lastCheckedAt,omitempty"`
 	LastError         string          `json:"lastError,omitempty"`
 }
@@ -202,6 +203,7 @@ type PublicChannel struct {
 	InputPricePer1K    float64               `json:"inputPricePer1K"`
 	OutputPricePer1K   float64               `json:"outputPricePer1K"`
 	PricingConfigured  bool                  `json:"pricingConfigured"`
+	WebEndpoint        bool                  `json:"webEndpoint"`
 	LastCheckedAt      string                `json:"lastCheckedAt"`
 	LastError          string                `json:"lastError"`
 }
@@ -2900,6 +2902,9 @@ func (s *Server) updateChannel(c *gin.Context) {
 		}
 		channel.Weight = value
 	}
+	if value, ok := patch["webEndpoint"].(bool); ok {
+		channel.WebEndpoint = value
+	}
 	if value, ok := patch["models"].([]interface{}); ok {
 		channel.Models = stringSlice(value)
 	}
@@ -4285,6 +4290,9 @@ func (s *Server) callChatGPTCodex(call GatewayCall) (gin.H, *ProviderError) {
 }
 
 func (s *Server) callChatGPTCodexWithAccount(call GatewayCall, account OpenAIAccount, accessToken string) (gin.H, *ProviderError) {
+	if call.Channel.WebEndpoint {
+		return s.callChatGPTWebConversation(call, account, accessToken)
+	}
 	encoded, providerErr := buildChatGPTCodexChatPayload(call, true)
 	if providerErr != nil {
 		return nil, providerErr
@@ -4362,6 +4370,9 @@ func (s *Server) streamChatGPTCodex(c *gin.Context, call GatewayCall) *ProviderE
 }
 
 func (s *Server) streamChatGPTCodexWithAccount(c *gin.Context, call GatewayCall, account OpenAIAccount, accessToken string) *ProviderError {
+	if call.Channel.WebEndpoint {
+		return s.streamChatGPTWebConversation(c, call, account, accessToken)
+	}
 	encoded, providerErr := buildChatGPTCodexChatPayload(call, true)
 	if providerErr != nil {
 		return providerErr
@@ -9232,6 +9243,7 @@ func publicChannel(channel Channel) PublicChannel {
 		InputPricePer1K:    channel.InputPricePer1K,
 		OutputPricePer1K:   channel.OutputPricePer1K,
 		PricingConfigured:  channel.PricingConfigured,
+		WebEndpoint:        channel.WebEndpoint,
 		LastCheckedAt:      channel.LastCheckedAt,
 		LastError:          channel.LastError,
 	}
