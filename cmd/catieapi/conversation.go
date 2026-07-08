@@ -26,9 +26,13 @@ import (
 const (
 	chatGPTWebConversationPath  = "conversation"
 	chatGPTWebRequirementsPath  = "sentinel/chat-requirements"
-	chatGPTWebUserAgent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	chatGPTWebUserAgent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
 	chatGPTWebProofRetryBudget  = 500000
-	chatGPTWebDefaultDifficulty = "000000"
+	chatGPTWebDefaultDifficulty = "000032"
+	chatGPTWebProofPrefix       = "gAAAAAB"
+	chatGPTWebRequirementsPrefix = "gAAAAAC"
+	chatGPTWebSentinelSDKURL    = "https://chatgpt.com/backend-api/sentinel/sdk.js"
+	chatGPTWebTimeLayout        = "Mon Jan 02 2006 15:04:05"
 )
 
 // chatGPTWebRequirements is the response from the chat-requirements endpoint.
@@ -45,9 +49,6 @@ type chatGPTWebRequirements struct {
 		Difficulty string `json:"difficulty"`
 	} `json:"proofofwork"`
 }
-
-// chatGPTWebConfigCache caches the browser-fingerprint config list per process.
-var chatGPTWebConfigCache = buildChatGPTWebConfigList()
 
 // callChatGPTWebConversation performs a non-streaming conversation call and
 // returns an OpenAI chat.completion object.
@@ -119,7 +120,7 @@ func (s *Server) streamChatGPTWebConversation(c *gin.Context, call GatewayCall, 
 // doChatGPTWebConversation solves requirements + proof-of-work and posts the
 // conversation, returning the live upstream response for the caller to read.
 func (s *Server) doChatGPTWebConversation(call GatewayCall, account OpenAIAccount, accessToken string, stream bool) (*http.Response, *ProviderError) {
-	config := chatGPTWebConfigCache.pick()
+	config := newChatGPTWebConfig()
 	deviceID := randomUUID()
 
 	requirements, providerErr := s.fetchChatGPTWebRequirements(accessToken, account, config, deviceID)
@@ -148,7 +149,7 @@ func (s *Server) doChatGPTWebConversation(call GatewayCall, account OpenAIAccoun
 	request.Header.Set("Content-Type", "application/json")
 	setHeaderPreserveCase(request.Header, "Openai-Sentinel-Chat-Requirements-Token", requirements.Token)
 	if requirements.ProofOfWork.Required {
-		proof := solveChatGPTWebProof(requirements.ProofOfWork.Seed, requirements.ProofOfWork.Difficulty, config)
+		proof, _ := solveChatGPTWebProof(requirements.ProofOfWork.Seed, requirements.ProofOfWork.Difficulty, config)
 		setHeaderPreserveCase(request.Header, "Openai-Sentinel-Proof-Token", proof)
 	}
 
@@ -166,7 +167,7 @@ func (s *Server) doChatGPTWebConversation(call GatewayCall, account OpenAIAccoun
 
 // fetchChatGPTWebRequirements requests a chat-requirements token + proof seed.
 func (s *Server) fetchChatGPTWebRequirements(accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID string) (*chatGPTWebRequirements, *ProviderError) {
-	seed := gin.H{"p": generateChatGPTWebProofSeed(config)}
+	seed := gin.H{"p": generateChatGPTWebRequirementsToken(config)}
 	body, _ := json.Marshal(seed)
 	request, err := http.NewRequest(http.MethodPost, joinURL(s.chatGPTAPIBase, chatGPTWebRequirementsPath), bytes.NewReader(body))
 	if err != nil {
@@ -200,8 +201,12 @@ func (s *Server) fetchChatGPTWebRequirements(accessToken string, account OpenAIA
 
 // setChatGPTWebHeaders applies the shared header set used by the web client.
 func (s *Server) setChatGPTWebHeaders(request *http.Request, accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID string) {
+	userAgent, _ := config[4].(string)
+	if userAgent == "" {
+		userAgent = chatGPTWebUserAgent
+	}
 	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
-	setHeaderPreserveCase(request.Header, "User-Agent", config.UserAgent)
+	setHeaderPreserveCase(request.Header, "User-Agent", userAgent)
 	setHeaderPreserveCase(request.Header, "Oai-Device-Id", deviceID)
 	setHeaderPreserveCase(request.Header, "Oai-Language", "en-US")
 	setHeaderPreserveCase(request.Header, "Origin", "https://chatgpt.com")
@@ -380,103 +385,182 @@ func chatCompletionFromText(call GatewayCall, text string) gin.H {
 
 // --- proof-of-work ---------------------------------------------------------
 
-// chatGPTWebConfig is a lightweight browser fingerprint used by the proof seed.
-type chatGPTWebConfig struct {
-	UserAgent string
-	Core      int
-	Screen    int
-	Fields    []string
+// chatGPTWebConfig is the 18-element browser environment array the sentinel
+// scripts expect. The order and semantics of the slots are fixed by the
+// protocol; only a few are randomized per request.
+type chatGPTWebConfig [18]interface{}
+
+var chatGPTWebNavigatorKeys = []string{
+	"webdriver−false",
+	"vendor−Google Inc.",
+	"cookieEnabled−true",
+	"product−Gecko",
+	"appCodeName−Mozilla",
+	"appName−Netscape",
+	"language−en-US",
+	"onLine−true",
+	"hardwareConcurrency−8",
+	"pdfViewerEnabled−true",
+	"clipboard−[object Clipboard]",
+	"credentials−[object CredentialsContainer]",
+	"geolocation−[object Geolocation]",
+	"mediaDevices−[object MediaDevices]",
+	"permissions−[object Permissions]",
+	"serviceWorker−[object ServiceWorkerContainer]",
+	"storage−[object StorageManager]",
+	"userAgentData−[object NavigatorUAData]",
+	"registerProtocolHandler−function registerProtocolHandler() { [native code] }",
+	"sendBeacon−function sendBeacon() { [native code] }",
+	"share−function share() { [native code] }",
+	"vibrate−function vibrate() { [native code] }",
 }
 
-type chatGPTWebConfigList struct {
-	items []chatGPTWebConfig
+var chatGPTWebDocumentKeys = []string{
+	"_reactListening0dgrl8ns7ku",
+	"_reactListening0zqzkjpxi9",
+	"_reactListening3q4xk1kx6q",
+	"_reactListeningmqp6r8g4v9",
+	"_reactListeningo743lnnpvdg",
+	"location",
 }
 
-func (l chatGPTWebConfigList) pick() chatGPTWebConfig {
-	if len(l.items) == 0 {
-		return chatGPTWebConfig{UserAgent: chatGPTWebUserAgent, Core: 8, Screen: 3}
-	}
-	index := int(time.Now().UnixNano()) % len(l.items)
-	if index < 0 {
-		index = -index
-	}
-	return l.items[index]
+var chatGPTWebWindowKeys = []string{
+	"window", "self", "document", "name", "location", "customElements",
+	"history", "navigation", "navigator", "origin", "screen", "innerWidth",
+	"innerHeight", "devicePixelRatio", "performance", "crypto", "indexedDB",
+	"sessionStorage", "localStorage", "fetch", "chrome", "caches",
+	"__NEXT_DATA__", "__NEXT_P", "webpackChunk_N_E", "next",
 }
 
-func buildChatGPTWebConfigList() chatGPTWebConfigList {
-	cores := []int{2, 4, 6, 8, 12, 16, 24}
-	screens := []int{1, 2, 3, 4, 6}
-	agents := []string{
+var chatGPTWebCores = []int{8, 16, 24, 32}
+var chatGPTWebScreens = []int{1920 + 1080, 2560 + 1440, 1920 + 1200, 2560 + 1600}
+
+// newChatGPTWebConfig assembles a fresh environment array per request.
+func newChatGPTWebConfig() chatGPTWebConfig {
+	now := time.Now().In(time.FixedZone("EST", -5*3600))
+	perf := float64(time.Now().UnixNano()%int64(3600*1e9)) / 1e6
+	unixMS := float64(time.Now().UnixNano()) / 1e6
+	return chatGPTWebConfig{
+		chatGPTWebScreens[randomIndex(len(chatGPTWebScreens))],
+		now.Format(chatGPTWebTimeLayout) + " GMT-0500 (Eastern Standard Time)",
+		4294705152,
+		0, // slot 3: iterated during PoW
 		chatGPTWebUserAgent,
-		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-	}
-	items := make([]chatGPTWebConfig, 0, len(cores)*len(screens)*len(agents))
-	for _, agent := range agents {
-		for _, core := range cores {
-			for _, screen := range screens {
-				items = append(items, chatGPTWebConfig{UserAgent: agent, Core: core, Screen: screen})
-			}
-		}
-	}
-	return chatGPTWebConfigList{items: items}
-}
-
-// generateChatGPTWebProofSeed builds the base64 seed the requirements call
-// expects (a compact browser-environment fingerprint).
-func generateChatGPTWebProofSeed(config chatGPTWebConfig) string {
-	parts := chatGPTWebProofParts(config, "", 0)
-	encoded, _ := json.Marshal(parts)
-	return base64.StdEncoding.EncodeToString(encoded)
-}
-
-// chatGPTWebProofParts assembles the environment array used inside the proof.
-func chatGPTWebProofParts(config chatGPTWebConfig, seed string, index int) []interface{} {
-	now := time.Now().UTC()
-	loadTime := float64(now.UnixNano()%100000) / 1000
-	return []interface{}{
-		config.Core + config.Screen,
-		now.Format("Mon Jan 02 2006 15:04:05 GMT-0700 (Coordinated Universal Time)"),
-		nil,
-		loadTime,
-		config.UserAgent,
-		nil,
-		nil,
+		chatGPTWebSentinelSDKURL,
+		"",
 		"en-US",
 		"en-US,en",
-		index,
-		"_reactListening" + randomHex(4),
-		"location",
-		seed,
-		float64(config.Core),
-		now.UnixMilli(),
+		0, // slot 9: i >> 1 during PoW
+		chatGPTWebNavigatorKeys[randomIndex(len(chatGPTWebNavigatorKeys))],
+		chatGPTWebDocumentKeys[randomIndex(len(chatGPTWebDocumentKeys))],
+		chatGPTWebWindowKeys[randomIndex(len(chatGPTWebWindowKeys))],
+		perf,
+		randomUUID(),
+		"",
+		chatGPTWebCores[randomIndex(len(chatGPTWebCores))],
+		unixMS - perf,
 	}
 }
 
-// solveChatGPTWebProof finds a proof token whose hash meets the difficulty. If
-// no answer is found within the retry budget it returns a safe fallback token.
-func solveChatGPTWebProof(seed string, difficulty string, config chatGPTWebConfig) string {
+// randomIndex returns a non-negative index below n.
+func randomIndex(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	seed, _ := strconv.ParseInt(randomHex(4), 16, 64)
+	i := int(seed) % n
+	if i < 0 {
+		i = -i
+	}
+	return i
+}
+
+// generateChatGPTWebRequirementsToken produces the token sent inside the
+// requirements POST body under the "p" field.
+func generateChatGPTWebRequirementsToken(config chatGPTWebConfig) string {
+	answer, _ := solveChatGPTWebProof(fmt.Sprintf("%f", nowFloatSeed()), "0fffff", config)
+	return chatGPTWebRequirementsPrefix + answer[len(chatGPTWebProofPrefix):]
+}
+
+// nowFloatSeed emulates Python's format(random.random()) — a random float in
+// [0, 1) rendered as a decimal string. Used only as an entropy source.
+func nowFloatSeed() float64 {
+	seed, _ := strconv.ParseUint(randomHex(7), 16, 64)
+	return float64(seed) / float64(1<<28)
+}
+
+// solveChatGPTWebProof finds a proof token whose SHA3-512(seed || base64(config))
+// starts below the difficulty. Returns the encoded token and whether a real
+// solution was found; falls back to a decoy on exhaustion (upstream may reject).
+func solveChatGPTWebProof(seed string, difficulty string, config chatGPTWebConfig) (string, bool) {
 	if strings.TrimSpace(difficulty) == "" {
 		difficulty = chatGPTWebDefaultDifficulty
 	}
-	prefixLen := len(difficulty)
-	parts := chatGPTWebProofParts(config, seed, 0)
-	for attempt := 0; attempt < chatGPTWebProofRetryBudget; attempt++ {
-		parts[3] = attempt
-		parts[9] = attempt
-		encoded, err := json.Marshal(parts)
+	target, err := decodeHexDifficulty(difficulty)
+	if err != nil {
+		return chatGPTWebProofFallback(seed), false
+	}
+	seedBytes := []byte(seed)
+	for i := 0; i < chatGPTWebProofRetryBudget; i++ {
+		config[3] = i
+		config[9] = i >> 1
+		encoded, err := json.Marshal(config)
 		if err != nil {
 			break
 		}
 		candidate := base64.StdEncoding.EncodeToString(encoded)
-		sum := sha3.Sum512([]byte(seed + candidate))
-		hex := fmt.Sprintf("%x", sum)
-		if len(hex) >= prefixLen && hex[:prefixLen] <= difficulty {
-			return "gAAAAAB" + candidate
+		buf := make([]byte, 0, len(seedBytes)+len(candidate))
+		buf = append(buf, seedBytes...)
+		buf = append(buf, candidate...)
+		digest := sha3.Sum512(buf)
+		if compareChatGPTWebDigest(digest[:len(target)], target) {
+			return chatGPTWebProofPrefix + candidate, true
 		}
 	}
-	fallback := base64.StdEncoding.EncodeToString([]byte(`"` + seed + `"`))
-	return "gAAAAABwQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D" + fallback
+	return chatGPTWebProofFallback(seed), false
 }
 
-var _ = strconv.Itoa
+// decodeHexDifficulty turns a hex difficulty string ("000032") into bytes.
+func decodeHexDifficulty(difficulty string) ([]byte, error) {
+	trimmed := difficulty
+	if len(trimmed)%2 == 1 {
+		trimmed += "0"
+	}
+	buf := make([]byte, len(trimmed)/2)
+	for i := 0; i < len(buf); i++ {
+		high := hexNibble(trimmed[2*i])
+		low := hexNibble(trimmed[2*i+1])
+		if high < 0 || low < 0 {
+			return nil, fmt.Errorf("invalid difficulty %q", difficulty)
+		}
+		buf[i] = byte(high<<4 | low)
+	}
+	return buf, nil
+}
+
+func hexNibble(b byte) int {
+	switch {
+	case b >= '0' && b <= '9':
+		return int(b - '0')
+	case b >= 'a' && b <= 'f':
+		return int(b-'a') + 10
+	case b >= 'A' && b <= 'F':
+		return int(b-'A') + 10
+	}
+	return -1
+}
+
+// compareChatGPTWebDigest returns true when a <= b lexicographically.
+func compareChatGPTWebDigest(a, b []byte) bool {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return len(a) <= len(b)
+}
+
+func chatGPTWebProofFallback(seed string) string {
+	fallback := base64.StdEncoding.EncodeToString([]byte(`"` + seed + `"`))
+	return chatGPTWebProofPrefix + "wQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D" + fallback
+}
