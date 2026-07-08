@@ -540,207 +540,80 @@ var gptProxyUpstreams = []gptProxyUpstream{
 	{Prefix: "/__oaiab__", Host: "ab.chatgpt.com", Scheme: "https"},
 }
 
-// gptProxyTokenSession holds one token-login session for the web proxy. The
-// browser only ever sees the opaque SessionID; the actual credentials stay in
-// memory server-side so a background refresh can rotate the access token
-// without the browser needing to update anything.
-type gptProxyTokenSession struct {
-	SessionID    string
-	AccessToken  string
-	RefreshToken string
-	SessionToken string // __Secure-next-auth.session-token, for cookie login
-	ExpiresAt    string // RFC3339, best-effort
-	Email        string
-	Name         string
-	LastRefresh  time.Time
-}
-
-// gptProxyTokenStore is an in-memory store of token-login sessions with a
-// background refresher. It is safe for concurrent use.
-type gptProxyTokenStore struct {
-	mu       sync.RWMutex
-	sessions map[string]*gptProxyTokenSession
-	server   *Server
-}
-
-func newGPTProxyTokenStore(server *Server) *gptProxyTokenStore {
-	store := &gptProxyTokenStore{
-		sessions: map[string]*gptProxyTokenSession{},
-		server:   server,
-	}
-	go store.refreshLoop()
-	return store
-}
-
-// create registers a new token session and returns its opaque session id.
-func (store *gptProxyTokenStore) create(accessToken, refreshToken, sessionToken, expiresAt, email, name string) string {
-	id := newID("gptsess") + randomHex(16)
-	store.mu.Lock()
-	store.sessions[id] = &gptProxyTokenSession{
-		SessionID:    id,
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		SessionToken: sessionToken,
-		ExpiresAt:    expiresAt,
-		Email:        email,
-		Name:         name,
-	}
-	store.mu.Unlock()
-	return id
-}
-
-func (store *gptProxyTokenStore) get(id string) (*gptProxyTokenSession, bool) {
-	if id == "" {
-		return nil, false
-	}
-	store.mu.RLock()
-	session, ok := store.sessions[id]
-	store.mu.RUnlock()
-	if !ok {
-		return nil, false
-	}
-	// Return a copy so callers never race on mutable fields.
-	snapshot := *session
-	return &snapshot, true
-}
-
-func (store *gptProxyTokenStore) remove(id string) {
-	store.mu.Lock()
-	delete(store.sessions, id)
-	store.mu.Unlock()
-}
-
-// renew mints a fresh access token for a session using whatever credential is
-// available: a refresh token (OAuth) or a session cookie. It returns the new
-// access token, an optional rotated refresh token, and an optional new expiry.
-// Sessions with neither credential cannot be renewed.
-func (store *gptProxyTokenStore) renew(session *gptProxyTokenSession) (accessToken, refreshToken, expiresAt string, ok bool) {
-	if strings.TrimSpace(session.RefreshToken) != "" {
-		if refreshed, err := store.server.refreshOpenAIAccount(session.RefreshToken); err == nil &&
-			strings.TrimSpace(refreshed.AccessToken) != "" {
-			return refreshed.AccessToken, refreshed.RefreshToken, refreshed.ExpiresAt, true
+// gptProxyPoolToken returns a fresh ChatGPT access token from the Codex account
+// pool managed in the admin console. It picks the first active account (across
+// all channels), decrypts its access token, and — when the token is close to
+// expiring and a refresh token is available — refreshes it and persists the new
+// tokens back into the pool. This lets the web proxy reuse the same accounts the
+// user already manages in the UI, with no separate login step.
+func (s *Server) gptProxyPoolToken() (accessToken, email, name string, ok bool) {
+	s.mu.Lock()
+	var picked *OpenAIAccount
+	for ci := range s.state.Channels {
+		for ai := range s.state.Channels[ci].OpenAIAccounts {
+			account := s.state.Channels[ci].OpenAIAccounts[ai]
+			if strings.TrimSpace(account.AccessToken) == "" || account.Status == "invalid" {
+				continue
+			}
+			copied := account
+			picked = &copied
+			break
+		}
+		if picked != nil {
+			break
 		}
 	}
-	if strings.TrimSpace(session.SessionToken) != "" {
-		if token, expiry, err := fetchChatGPTAccessTokenViaSessionCookie(session.SessionToken); err == nil && token != "" {
-			return token, "", expiry, true
+	s.mu.Unlock()
+	if picked == nil {
+		return "", "", "", false
+	}
+
+	accessToken, err := s.revealSecret(picked.AccessToken)
+	if err != nil || strings.TrimSpace(accessToken) == "" {
+		return "", "", "", false
+	}
+	email, name = picked.Email, picked.Name
+
+	if strings.TrimSpace(picked.RefreshToken) != "" &&
+		openAIAccountAccessTokenExpiring(accessToken, picked.ExpiresAt, 5*time.Minute) {
+		if refreshToken, err := s.revealSecret(picked.RefreshToken); err == nil {
+			if refreshed, err := s.refreshOpenAIAccount(refreshToken); err == nil &&
+				strings.TrimSpace(refreshed.AccessToken) != "" {
+				accessToken = refreshed.AccessToken
+				s.persistRefreshedPoolAccount(picked.ID, refreshed)
+			}
 		}
 	}
-	return "", "", "", false
+	return accessToken, email, name, true
 }
 
-// canRenew reports whether a session has any credential capable of renewal.
-func (session *gptProxyTokenSession) canRenew() bool {
-	return strings.TrimSpace(session.RefreshToken) != "" || strings.TrimSpace(session.SessionToken) != ""
-}
-
-// fetchChatGPTAccessTokenViaSessionCookie exchanges a next-auth session cookie
-// for the current ChatGPT access token by calling the upstream session endpoint
-// exactly as the browser would. The session cookie itself is long-lived, so this
-// keeps cookie-login accounts alive without a refresh token.
-func fetchChatGPTAccessTokenViaSessionCookie(sessionToken string) (accessToken string, expiresAt string, err error) {
-	req, err := http.NewRequest(http.MethodGet, "https://chatgpt.com/api/auth/session", nil)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0")
-	req.AddCookie(&http.Cookie{Name: "__Secure-next-auth.session-token", Value: sessionToken})
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	res, err := client.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return "", "", fmt.Errorf("session endpoint returned HTTP %d", res.StatusCode)
-	}
-	content, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	if err != nil {
-		return "", "", err
-	}
-	var body struct {
-		AccessToken string `json:"accessToken"`
-		Expires     string `json:"expires"`
-	}
-	if err := json.Unmarshal(content, &body); err != nil {
-		return "", "", err
-	}
-	if strings.TrimSpace(body.AccessToken) == "" {
-		return "", "", fmt.Errorf("session endpoint returned no accessToken")
-	}
-	return strings.TrimSpace(body.AccessToken), strings.TrimSpace(body.Expires), nil
-}
-
-// refreshLoop periodically refreshes access tokens that are close to expiring.
-// Sessions without a refresh token or session cookie are left untouched; the
-// access token simply expires when it does.
-func (store *gptProxyTokenStore) refreshLoop() {
-	ticker := time.NewTicker(2 * time.Minute)
-	defer ticker.Stop()
-	for range ticker.C {
-		store.refreshDueSessions()
-	}
-}
-
-func (store *gptProxyTokenStore) refreshDueSessions() {
-	store.mu.RLock()
-	pending := make([]*gptProxyTokenSession, 0, len(store.sessions))
-	for _, session := range store.sessions {
-		if !session.canRenew() {
-			continue
-		}
-		if openAIAccountAccessTokenExpiring(session.AccessToken, session.ExpiresAt, 10*time.Minute) {
-			snapshot := *session
-			pending = append(pending, &snapshot)
+// persistRefreshedPoolAccount writes refreshed tokens back into the matching
+// pool account (found by id) and saves state, re-encrypting secrets at rest.
+func (s *Server) persistRefreshedPoolAccount(accountID string, refreshed OpenAIRefreshResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for ci := range s.state.Channels {
+		accounts := s.state.Channels[ci].OpenAIAccounts
+		for ai := range accounts {
+			if accounts[ai].ID != accountID {
+				continue
+			}
+			if protected, err := s.protectSecret(refreshed.AccessToken); err == nil {
+				accounts[ai].AccessToken = protected
+			}
+			if strings.TrimSpace(refreshed.RefreshToken) != "" {
+				if protected, err := s.protectSecret(refreshed.RefreshToken); err == nil {
+					accounts[ai].RefreshToken = protected
+				}
+			}
+			if strings.TrimSpace(refreshed.ExpiresAt) != "" {
+				accounts[ai].ExpiresAt = refreshed.ExpiresAt
+			}
+			accounts[ai].LastRefresh = now()
+			s.saveStateLocked()
+			return
 		}
 	}
-	store.mu.RUnlock()
-
-	for _, session := range pending {
-		accessToken, refreshToken, expiresAt, ok := store.renew(session)
-		if !ok {
-			log.Printf("[GPT Web Proxy] token renew failed for session %s", session.SessionID)
-			continue
-		}
-		store.applyRenewal(session.SessionID, accessToken, refreshToken, expiresAt)
-		log.Printf("[GPT Web Proxy] renewed token for session %s", session.SessionID)
-	}
-}
-
-// applyRenewal writes a renewed access token back into the live session.
-func (store *gptProxyTokenStore) applyRenewal(id, accessToken, refreshToken, expiresAt string) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	live, ok := store.sessions[id]
-	if !ok {
-		return
-	}
-	live.AccessToken = accessToken
-	if refreshToken != "" {
-		live.RefreshToken = refreshToken
-	}
-	if expiresAt != "" {
-		live.ExpiresAt = expiresAt
-	}
-	live.LastRefresh = time.Now().UTC()
-}
-
-// tokenForSession returns the current (possibly just-renewed) access token for a
-// session, renewing synchronously if it is already expired.
-func (store *gptProxyTokenStore) tokenForSession(id string) string {
-	session, ok := store.get(id)
-	if !ok {
-		return ""
-	}
-	if session.canRenew() && openAIAccountAccessTokenExpiring(session.AccessToken, session.ExpiresAt, time.Minute) {
-		if accessToken, refreshToken, expiresAt, ok := store.renew(session); ok {
-			store.applyRenewal(id, accessToken, refreshToken, expiresAt)
-			return accessToken
-		}
-	}
-	return session.AccessToken
 }
 
 // startGPTWebProxy starts a reverse proxy in front of the ChatGPT web app on the
@@ -749,7 +622,6 @@ func (store *gptProxyTokenStore) tokenForSession(id string) string {
 // preserves streaming for backend-api responses and strips headers that would
 // otherwise block the app from running under a different host.
 func (s *Server) startGPTWebProxy(port string) {
-	tokenStore := newGPTProxyTokenStore(s)
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		TLSHandshakeTimeout:   15 * time.Second,
@@ -793,20 +665,17 @@ func (s *Server) startGPTWebProxy(port string) {
 			// We only decode gzip ourselves, so refuse brotli/deflate to keep
 			// body rewriting reliable.
 			req.Header.Set("Accept-Encoding", "gzip")
-			// Token/JSON login: inject the current ChatGPT access token as a
-			// Bearer credential on backend-api calls when the user logged in via
-			// a pasted token instead of browser cookies. The token is read from
-			// the server-side store so background refresh stays transparent.
-			if up.Prefix == "" && (strings.HasPrefix(req.URL.Path, "/backend-api/") || strings.HasPrefix(req.URL.Path, "/backend-anon/")) {
-				if cookie, err := req.Cookie(gptProxyLoginCookie); err == nil && cookie.Value != "" {
-					if token := tokenStore.tokenForSession(cookie.Value); token != "" {
-						req.Header.Set("Authorization", "Bearer "+token)
-					}
+			// Account-pool login: inject the current access token from the admin
+			// console's Codex account pool onto backend-api calls, unless the
+			// browser already carries its own ChatGPT session cookie.
+			if up.Prefix == "" && !gptProxyHasChatGPTSession(req) &&
+				(strings.HasPrefix(req.URL.Path, "/backend-api/") || strings.HasPrefix(req.URL.Path, "/backend-anon/")) {
+				if token, _, _, ok := s.gptProxyPoolToken(); ok {
+					req.Header.Set("Authorization", "Bearer "+token)
 				}
 			}
-			// Never forward the proxy's own cookies upstream.
+			// Never forward the proxy's own access cookie upstream.
 			gptProxyStripCookie(req, gptProxyTokenCookie)
-			gptProxyStripCookie(req, gptProxyLoginCookie)
 		},
 		ModifyResponse: gptProxyModifyResponse,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -815,9 +684,9 @@ func (s *Server) startGPTWebProxy(port string) {
 		},
 	}
 
-	// Token/JSON login endpoints sit in front of the proxy so a user can log in
-	// by pasting an access token or account JSON instead of browser cookies.
-	handler := gptProxyLoginRouter(tokenStore, proxy)
+	// Synthesize /api/auth/session from the account pool so the ChatGPT frontend
+	// treats the visitor as signed in when no browser session cookie is present.
+	handler := s.gptProxySessionRouter(proxy)
 
 	// Optional access token. When set, the browser must unlock the proxy once
 	// (via ?__proxy_token=...) before any request is forwarded upstream.
@@ -873,139 +742,43 @@ func gptProxyAccessGate(token string, next http.Handler) http.Handler {
 	})
 }
 
-// gptProxyLoginCookie stores the ChatGPT access token for users who log in by
-// pasting a token or account JSON. The value is base64-encoded so tokens with
-// special characters survive the cookie round-trip.
-const gptProxyLoginCookie = "__catie_gpt_token"
+// gptProxyHasChatGPTSession reports whether the browser already carries a real
+// ChatGPT session cookie. When it does, the proxy stays out of the way and lets
+// the genuine browser login flow through instead of injecting a pool token.
+func gptProxyHasChatGPTSession(req *http.Request) bool {
+	for _, cookie := range req.Cookies() {
+		if strings.Contains(cookie.Name, "next-auth.session-token") && strings.TrimSpace(cookie.Value) != "" {
+			return true
+		}
+	}
+	return false
+}
 
-// gptProxyLoginRouter serves the token/JSON login flow and hands everything else
-// to the reverse proxy. Three login modes are supported:
-//   - Browser login: nothing to do, ChatGPT cookies flow through the proxy.
-//   - Access token: POST /__catie_login__ with field "token".
-//   - Account JSON: POST /__catie_login__ with field "json" (CPA/sub2api shapes).
-//
-// When a token login is active, GET /backend-api/... requests get an injected
-// Authorization header (see the Director) and /api/auth/session is answered
-// locally so the ChatGPT frontend treats the user as signed in.
-func gptProxyLoginRouter(store *gptProxyTokenStore, next http.Handler) http.Handler {
+// gptProxySessionRouter synthesizes /api/auth/session from the admin console's
+// Codex account pool so the ChatGPT frontend treats the visitor as signed in
+// without any manual login step. If the browser already has a real ChatGPT
+// session cookie, or the pool is empty, the request passes through untouched so
+// normal browser login keeps working.
+func (s *Server) gptProxySessionRouter(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/__catie_login__" && r.Method == http.MethodGet:
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Write([]byte(gptProxyLoginPage))
-			return
-		case r.URL.Path == "/__catie_login__" && r.Method == http.MethodPost:
-			gptProxyHandleLogin(store, w, r)
-			return
-		case r.URL.Path == "/__catie_logout__":
-			if cookie, err := r.Cookie(gptProxyLoginCookie); err == nil {
-				store.remove(cookie.Value)
-			}
-			http.SetCookie(w, &http.Cookie{Name: gptProxyLoginCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
-			http.Redirect(w, r, "/__catie_login__", http.StatusFound)
-			return
-		case r.URL.Path == "/api/auth/session" && r.Method == http.MethodGet:
-			// Only synthesize a session when a token login is active; otherwise
-			// let the real cookie-based session pass through.
-			if cookie, err := r.Cookie(gptProxyLoginCookie); err == nil && cookie.Value != "" {
-				if session, ok := store.get(cookie.Value); ok {
-					token := store.tokenForSession(cookie.Value)
-					gptProxyWriteSyntheticSession(w, token, session)
-					return
-				}
+		if r.URL.Path == "/api/auth/session" && r.Method == http.MethodGet && !gptProxyHasChatGPTSession(r) {
+			if token, email, name, ok := s.gptProxyPoolToken(); ok {
+				gptProxyWriteSyntheticSession(w, token, email, name)
+				return
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-// gptProxyHandleLogin accepts a pasted access token or account JSON, extracts a
-// usable access token (and refresh token when present), registers a server-side
-// session and stores its opaque id in a cookie.
-func gptProxyHandleLogin(store *gptProxyTokenStore, w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
-		return
-	}
-	var token, refresh, sessionToken, expiresAt, email, name string
-	token = strings.TrimSpace(r.FormValue("token"))
-	sessionToken = strings.TrimSpace(r.FormValue("session_token"))
-	if raw := strings.TrimSpace(r.FormValue("json")); raw != "" {
-		if accounts, _, _, err := parseOpenAIAccountImportJSON([]byte(raw)); err == nil {
-			for _, account := range accounts {
-				if account.AccessToken != "" || account.RefreshToken != "" {
-					if token == "" {
-						token = account.AccessToken
-					}
-					refresh = account.RefreshToken
-					expiresAt = account.ExpiresAt
-					email = account.Email
-					name = account.Name
-					break
-				}
-			}
-		}
-		// The JSON may also carry a next-auth session token under various keys.
-		if sessionToken == "" {
-			sessionToken = gptProxySessionTokenFromJSON([]byte(raw))
-		}
-	}
-	// With only a refresh token we can still mint an access token immediately.
-	if token == "" && refresh != "" {
-		if refreshed, err := store.server.refreshOpenAIAccount(refresh); err == nil {
-			token = refreshed.AccessToken
-			if refreshed.RefreshToken != "" {
-				refresh = refreshed.RefreshToken
-			}
-			if refreshed.ExpiresAt != "" {
-				expiresAt = refreshed.ExpiresAt
-			}
-		}
-	}
-	// With only a session cookie we exchange it for an access token now.
-	if token == "" && sessionToken != "" {
-		if fetched, expiry, err := fetchChatGPTAccessTokenViaSessionCookie(sessionToken); err == nil {
-			token = fetched
-			if expiry != "" {
-				expiresAt = expiry
-			}
-		}
-	}
-	if token == "" {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("<p>未找到可用的凭据。请粘贴 access token、含 access_token/refresh_token 的账号 JSON,或 session token。</p><p><a href=\"/__catie_login__\">返回</a></p>"))
-		return
-	}
-	if jwtEmail, jwtName := gptProxyClaimsFromJWT(token); email == "" || name == "" {
-		if email == "" {
-			email = jwtEmail
-		}
-		if name == "" {
-			name = jwtName
-		}
-	}
-	id := store.create(token, refresh, sessionToken, expiresAt, email, name)
-	http.SetCookie(w, &http.Cookie{
-		Name:     gptProxyLoginCookie,
-		Value:    id,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-	http.Redirect(w, r, "/", http.StatusFound)
-}
-
 // gptProxyWriteSyntheticSession answers /api/auth/session with a minimal signed-in
-// payload built from the token session. The ChatGPT frontend reads accessToken
+// payload built from a pool access token. The ChatGPT frontend reads accessToken
 // from this response to authorize its backend-api calls.
-func gptProxyWriteSyntheticSession(w http.ResponseWriter, token string, session *gptProxyTokenSession) {
-	name := session.Name
-	email := session.Email
-	if name == "" {
+func gptProxyWriteSyntheticSession(w http.ResponseWriter, token, email, name string) {
+	if strings.TrimSpace(name) == "" {
 		name = "ChatGPT User"
 	}
-	if email == "" {
+	if strings.TrimSpace(email) == "" {
 		email = "user@chatgpt.local"
 	}
 	payload := map[string]interface{}{
@@ -1026,82 +799,6 @@ func gptProxyWriteSyntheticSession(w http.ResponseWriter, token string, session 
 	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(payload)
 }
-
-// gptProxySessionTokenFromJSON pulls a next-auth session token out of an account
-// JSON blob, tolerating the common key spellings.
-func gptProxySessionTokenFromJSON(raw []byte) string {
-	var payload map[string]interface{}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return ""
-	}
-	return firstNonEmptyString(
-		stringFromMapAnyKeys(payload, "session_token", "sessionToken"),
-		stringFromMapAnyKeys(payload, "__Secure-next-auth.session-token", "next_auth_session_token", "nextAuthSessionToken"),
-	)
-}
-
-// gptProxyClaimsFromJWT best-effort extracts email and name from a JWT access
-// token payload without verifying the signature (display only).
-func gptProxyClaimsFromJWT(token string) (email string, name string) {
-	parts := strings.Split(token, ".")
-	if len(parts) < 2 {
-		return "", ""
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", ""
-	}
-	var claims map[string]interface{}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", ""
-	}
-	email, _ = claims["email"].(string)
-	if n, ok := claims["name"].(string); ok {
-		name = n
-	} else if n, ok := claims["nickname"].(string); ok {
-		name = n
-	}
-	return email, name
-}
-
-const gptProxyLoginPage = `<!doctype html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ChatGPT 反代登录</title>
-<style>
-:root{color-scheme:light dark}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:560px;margin:6vh auto;padding:0 20px;line-height:1.6}
-h1{font-size:22px}
-.card{border:1px solid rgba(128,128,128,.3);border-radius:12px;padding:20px;margin:16px 0}
-label{display:block;font-weight:600;margin-bottom:8px}
-textarea,input{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid rgba(128,128,128,.4);font-size:14px;font-family:inherit}
-textarea{min-height:120px;resize:vertical}
-button{margin-top:12px;padding:10px 18px;border:0;border-radius:8px;background:#007AFF;color:#fff;font-size:15px;cursor:pointer}
-.muted{color:rgba(128,128,128,1);font-size:13px}
-a{color:#007AFF}
-</style>
-</head>
-<body>
-<h1>ChatGPT 反代登录</h1>
-<p class="muted">三种方式任选其一。浏览器登录直接访问 <a href="/">首页</a> 用账号密码登录即可。</p>
-<div class="card">
-<form method="post" action="/__catie_login__">
-<label>方式一:粘贴 Access Token</label>
-<input name="token" placeholder="eyJhbGciOi..." autocomplete="off">
-<label style="margin-top:16px">方式二:粘贴账号 JSON（CPA / sub2api 格式）</label>
-<textarea name="json" placeholder='{"access_token":"...","refresh_token":"..."}'></textarea>
-<p class="muted">含 refresh_token 时会自动刷新，长期有效；只有 access_token 时到期需重新登录。</p>
-<label style="margin-top:16px">方式三:粘贴 Session Token（__Secure-next-auth.session-token）</label>
-<input name="session_token" placeholder="从浏览器 Cookie 复制" autocomplete="off">
-<p class="muted">Session Token 有效期很长，即使没有 refresh_token 也能长期自动续期。</p>
-<button type="submit">登录</button>
-</form>
-</div>
-<p class="muted">已登录？<a href="/__catie_logout__">退出 token 登录</a></p>
-</body>
-</html>`
 
 // gptProxyMatchUpstream picks the upstream whose prefix matches the request path.
 // The primary host (empty prefix) is the fallback.
