@@ -215,6 +215,7 @@ type OpenAIAccount struct {
 	Email         string             `json:"email,omitempty"`
 	AccessToken   string             `json:"accessToken,omitempty"`
 	RefreshToken  string             `json:"refreshToken,omitempty"`
+	SessionToken  string             `json:"sessionToken,omitempty"`
 	IDToken       string             `json:"idToken,omitempty"`
 	AccountID     string             `json:"accountId,omitempty"`
 	UserID        string             `json:"userId,omitempty"`
@@ -584,17 +585,65 @@ func (s *Server) gptProxyPoolToken() (accessToken, email, name string, ok bool) 
 	}
 	email, name = picked.Email, picked.Name
 
-	if strings.TrimSpace(picked.RefreshToken) != "" &&
-		openAIAccountAccessTokenExpiring(accessToken, picked.ExpiresAt, 5*time.Minute) {
-		if refreshToken, err := s.revealSecret(picked.RefreshToken); err == nil {
-			if refreshed, err := s.refreshOpenAIAccount(refreshToken); err == nil &&
-				strings.TrimSpace(refreshed.AccessToken) != "" {
-				accessToken = refreshed.AccessToken
-				s.persistRefreshedPoolAccount(picked.ID, refreshed)
+	if openAIAccountAccessTokenExpiring(accessToken, picked.ExpiresAt, 5*time.Minute) {
+		// Prefer an OAuth refresh token; fall back to a captured session cookie.
+		if strings.TrimSpace(picked.RefreshToken) != "" {
+			if refreshToken, err := s.revealSecret(picked.RefreshToken); err == nil {
+				if refreshed, err := s.refreshOpenAIAccount(refreshToken); err == nil &&
+					strings.TrimSpace(refreshed.AccessToken) != "" {
+					accessToken = refreshed.AccessToken
+					s.persistRefreshedPoolAccount(picked.ID, refreshed)
+				}
+			}
+		} else if strings.TrimSpace(picked.SessionToken) != "" {
+			if sessionToken, err := s.revealSecret(picked.SessionToken); err == nil {
+				if token, expiry, err := fetchChatGPTAccessTokenViaSessionCookie(sessionToken); err == nil && token != "" {
+					accessToken = token
+					s.persistRefreshedPoolAccount(picked.ID, OpenAIRefreshResult{AccessToken: token, ExpiresAt: expiry})
+				}
 			}
 		}
 	}
 	return accessToken, email, name, true
+}
+
+// fetchChatGPTAccessTokenViaSessionCookie exchanges a next-auth session cookie
+// for the current ChatGPT access token by calling the upstream session endpoint
+// exactly as the browser would. The session cookie is long-lived, so this keeps
+// web-login accounts alive without an OAuth refresh token.
+func fetchChatGPTAccessTokenViaSessionCookie(sessionToken string) (accessToken string, expiresAt string, err error) {
+	req, err := http.NewRequest(http.MethodGet, "https://chatgpt.com/api/auth/session", nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.AddCookie(&http.Cookie{Name: "__Secure-next-auth.session-token", Value: sessionToken})
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return "", "", fmt.Errorf("session endpoint returned HTTP %d", res.StatusCode)
+	}
+	content, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if err != nil {
+		return "", "", err
+	}
+	var body struct {
+		AccessToken string `json:"accessToken"`
+		Expires     string `json:"expires"`
+	}
+	if err := json.Unmarshal(content, &body); err != nil {
+		return "", "", err
+	}
+	if strings.TrimSpace(body.AccessToken) == "" {
+		return "", "", fmt.Errorf("session endpoint returned no accessToken")
+	}
+	return strings.TrimSpace(body.AccessToken), strings.TrimSpace(body.Expires), nil
 }
 
 // persistRefreshedPoolAccount writes refreshed tokens back into the matching
@@ -624,6 +673,163 @@ func (s *Server) persistRefreshedPoolAccount(accountID string, refreshed OpenAIR
 			return
 		}
 	}
+}
+
+// gptProxyCaptureLogin inspects a proxied /api/auth/session response. When it
+// carries an accessToken (i.e. the visitor just logged in through the browser),
+// it captures that token together with the browser's next-auth session cookie
+// and stores the account in the Codex pool. The session cookie is long-lived, so
+// the captured account keeps auto-refreshing without a refresh token. The
+// response body is preserved for the browser.
+func (s *Server) gptProxyCaptureLogin(res *http.Response) {
+	if res.Request == nil || res.Request.URL == nil {
+		return
+	}
+	if res.Request.URL.Path != "/api/auth/session" || res.StatusCode != http.StatusOK {
+		return
+	}
+	// Read and restore the body so the browser still receives it.
+	raw, err := gptProxyReadBody(res)
+	if err != nil {
+		return
+	}
+	res.Body = io.NopCloser(bytes.NewReader(raw))
+
+	var payload struct {
+		AccessToken string `json:"accessToken"`
+		Expires     string `json:"expires"`
+		User        struct {
+			Email string `json:"email"`
+			Name  string `json:"name"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil || strings.TrimSpace(payload.AccessToken) == "" {
+		return
+	}
+
+	// Grab the session cookie the browser sent with this request.
+	sessionToken := ""
+	for _, cookie := range res.Request.Cookies() {
+		if strings.Contains(cookie.Name, "next-auth.session-token") && strings.TrimSpace(cookie.Value) != "" {
+			sessionToken = cookie.Value
+			break
+		}
+	}
+
+	email := strings.TrimSpace(payload.User.Email)
+	name := strings.TrimSpace(payload.User.Name)
+	if email == "" {
+		if jwtEmail, jwtName := jwtEmailName(payload.AccessToken); email == "" {
+			email = jwtEmail
+			if name == "" {
+				name = jwtName
+			}
+		}
+	}
+	go s.gptProxyStoreCapturedAccount(payload.AccessToken, sessionToken, payload.Expires, email, name)
+}
+
+// gptProxyReadBody reads a response body, transparently decoding gzip, and
+// returns the raw bytes without consuming the caller's ability to reset it.
+func gptProxyReadBody(res *http.Response) ([]byte, error) {
+	var reader io.Reader = res.Body
+	if strings.EqualFold(res.Header.Get("Content-Encoding"), "gzip") {
+		gr, err := gzip.NewReader(res.Body)
+		if err != nil {
+			return nil, err
+		}
+		defer gr.Close()
+		reader = gr
+		// Body is now decoded; drop the encoding header and let the normal
+		// rewrite path re-set content length.
+		res.Header.Del("Content-Encoding")
+	}
+	data, err := io.ReadAll(reader)
+	res.Body.Close()
+	return data, err
+}
+
+// gptProxyStoreCapturedAccount adds a browser-captured ChatGPT login to the
+// Codex account pool, de-duplicating by email/account so repeated logins update
+// the existing entry instead of piling up. It stores the account under the first
+// codex channel, creating one if none exists.
+func (s *Server) gptProxyStoreCapturedAccount(accessToken, sessionToken, expiresAt, email, name string) {
+	protectedAccess, err := s.protectSecret(accessToken)
+	if err != nil {
+		return
+	}
+	protectedSession := ""
+	if strings.TrimSpace(sessionToken) != "" {
+		if protectedSession, err = s.protectSecret(sessionToken); err != nil {
+			protectedSession = ""
+		}
+	}
+	accountID, planType := openAIClaimsAccountInfo(accessToken)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Find (or create) a codex channel to hold the account.
+	var channel *Channel
+	for ci := range s.state.Channels {
+		if isCodexChannel(s.state.Channels[ci]) {
+			channel = &s.state.Channels[ci]
+			break
+		}
+	}
+	if channel == nil {
+		created := Channel{
+			ID:       newID("chan"),
+			Name:     "网页登录账号池",
+			Provider: "codex",
+			BaseURL:  defaultChatGPTAPIBaseURL,
+			Status:   "healthy",
+		}
+		s.state.Channels = append(s.state.Channels, created)
+		channel = &s.state.Channels[len(s.state.Channels)-1]
+	}
+	s.ensureCodexChannelLocked(channel)
+
+	// De-duplicate: update an existing account with the same email/account id.
+	for ai := range channel.OpenAIAccounts {
+		existing := &channel.OpenAIAccounts[ai]
+		sameEmail := email != "" && strings.EqualFold(existing.Email, email)
+		sameAccount := accountID != "" && existing.AccountID == accountID
+		if sameEmail || sameAccount {
+			existing.AccessToken = protectedAccess
+			if protectedSession != "" {
+				existing.SessionToken = protectedSession
+			}
+			if expiresAt != "" {
+				existing.ExpiresAt = expiresAt
+			}
+			existing.LastRefresh = now()
+			existing.Status = "healthy"
+			existing.Source = "web-login"
+			s.saveStateLocked()
+			log.Printf("[GPT Web Proxy] refreshed captured web-login account %s", firstNonEmptyString(email, accountID))
+			return
+		}
+	}
+
+	stored := OpenAIAccount{
+		ID:            newID("oaiacc"),
+		Name:          firstNonEmptyString(name, email),
+		Email:         email,
+		AccessToken:   protectedAccess,
+		SessionToken:  protectedSession, // next-auth session cookie, used to renew the access token
+		AccountID:     accountID,
+		ExpiresAt:     expiresAt,
+		LastRefresh:   now(),
+		PlanType:      planType,
+		Source:        "web-login",
+		ClientProfile: codexClientProfileForImport("web-login", ""),
+		ImportedAt:    time.Now().UTC().Format(time.RFC3339),
+		Status:        "healthy",
+	}
+	channel.OpenAIAccounts = append(channel.OpenAIAccounts, stored)
+	s.saveStateLocked()
+	log.Printf("[GPT Web Proxy] captured new web-login account %s", firstNonEmptyString(email, accountID))
 }
 
 // startGPTWebProxy starts a reverse proxy in front of the ChatGPT web app on the
@@ -687,7 +893,13 @@ func (s *Server) startGPTWebProxy(port string) {
 			// Never forward the proxy's own access cookie upstream.
 			gptProxyStripCookie(req, gptProxyTokenCookie)
 		},
-		ModifyResponse: gptProxyModifyResponse,
+		ModifyResponse: func(res *http.Response) error {
+			// Capture a genuine browser login: when the ChatGPT frontend fetches
+			// /api/auth/session after signing in, grab its accessToken plus the
+			// browser's session cookie and store the account in the pool.
+			s.gptProxyCaptureLogin(res)
+			return gptProxyModifyResponse(res)
+		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("[GPT Web Proxy] upstream error for %s: %v", r.URL.Path, err)
 			http.Error(w, "proxy error", http.StatusBadGateway)
@@ -1697,7 +1909,7 @@ func (s *Server) validateBackupState(state AppState) error {
 			}
 		}
 		for _, account := range channel.OpenAIAccounts {
-			for _, secret := range []string{account.AccessToken, account.RefreshToken, account.IDToken} {
+			for _, secret := range []string{account.AccessToken, account.RefreshToken, account.SessionToken, account.IDToken} {
 				if strings.TrimSpace(secret) == "" {
 					continue
 				}
