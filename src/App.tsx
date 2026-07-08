@@ -213,13 +213,6 @@ type MaintenanceSettings = {
   maxQuotaEntries: number;
 };
 
-type WebProxySettings = {
-  enabled: boolean;
-  port: number;
-  accessTokenSet: boolean;
-  running: boolean;
-};
-
 type AccountProfile = {
   id: string;
   userId: string;
@@ -2521,12 +2514,12 @@ function DrawingView({
         </div>
         <div className="source-guide">
           <div className="source-guide-item">
-            <strong>① 网页登录（推荐，自动）</strong>
-            <span>打开 ChatGPT 网页反代站，用账号正常登录一次，账号会自动出现在下方列表，无需任何操作。</span>
+            <strong>OAuth 授权（推荐）</strong>
+            <span>用每个渠道卡片里的「OAuth 授权」接码添加，得到的账号带 refresh_token，可长期自动刷新。</span>
           </div>
           <div className="source-guide-item">
-            <strong>② 手动添加</strong>
-            <span>没有反代站时，用每个渠道卡片里的「OAuth 授权」接码，或「导入 JSON」批量导入账号。</span>
+            <strong>导入 JSON</strong>
+            <span>已有 access_token / refresh_token / session token 的账号，用「导入 JSON」批量导入。</span>
           </div>
         </div>
         <div className="channels-stack">
@@ -2565,9 +2558,9 @@ function DrawingView({
                     {busy === `check:${channel.id}` ? "测活中" : "批量测活"}
                   </button>
                   <details className="manual-add">
-                    <summary className="secondary-button">手动添加账号</summary>
+                    <summary className="secondary-button">添加账号</summary>
                     <div className="manual-add-body">
-                      <span className="muted-inline">仅在没有网页反代站时使用。有反代站请直接在站上登录，账号会自动入池。</span>
+                      <span className="muted-inline">OAuth 授权得到的账号带 refresh_token，可长期自动刷新；也可导入已有 token/JSON。</span>
                       <div className="manual-add-actions">
                         <button className="secondary-button" onClick={() => setOAuthChannelId(channel.id)} disabled={busy !== ""}>
                           OAuth 授权（接码）
@@ -3408,8 +3401,6 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
     maxLogs: 10000,
     maxQuotaEntries: 20000
   });
-  const [webProxy, setWebProxy] = useState<WebProxySettings>({ enabled: false, port: 8788, accessTokenSet: false, running: false });
-  const [webProxyToken, setWebProxyToken] = useState("");
   const [account, setAccount] = useState<AccountProfile | null>(null);
   const [accountUsername, setAccountUsername] = useState("");
   const [accountDisplayName, setAccountDisplayName] = useState("");
@@ -3429,7 +3420,6 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
     { value: "admin", label: "管理员", description: "账号绑定" },
     { value: "discord", label: "Discord", description: "登录限制" },
     { value: "maintenance", label: "维护", description: "日志保留" },
-    { value: "webproxy", label: "网页反代", description: "ChatGPT 镜像" },
     { value: "backup", label: "备份", description: "导出恢复" }
   ];
   const activeSettingsTab = settingsTabs.find((tab) => tab.value === settingsTab) || settingsTabs[0];
@@ -3439,10 +3429,9 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
       fetchJson<{ discord: DiscordSettings }>("/api/settings/discord"),
       fetchJson<{ auth: AuthSettings }>("/api/settings/auth"),
       fetchJson<{ account: AccountProfile; user: User }>("/api/account/me"),
-      fetchJson<{ maintenance: MaintenanceSettings }>("/api/settings/maintenance"),
-      fetchJson<{ webProxy: WebProxySettings }>("/api/settings/web-proxy")
+      fetchJson<{ maintenance: MaintenanceSettings }>("/api/settings/maintenance")
     ])
-      .then(([discordData, authData, accountData, maintenanceData, webProxyData]) => {
+      .then(([discordData, authData, accountData, maintenanceData]) => {
         setDiscord(withBrowserDiscordDefaults(discordData.discord));
         setRegistrationEnabled(authData.auth.registrationEnabled);
         setRegistrationMode(normalizeRegistrationMode(authData.auth.registrationMode));
@@ -3453,7 +3442,6 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
         setAccountEmail(accountData.account?.email || "");
         setDiscordUserId(accountData.account?.discordUserId || "");
         setMaintenance(maintenanceData.maintenance);
-        setWebProxy(webProxyData.webProxy);
       })
       .catch(() => setMessage("设置加载失败"));
   }, []);
@@ -3536,31 +3524,6 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
       setMessage("维护设置已保存，历史数据已按新规则清理");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "维护设置保存失败");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function saveWebProxySettings(next: Partial<WebProxySettings> = {}) {
-    setSaving(true);
-    setMessage("");
-    const merged = { ...webProxy, ...next };
-    try {
-      const payload: Record<string, unknown> = { enabled: merged.enabled, port: Number(merged.port) || 0 };
-      if (webProxyToken.trim()) {
-        payload.accessToken = webProxyToken.trim();
-      } else {
-        payload.accessTokenSet = merged.accessTokenSet;
-      }
-      const data = await fetchJson<{ webProxy: WebProxySettings }>("/api/settings/web-proxy", {
-        method: "PATCH",
-        body: JSON.stringify(payload)
-      });
-      setWebProxy(data.webProxy);
-      setWebProxyToken("");
-      setMessage(data.webProxy.running ? `网页反代已启动，端口 ${data.webProxy.port}` : "网页反代已停止");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "网页反代设置保存失败");
     } finally {
       setSaving(false);
     }
@@ -3683,77 +3646,6 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
             <span role="status">{message}</span>
             <button type="button" className="primary-button" disabled={saving} onClick={saveMaintenanceSettings}>
               {saving ? "保存中" : "保存维护设置"}
-            </button>
-          </div>
-        </div>
-      </Panel>
-      )}
-
-      {settingsTab === "webproxy" && (
-      <Panel title="ChatGPT 网页反代">
-        <div className="settings-group">
-          <p className="muted-inline settings-lead">
-            开启后会在指定端口镜像 chatgpt.com。用浏览器打开这个端口，用 ChatGPT 账号登录一次，账号会自动进入账号池。
-          </p>
-          <div className="setting">
-            <div>
-              <span>启用网页反代</span>
-              <small>{webProxy.running ? `运行中 · 端口 ${webProxy.port}` : "未运行"}</small>
-            </div>
-            <div className="setting-value">
-              <button
-                type="button"
-                className={webProxy.enabled ? "ios-switch is-on" : "ios-switch"}
-                aria-label={webProxy.enabled ? "停用网页反代" : "启用网页反代"}
-                aria-pressed={webProxy.enabled}
-                disabled={saving}
-                onClick={() => saveWebProxySettings({ enabled: !webProxy.enabled })}
-              >
-                <span />
-              </button>
-            </div>
-          </div>
-          <div className="setting">
-            <span>监听端口</span>
-            <div className="setting-value maintenance-control">
-              <input
-                type="number"
-                min="1"
-                max="65535"
-                value={webProxy.port}
-                onChange={(event) => setWebProxy((current) => ({ ...current, port: Number(event.target.value) }))}
-              />
-            </div>
-          </div>
-          <div className="setting">
-            <div>
-              <span>访问口令（可选）</span>
-              <small>{webProxy.accessTokenSet ? "已设置，留空则不修改" : "设置后需带 ?__proxy_token= 才能访问"}</small>
-            </div>
-            <div className="setting-value maintenance-control">
-              <input
-                type="password"
-                value={webProxyToken}
-                placeholder={webProxy.accessTokenSet ? "••••••" : "留空为公开访问"}
-                autoComplete="new-password"
-                onChange={(event) => setWebProxyToken(event.target.value)}
-              />
-            </div>
-          </div>
-          {webProxy.accessTokenSet && (
-            <div className="setting">
-              <span>清除访问口令</span>
-              <div className="setting-value">
-                <button type="button" className="secondary-button compact-button" disabled={saving} onClick={() => saveWebProxySettings({ accessTokenSet: false })}>
-                  清除
-                </button>
-              </div>
-            </div>
-          )}
-          <div className="settings-save-row">
-            <span role="status">{message}</span>
-            <button type="button" className="primary-button" disabled={saving} onClick={() => saveWebProxySettings()}>
-              {saving ? "保存中" : "保存并应用"}
             </button>
           </div>
         </div>
