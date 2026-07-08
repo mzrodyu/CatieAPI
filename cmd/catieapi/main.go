@@ -54,6 +54,8 @@ const (
 	chatGPTCodexImageModel        = "gpt-5.4-mini"
 	chatGPTCodexImageInstructions = "You are an image art director for the image_generation tool. Before calling the tool, internally turn the user's request into a precise visual brief: subject, composition, style, lighting, color, materials, camera/framing, and negative constraints when useful. Preserve any explicit user wording, characters, brands, reference-image intent, aspect ratio, and requested text exactly. Do not add visible text, logos, watermarks, UI labels, or poster typography unless the user explicitly asks for them."
 	openAIAuthClientID            = "app_EMoamEEZ73f0CkXaXp7hrann"
+	openAIOAuthRedirectURI        = "http://localhost:1455/auth/callback"
+	openAIOAuthScope              = "openid profile email offline_access"
 )
 
 var imageJSONKeepaliveInterval = 8 * time.Second
@@ -356,6 +358,14 @@ type Server struct {
 	idempotencyCache      map[string]CachedResponse
 	authStates            map[string]time.Time
 	sessions              map[string]Session
+	openAIOAuthFlows      map[string]openAIOAuthFlow
+}
+
+// openAIOAuthFlow tracks one in-progress ChatGPT OAuth (PKCE) authorization so
+// the callback can verify state and exchange the code with the right verifier.
+type openAIOAuthFlow struct {
+	CodeVerifier string
+	CreatedAt    time.Time
 }
 
 type CachedResponse struct {
@@ -1012,6 +1022,7 @@ func NewServer() *Server {
 		idempotencyCache:      map[string]CachedResponse{},
 		authStates:            map[string]time.Time{},
 		sessions:              map[string]Session{},
+		openAIOAuthFlows:      map[string]openAIOAuthFlow{},
 	}
 	s.initStorage()
 	s.loadState()
@@ -1057,6 +1068,8 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.GET("/channels", s.listChannels)
 	admin.POST("/channels", s.createChannel)
 	admin.POST("/channels/:id/import-openai-accounts", s.importOpenAIAccounts)
+	admin.POST("/channels/:id/openai-oauth/start", s.startOpenAIOAuth)
+	admin.POST("/channels/:id/openai-oauth/complete", s.completeOpenAIOAuth)
 	admin.POST("/channels/:id/openai-accounts/check", s.checkOpenAIAccounts)
 	admin.DELETE("/channels/:id/openai-accounts/:accountId", s.deleteOpenAIAccount)
 	admin.PATCH("/channels/:id", s.updateChannel)
@@ -2817,6 +2830,289 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 		"accounts": importedAccounts,
 		"channel":  publicChannel(*channel),
 	})
+}
+
+// startOpenAIOAuth begins a ChatGPT OAuth (PKCE) authorization for a channel. It
+// generates a PKCE verifier/challenge and state, stores the verifier server-side
+// and returns the authorize URL for the admin to open in a browser. Accounts
+// obtained this way include a refresh token, so they auto-refresh and do not hit
+// the 401 that token-only imports do once the access token expires.
+func (s *Server) startOpenAIOAuth(c *gin.Context) {
+	s.mu.Lock()
+	channel := s.findChannel(c.Param("id"))
+	if channel == nil {
+		s.mu.Unlock()
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
+		return
+	}
+	s.mu.Unlock()
+
+	verifier, challenge, err := newPKCEPair()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "Failed to create PKCE challenge"}})
+		return
+	}
+	state := randomHex(24)
+
+	s.mu.Lock()
+	s.pruneOpenAIOAuthFlowsLocked()
+	s.openAIOAuthFlows[state] = openAIOAuthFlow{CodeVerifier: verifier, CreatedAt: time.Now().UTC()}
+	s.mu.Unlock()
+
+	params := url.Values{}
+	params.Set("response_type", "code")
+	params.Set("client_id", openAIAuthClientID)
+	params.Set("redirect_uri", openAIOAuthRedirectURI)
+	params.Set("scope", openAIOAuthScope)
+	params.Set("code_challenge", challenge)
+	params.Set("code_challenge_method", "S256")
+	params.Set("id_token_add_organizations", "true")
+	params.Set("codex_cli_simplified_flow", "true")
+	params.Set("state", state)
+	authorizeURL := joinURL(s.openAIAuthBase, "oauth/authorize") + "?" + params.Encode()
+
+	c.JSON(http.StatusOK, gin.H{
+		"authorizeUrl": authorizeURL,
+		"state":        state,
+		"redirectUri":  openAIOAuthRedirectURI,
+	})
+}
+
+// completeOpenAIOAuth finishes the OAuth flow. The admin pastes the full callback
+// URL (or just the code+state); we verify the state, exchange the code with the
+// stored PKCE verifier, and store the resulting account (with refresh token) in
+// the channel's pool.
+func (s *Server) completeOpenAIOAuth(c *gin.Context) {
+	var body struct {
+		CallbackURL string `json:"callbackUrl"`
+		Code        string `json:"code"`
+		State       string `json:"state"`
+	}
+	_ = c.ShouldBindJSON(&body)
+
+	code := strings.TrimSpace(body.Code)
+	state := strings.TrimSpace(body.State)
+	// Accept a pasted callback URL and pull code/state out of it.
+	if raw := strings.TrimSpace(body.CallbackURL); raw != "" {
+		if parsed, err := url.Parse(raw); err == nil {
+			query := parsed.Query()
+			if v := strings.TrimSpace(query.Get("code")); v != "" {
+				code = v
+			}
+			if v := strings.TrimSpace(query.Get("state")); v != "" {
+				state = v
+			}
+		}
+	}
+	if code == "" {
+		validationError(c, "缺少授权 code，请粘贴完整回调地址")
+		return
+	}
+
+	s.mu.Lock()
+	channel := s.findChannel(c.Param("id"))
+	if channel == nil {
+		s.mu.Unlock()
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
+		return
+	}
+	flow, ok := s.openAIOAuthFlows[state]
+	if ok {
+		delete(s.openAIOAuthFlows, state)
+	}
+	s.mu.Unlock()
+	if !ok {
+		validationError(c, "授权状态已失效，请重新发起授权")
+		return
+	}
+
+	tokens, err := s.exchangeOpenAIOAuthCode(code, flow.CodeVerifier)
+	if err != nil {
+		s.openAIError(c, http.StatusBadGateway, "oauth_exchange_failed", err.Error(), "api_error", nil)
+		return
+	}
+
+	email, name := jwtEmailName(firstNonEmptyString(tokens.IDToken, tokens.AccessToken))
+	accountID, planType := openAIClaimsAccountInfo(tokens.IDToken)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	channel = s.findChannel(c.Param("id"))
+	if channel == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
+		return
+	}
+	s.ensureCodexChannelLocked(channel)
+
+	protectedAccess, err := s.protectSecret(tokens.AccessToken)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "Failed to protect access token"}})
+		return
+	}
+	protectedRefresh := ""
+	if strings.TrimSpace(tokens.RefreshToken) != "" {
+		if protectedRefresh, err = s.protectSecret(tokens.RefreshToken); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "Failed to protect refresh token"}})
+			return
+		}
+	}
+	protectedID := ""
+	if strings.TrimSpace(tokens.IDToken) != "" {
+		if protectedID, err = s.protectSecret(tokens.IDToken); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "Failed to protect id token"}})
+			return
+		}
+	}
+	stored := OpenAIAccount{
+		ID:            newID("oaiacc"),
+		Name:          firstNonEmptyString(name, email),
+		Email:         email,
+		AccessToken:   protectedAccess,
+		RefreshToken:  protectedRefresh,
+		IDToken:       protectedID,
+		AccountID:     accountID,
+		ExpiresAt:     tokens.ExpiresAt,
+		LastRefresh:   now(),
+		PlanType:      planType,
+		Source:        "oauth",
+		ClientProfile: codexClientProfileForImport("oauth", ""),
+		ImportedAt:    time.Now().UTC().Format(time.RFC3339),
+		Status:        "unchecked",
+	}
+	channel.OpenAIAccounts = append(channel.OpenAIAccounts, stored)
+	s.saveStateLocked()
+
+	c.JSON(http.StatusCreated, gin.H{
+		"account": publicOpenAIAccount(stored),
+		"channel": publicChannel(*channel),
+	})
+}
+
+// exchangeOpenAIOAuthCode exchanges an authorization code + PKCE verifier for
+// ChatGPT tokens.
+func (s *Server) exchangeOpenAIOAuthCode(code, verifier string) (OpenAIRefreshResult, error) {
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("client_id", openAIAuthClientID)
+	form.Set("code", code)
+	form.Set("redirect_uri", openAIOAuthRedirectURI)
+	form.Set("code_verifier", verifier)
+
+	request, err := http.NewRequest(http.MethodPost, joinURL(s.openAIAuthBase, "oauth/token"), strings.NewReader(form.Encode()))
+	if err != nil {
+		return OpenAIRefreshResult{}, err
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return OpenAIRefreshResult{}, err
+	}
+	defer response.Body.Close()
+	content, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return OpenAIRefreshResult{}, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		providerErr := providerErrorFromUpstream(response.StatusCode, content)
+		return OpenAIRefreshResult{}, fmt.Errorf("%s", providerErr.Message)
+	}
+	var bodyResponse struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		IDToken      string `json:"id_token"`
+		ExpiresIn    int    `json:"expires_in"`
+		ExpiresAt    string `json:"expires_at"`
+	}
+	if err := json.Unmarshal(content, &bodyResponse); err != nil {
+		return OpenAIRefreshResult{}, err
+	}
+	if strings.TrimSpace(bodyResponse.AccessToken) == "" {
+		return OpenAIRefreshResult{}, fmt.Errorf("授权响应缺少 access_token")
+	}
+	result := OpenAIRefreshResult{
+		AccessToken:  strings.TrimSpace(bodyResponse.AccessToken),
+		RefreshToken: strings.TrimSpace(bodyResponse.RefreshToken),
+		IDToken:      strings.TrimSpace(bodyResponse.IDToken),
+		ExpiresAt:    strings.TrimSpace(bodyResponse.ExpiresAt),
+	}
+	if result.ExpiresAt == "" && bodyResponse.ExpiresIn > 0 {
+		result.ExpiresAt = time.Now().Add(time.Duration(bodyResponse.ExpiresIn) * time.Second).UTC().Format(time.RFC3339Nano)
+	}
+	return result, nil
+}
+
+// pruneOpenAIOAuthFlowsLocked drops OAuth flows older than 15 minutes. Callers
+// must hold s.mu.
+func (s *Server) pruneOpenAIOAuthFlowsLocked() {
+	cutoff := time.Now().Add(-15 * time.Minute)
+	for state, flow := range s.openAIOAuthFlows {
+		if flow.CreatedAt.Before(cutoff) {
+			delete(s.openAIOAuthFlows, state)
+		}
+	}
+}
+
+// jwtEmailName best-effort extracts email and display name from a JWT payload
+// without verifying the signature (used only for labeling the account).
+func jwtEmailName(token string) (email string, name string) {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) < 2 {
+		return "", ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", ""
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", ""
+	}
+	email, _ = claims["email"].(string)
+	if n, ok := claims["name"].(string); ok {
+		name = n
+	} else if n, ok := claims["nickname"].(string); ok {
+		name = n
+	}
+	return email, name
+}
+
+// newPKCEPair returns a PKCE code verifier and its S256 challenge.
+func newPKCEPair() (verifier string, challenge string, err error) {
+	buffer := make([]byte, 32)
+	if _, err = rand.Read(buffer); err != nil {
+		return "", "", err
+	}
+	verifier = base64.RawURLEncoding.EncodeToString(buffer)
+	sum := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
+	return verifier, challenge, nil
+}
+
+// openAIClaimsAccountInfo best-effort extracts the ChatGPT account id and plan
+// type from an id_token's auth claims.
+func openAIClaimsAccountInfo(idToken string) (accountID string, planType string) {
+	parts := strings.Split(strings.TrimSpace(idToken), ".")
+	if len(parts) < 2 {
+		return "", ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", ""
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", ""
+	}
+	auth, _ := claims["https://api.openai.com/auth"].(map[string]interface{})
+	if auth == nil {
+		return "", ""
+	}
+	accountID = firstNonEmptyString(
+		stringFromMapAnyKeys(auth, "chatgpt_account_id", "account_id"),
+	)
+	planType = stringFromMapAnyKeys(auth, "chatgpt_plan_type", "plan_type")
+	return accountID, planType
 }
 
 func (s *Server) checkOpenAIAccounts(c *gin.Context) {

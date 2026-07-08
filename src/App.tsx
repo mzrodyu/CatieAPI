@@ -866,6 +866,24 @@ function App() {
     window.setTimeout(() => setToast(""), 1800);
   }
 
+  async function startOpenAIOAuth(channelId: string) {
+    return fetchJson<{ authorizeUrl: string; state: string; redirectUri: string }>(
+      `/api/channels/${encodeURIComponent(channelId)}/openai-oauth/start`,
+      { method: "POST", body: JSON.stringify({}) }
+    );
+  }
+
+  async function completeOpenAIOAuth(channelId: string, payload: { callbackUrl?: string; code?: string; state?: string }) {
+    const result = await fetchJson<{ account: OpenAIAccount; channel: Channel }>(
+      `/api/channels/${encodeURIComponent(channelId)}/openai-oauth/complete`,
+      { method: "POST", body: JSON.stringify(payload) }
+    );
+    setChannels((current) => current.map((channel) => (channel.id === result.channel.id ? normalizeChannel(result.channel) : channel)));
+    setToast("已通过 OAuth 添加账号");
+    window.setTimeout(() => setToast(""), 2400);
+    return result;
+  }
+
   async function createModel(model: ModelCreate) {
     const data = await fetchJson<{ model: ModelItem }>("/api/models", {
       method: "POST",
@@ -1078,7 +1096,7 @@ function App() {
         )}
         {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} onUpdateKey={updateAPIKey} onDeleteKey={deleteAPIKey} />}
         {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} onUpdate={updateModel} onDelete={deleteModel} />}
-        {active === "drawing" && <DrawingView channels={channels} onCreate={createChannel} onImport={importOpenAIAccounts} onCheckAccounts={checkOpenAIAccounts} onDeleteAccount={deleteOpenAIAccount} onUpdate={updateChannel} />}
+        {active === "drawing" && <DrawingView channels={channels} onCreate={createChannel} onImport={importOpenAIAccounts} onCheckAccounts={checkOpenAIAccounts} onDeleteAccount={deleteOpenAIAccount} onUpdate={updateChannel} onStartOAuth={startOpenAIOAuth} onCompleteOAuth={completeOpenAIOAuth} />}
         {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onImport={importOpenAIAccounts} onDelete={deleteChannel} onSyncModels={syncChannelModels} onCheck={checkChannel} />}
         {active === "logs" && <LogsView logs={logs} onCopy={copyAndToast} />}
         {active === "settings" && <SettingsView models={models} channels={channels} />}
@@ -2425,7 +2443,9 @@ function DrawingView({
   onImport,
   onCheckAccounts,
   onDeleteAccount,
-  onUpdate
+  onUpdate,
+  onStartOAuth,
+  onCompleteOAuth
 }: {
   channels: Channel[];
   onCreate: (channel?: ChannelCreate) => Promise<void>;
@@ -2433,10 +2453,13 @@ function DrawingView({
   onCheckAccounts: (channelId: string) => Promise<void>;
   onDeleteAccount: (channelId: string, accountId: string) => Promise<void>;
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
+  onStartOAuth: (channelId: string) => Promise<{ authorizeUrl: string; state: string; redirectUri: string }>;
+  onCompleteOAuth: (channelId: string, payload: { callbackUrl?: string; code?: string; state?: string }) => Promise<unknown>;
 }) {
   const drawingChannels = channels.filter((channel) => channel.provider === "codex" || channel.provider === "openai" || arrayOf(channel.models).some((model) => model.includes("image")));
   const [busy, setBusy] = useState("");
   const [accountVisibleCounts, setAccountVisibleCounts] = useState<Record<string, number>>({});
+  const [oauthChannelId, setOAuthChannelId] = useState("");
   const defaultVisibleAccounts = 24;
   const accountBatchSize = 48;
 
@@ -2534,6 +2557,9 @@ function DrawingView({
                       }}
                     />
                   </label>
+                  <button className="secondary-button" onClick={() => setOAuthChannelId(channel.id)} disabled={busy !== ""}>
+                    OAuth 授权添加
+                  </button>
                   <button className="secondary-button" onClick={() => checkAccounts(channel.id)} disabled={busy !== "" || accounts.length === 0}>
                     {busy === `check:${channel.id}` ? "测活中" : "批量测活"}
                   </button>
@@ -2613,7 +2639,106 @@ function DrawingView({
           })}
           {drawingChannels.length === 0 && <Empty text="暂无绘图渠道，先新增一个 OpenAI 账号池渠道" />}
         </div>
+        {oauthChannelId && (
+          <OpenAIOAuthModal
+            channelId={oauthChannelId}
+            onStart={onStartOAuth}
+            onComplete={onCompleteOAuth}
+            onClose={() => setOAuthChannelId("")}
+          />
+        )}
       </Panel>
+  );
+}
+
+function OpenAIOAuthModal({
+  channelId,
+  onStart,
+  onComplete,
+  onClose
+}: {
+  channelId: string;
+  onStart: (channelId: string) => Promise<{ authorizeUrl: string; state: string; redirectUri: string }>;
+  onComplete: (channelId: string, payload: { callbackUrl?: string; code?: string; state?: string }) => Promise<unknown>;
+  onClose: () => void;
+}) {
+  const [authorizeUrl, setAuthorizeUrl] = useState("");
+  const [state, setState] = useState("");
+  const [callback, setCallback] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function begin() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await onStart(channelId);
+      setAuthorizeUrl(result.authorizeUrl);
+      setState(result.state);
+      window.open(result.authorizeUrl, "_blank", "noopener");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "发起授权失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function finish() {
+    if (!callback.trim()) {
+      setError("请粘贴授权完成后浏览器跳转的回调地址");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await onComplete(channelId, { callbackUrl: callback.trim(), state });
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "完成授权失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <strong>OAuth 授权添加 Codex 账号</strong>
+          <button type="button" className="icon-button" onClick={onClose}>×</button>
+        </div>
+        <p className="muted-inline">OAuth 授权得到的账号带 refresh_token，可长期自动刷新，不会像纯 token 导入那样过期后画图报 401。</p>
+        <ol className="oauth-steps">
+          <li>
+            <button type="button" className="primary-button" onClick={begin} disabled={busy}>
+              {authorizeUrl ? "重新生成授权链接" : "① 生成授权链接并打开"}
+            </button>
+            {authorizeUrl && (
+              <div className="oauth-link">
+                <input readOnly value={authorizeUrl} onFocus={(event) => event.target.select()} />
+                <span className="muted-inline">若未自动打开，复制到浏览器手动访问，用要添加的 ChatGPT 账号登录授权。</span>
+              </div>
+            )}
+          </li>
+          <li>
+            <label>② 粘贴授权后浏览器跳转的完整回调地址</label>
+            <input
+              value={callback}
+              placeholder="http://localhost:1455/auth/callback?code=...&state=..."
+              onChange={(event) => setCallback(event.target.value)}
+              disabled={!authorizeUrl || busy}
+            />
+          </li>
+        </ol>
+        {error && <p className="form-error">{error}</p>}
+        <div className="modal-actions">
+          <button type="button" className="secondary-button" onClick={onClose} disabled={busy}>取消</button>
+          <button type="button" className="primary-button" onClick={finish} disabled={!authorizeUrl || busy}>
+            {busy ? "处理中" : "完成授权"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
