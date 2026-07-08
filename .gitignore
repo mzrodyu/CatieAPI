@@ -10,3 +10,5 @@ output/
 .env.local
 npm-debug.log*
 *.tsbuildinfo
+*.exe
+/catieapi

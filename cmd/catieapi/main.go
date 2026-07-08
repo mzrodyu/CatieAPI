@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -16,9 +17,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"mime/multipart"
 	"net/http"
+	"net/http/httputil"
 	"net/mail"
 	"net/url"
 	"os"
@@ -499,10 +502,783 @@ func main() {
 
 	server.registerRoutes(router)
 
+	// Start ChatGPT web proxy on a separate port
+	webProxyPort := env("GPT_WEB_PROXY_PORT", "")
+	if webProxyPort != "" {
+		go server.startGPTWebProxy(webProxyPort)
+	}
+
+
 	addr := ":" + env("PORT", "8787")
 	fmt.Printf("CatieAPI Go server listening on http://localhost%s\n", addr)
 	if err := router.Run(addr); err != nil {
 		panic(err)
+	}
+}
+
+// gptProxyUpstream maps a local path prefix onto an upstream ChatGPT origin.
+// The ChatGPT web app does not live on a single host: the HTML shell is served
+// from chatgpt.com, static assets from cdn.oaistatic.com, uploaded files from
+// files.oaiusercontent.com and telemetry from ab.chatgpt.com. Proxying only the
+// primary host leaves the page blank because the browser still tries to reach
+// the other origins directly. We therefore route each upstream through a stable
+// path prefix and rewrite response bodies so every absolute URL points back at
+// this proxy.
+type gptProxyUpstream struct {
+	// Prefix is the local path prefix (empty for the primary host).
+	Prefix string
+	// Host is the upstream host name.
+	Host string
+	// Scheme is the upstream scheme, always https for ChatGPT.
+	Scheme string
+}
+
+var gptProxyUpstreams = []gptProxyUpstream{
+	{Prefix: "", Host: "chatgpt.com", Scheme: "https"},
+	{Prefix: "/__oaistatic__", Host: "cdn.oaistatic.com", Scheme: "https"},
+	{Prefix: "/__oaiusercontent__", Host: "files.oaiusercontent.com", Scheme: "https"},
+	{Prefix: "/__oaiab__", Host: "ab.chatgpt.com", Scheme: "https"},
+}
+
+// gptProxyTokenSession holds one token-login session for the web proxy. The
+// browser only ever sees the opaque SessionID; the actual credentials stay in
+// memory server-side so a background refresh can rotate the access token
+// without the browser needing to update anything.
+type gptProxyTokenSession struct {
+	SessionID    string
+	AccessToken  string
+	RefreshToken string
+	SessionToken string // __Secure-next-auth.session-token, for cookie login
+	ExpiresAt    string // RFC3339, best-effort
+	Email        string
+	Name         string
+	LastRefresh  time.Time
+}
+
+// gptProxyTokenStore is an in-memory store of token-login sessions with a
+// background refresher. It is safe for concurrent use.
+type gptProxyTokenStore struct {
+	mu       sync.RWMutex
+	sessions map[string]*gptProxyTokenSession
+	server   *Server
+}
+
+func newGPTProxyTokenStore(server *Server) *gptProxyTokenStore {
+	store := &gptProxyTokenStore{
+		sessions: map[string]*gptProxyTokenSession{},
+		server:   server,
+	}
+	go store.refreshLoop()
+	return store
+}
+
+// create registers a new token session and returns its opaque session id.
+func (store *gptProxyTokenStore) create(accessToken, refreshToken, sessionToken, expiresAt, email, name string) string {
+	id := newID("gptsess") + randomHex(16)
+	store.mu.Lock()
+	store.sessions[id] = &gptProxyTokenSession{
+		SessionID:    id,
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		SessionToken: sessionToken,
+		ExpiresAt:    expiresAt,
+		Email:        email,
+		Name:         name,
+	}
+	store.mu.Unlock()
+	return id
+}
+
+func (store *gptProxyTokenStore) get(id string) (*gptProxyTokenSession, bool) {
+	if id == "" {
+		return nil, false
+	}
+	store.mu.RLock()
+	session, ok := store.sessions[id]
+	store.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	// Return a copy so callers never race on mutable fields.
+	snapshot := *session
+	return &snapshot, true
+}
+
+func (store *gptProxyTokenStore) remove(id string) {
+	store.mu.Lock()
+	delete(store.sessions, id)
+	store.mu.Unlock()
+}
+
+// renew mints a fresh access token for a session using whatever credential is
+// available: a refresh token (OAuth) or a session cookie. It returns the new
+// access token, an optional rotated refresh token, and an optional new expiry.
+// Sessions with neither credential cannot be renewed.
+func (store *gptProxyTokenStore) renew(session *gptProxyTokenSession) (accessToken, refreshToken, expiresAt string, ok bool) {
+	if strings.TrimSpace(session.RefreshToken) != "" {
+		if refreshed, err := store.server.refreshOpenAIAccount(session.RefreshToken); err == nil &&
+			strings.TrimSpace(refreshed.AccessToken) != "" {
+			return refreshed.AccessToken, refreshed.RefreshToken, refreshed.ExpiresAt, true
+		}
+	}
+	if strings.TrimSpace(session.SessionToken) != "" {
+		if token, expiry, err := fetchChatGPTAccessTokenViaSessionCookie(session.SessionToken); err == nil && token != "" {
+			return token, "", expiry, true
+		}
+	}
+	return "", "", "", false
+}
+
+// canRenew reports whether a session has any credential capable of renewal.
+func (session *gptProxyTokenSession) canRenew() bool {
+	return strings.TrimSpace(session.RefreshToken) != "" || strings.TrimSpace(session.SessionToken) != ""
+}
+
+// fetchChatGPTAccessTokenViaSessionCookie exchanges a next-auth session cookie
+// for the current ChatGPT access token by calling the upstream session endpoint
+// exactly as the browser would. The session cookie itself is long-lived, so this
+// keeps cookie-login accounts alive without a refresh token.
+func fetchChatGPTAccessTokenViaSessionCookie(sessionToken string) (accessToken string, expiresAt string, err error) {
+	req, err := http.NewRequest(http.MethodGet, "https://chatgpt.com/api/auth/session", nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.AddCookie(&http.Cookie{Name: "__Secure-next-auth.session-token", Value: sessionToken})
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return "", "", fmt.Errorf("session endpoint returned HTTP %d", res.StatusCode)
+	}
+	content, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if err != nil {
+		return "", "", err
+	}
+	var body struct {
+		AccessToken string `json:"accessToken"`
+		Expires     string `json:"expires"`
+	}
+	if err := json.Unmarshal(content, &body); err != nil {
+		return "", "", err
+	}
+	if strings.TrimSpace(body.AccessToken) == "" {
+		return "", "", fmt.Errorf("session endpoint returned no accessToken")
+	}
+	return strings.TrimSpace(body.AccessToken), strings.TrimSpace(body.Expires), nil
+}
+
+// refreshLoop periodically refreshes access tokens that are close to expiring.
+// Sessions without a refresh token or session cookie are left untouched; the
+// access token simply expires when it does.
+func (store *gptProxyTokenStore) refreshLoop() {
+	ticker := time.NewTicker(2 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		store.refreshDueSessions()
+	}
+}
+
+func (store *gptProxyTokenStore) refreshDueSessions() {
+	store.mu.RLock()
+	pending := make([]*gptProxyTokenSession, 0, len(store.sessions))
+	for _, session := range store.sessions {
+		if !session.canRenew() {
+			continue
+		}
+		if openAIAccountAccessTokenExpiring(session.AccessToken, session.ExpiresAt, 10*time.Minute) {
+			snapshot := *session
+			pending = append(pending, &snapshot)
+		}
+	}
+	store.mu.RUnlock()
+
+	for _, session := range pending {
+		accessToken, refreshToken, expiresAt, ok := store.renew(session)
+		if !ok {
+			log.Printf("[GPT Web Proxy] token renew failed for session %s", session.SessionID)
+			continue
+		}
+		store.applyRenewal(session.SessionID, accessToken, refreshToken, expiresAt)
+		log.Printf("[GPT Web Proxy] renewed token for session %s", session.SessionID)
+	}
+}
+
+// applyRenewal writes a renewed access token back into the live session.
+func (store *gptProxyTokenStore) applyRenewal(id, accessToken, refreshToken, expiresAt string) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	live, ok := store.sessions[id]
+	if !ok {
+		return
+	}
+	live.AccessToken = accessToken
+	if refreshToken != "" {
+		live.RefreshToken = refreshToken
+	}
+	if expiresAt != "" {
+		live.ExpiresAt = expiresAt
+	}
+	live.LastRefresh = time.Now().UTC()
+}
+
+// tokenForSession returns the current (possibly just-renewed) access token for a
+// session, renewing synchronously if it is already expired.
+func (store *gptProxyTokenStore) tokenForSession(id string) string {
+	session, ok := store.get(id)
+	if !ok {
+		return ""
+	}
+	if session.canRenew() && openAIAccountAccessTokenExpiring(session.AccessToken, session.ExpiresAt, time.Minute) {
+		if accessToken, refreshToken, expiresAt, ok := store.renew(session); ok {
+			store.applyRenewal(id, accessToken, refreshToken, expiresAt)
+			return accessToken
+		}
+	}
+	return session.AccessToken
+}
+
+// startGPTWebProxy starts a reverse proxy in front of the ChatGPT web app on the
+// given port. It routes the primary host and its asset/telemetry origins through
+// path prefixes, rewrites response bodies so the browser stays on this origin,
+// preserves streaming for backend-api responses and strips headers that would
+// otherwise block the app from running under a different host.
+func (s *Server) startGPTWebProxy(port string) {
+	tokenStore := newGPTProxyTokenStore(s)
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 90 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConns:          100,
+		ForceAttemptHTTP2:     true,
+	}
+
+	proxy := &httputil.ReverseProxy{
+		Transport:     transport,
+		FlushInterval: 100 * time.Millisecond, // stream SSE chat responses promptly
+		Director: func(req *http.Request) {
+			up := gptProxyMatchUpstream(req.URL.Path)
+			// Strip the prefix so the upstream receives the real path.
+			if up.Prefix != "" {
+				req.URL.Path = strings.TrimPrefix(req.URL.Path, up.Prefix)
+				if req.URL.Path == "" {
+					req.URL.Path = "/"
+				}
+				if req.URL.RawPath != "" {
+					req.URL.RawPath = strings.TrimPrefix(req.URL.RawPath, up.Prefix)
+				}
+			}
+			req.URL.Scheme = up.Scheme
+			req.URL.Host = up.Host
+			req.Host = up.Host
+
+			// Present the request as if it originated from the real site.
+			if req.Header.Get("Origin") != "" {
+				req.Header.Set("Origin", up.Scheme+"://"+up.Host)
+			}
+			if referer := req.Header.Get("Referer"); referer != "" {
+				req.Header.Set("Referer", gptProxyRewriteReferer(referer, up))
+			}
+			// Do not leak the proxy hop to Cloudflare / origin.
+			req.Header.Del("X-Forwarded-For")
+			req.Header.Del("X-Forwarded-Host")
+			req.Header.Del("X-Forwarded-Proto")
+			req.Header.Del("X-Real-Ip")
+			// We only decode gzip ourselves, so refuse brotli/deflate to keep
+			// body rewriting reliable.
+			req.Header.Set("Accept-Encoding", "gzip")
+			// Token/JSON login: inject the current ChatGPT access token as a
+			// Bearer credential on backend-api calls when the user logged in via
+			// a pasted token instead of browser cookies. The token is read from
+			// the server-side store so background refresh stays transparent.
+			if up.Prefix == "" && (strings.HasPrefix(req.URL.Path, "/backend-api/") || strings.HasPrefix(req.URL.Path, "/backend-anon/")) {
+				if cookie, err := req.Cookie(gptProxyLoginCookie); err == nil && cookie.Value != "" {
+					if token := tokenStore.tokenForSession(cookie.Value); token != "" {
+						req.Header.Set("Authorization", "Bearer "+token)
+					}
+				}
+			}
+			// Never forward the proxy's own cookies upstream.
+			gptProxyStripCookie(req, gptProxyTokenCookie)
+			gptProxyStripCookie(req, gptProxyLoginCookie)
+		},
+		ModifyResponse: gptProxyModifyResponse,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			log.Printf("[GPT Web Proxy] upstream error for %s: %v", r.URL.Path, err)
+			http.Error(w, "proxy error", http.StatusBadGateway)
+		},
+	}
+
+	// Token/JSON login endpoints sit in front of the proxy so a user can log in
+	// by pasting an access token or account JSON instead of browser cookies.
+	handler := gptProxyLoginRouter(tokenStore, proxy)
+
+	// Optional access token. When set, the browser must unlock the proxy once
+	// (via ?__proxy_token=...) before any request is forwarded upstream.
+	handler = gptProxyAccessGate(env("GPT_WEB_PROXY_TOKEN", ""), handler)
+
+	addr := ":" + port
+	log.Printf("[GPT Web Proxy] listening on http://localhost%s -> https://chatgpt.com", addr)
+	if err := http.ListenAndServe(addr, handler); err != nil {
+		log.Printf("[GPT Web Proxy] server error: %v", err)
+	}
+}
+
+const gptProxyTokenCookie = "__catie_proxy_token"
+
+// gptProxyAccessGate wraps the proxy with a shared-token check. When token is
+// empty the proxy is open (unchanged behavior). Otherwise a caller unlocks
+// access by passing ?__proxy_token=<token> once; the value is stored in an
+// HttpOnly cookie so subsequent asset and API requests from the browser pass
+// without needing the query parameter. Comparisons are constant-time.
+func gptProxyAccessGate(token string, next http.Handler) http.Handler {
+	if token == "" {
+		return next
+	}
+	tokenBytes := []byte(token)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if provided := r.URL.Query().Get("__proxy_token"); provided != "" {
+			if subtle.ConstantTimeCompare([]byte(provided), tokenBytes) == 1 {
+				http.SetCookie(w, &http.Cookie{
+					Name:     gptProxyTokenCookie,
+					Value:    provided,
+					Path:     "/",
+					HttpOnly: true,
+					SameSite: http.SameSiteLaxMode,
+				})
+				// Redirect to the same path without the token so it never
+				// reaches the upstream or shows up in referers.
+				stripped := *r.URL
+				query := stripped.Query()
+				query.Del("__proxy_token")
+				stripped.RawQuery = query.Encode()
+				http.Redirect(w, r, stripped.RequestURI(), http.StatusFound)
+				return
+			}
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if cookie, err := r.Cookie(gptProxyTokenCookie); err == nil &&
+			subtle.ConstantTimeCompare([]byte(cookie.Value), tokenBytes) == 1 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "This ChatGPT proxy is protected. Append ?__proxy_token=<token> to unlock.", http.StatusUnauthorized)
+	})
+}
+
+// gptProxyLoginCookie stores the ChatGPT access token for users who log in by
+// pasting a token or account JSON. The value is base64-encoded so tokens with
+// special characters survive the cookie round-trip.
+const gptProxyLoginCookie = "__catie_gpt_token"
+
+// gptProxyLoginRouter serves the token/JSON login flow and hands everything else
+// to the reverse proxy. Three login modes are supported:
+//   - Browser login: nothing to do, ChatGPT cookies flow through the proxy.
+//   - Access token: POST /__catie_login__ with field "token".
+//   - Account JSON: POST /__catie_login__ with field "json" (CPA/sub2api shapes).
+//
+// When a token login is active, GET /backend-api/... requests get an injected
+// Authorization header (see the Director) and /api/auth/session is answered
+// locally so the ChatGPT frontend treats the user as signed in.
+func gptProxyLoginRouter(store *gptProxyTokenStore, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/__catie_login__" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Write([]byte(gptProxyLoginPage))
+			return
+		case r.URL.Path == "/__catie_login__" && r.Method == http.MethodPost:
+			gptProxyHandleLogin(store, w, r)
+			return
+		case r.URL.Path == "/__catie_logout__":
+			if cookie, err := r.Cookie(gptProxyLoginCookie); err == nil {
+				store.remove(cookie.Value)
+			}
+			http.SetCookie(w, &http.Cookie{Name: gptProxyLoginCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+			http.Redirect(w, r, "/__catie_login__", http.StatusFound)
+			return
+		case r.URL.Path == "/api/auth/session" && r.Method == http.MethodGet:
+			// Only synthesize a session when a token login is active; otherwise
+			// let the real cookie-based session pass through.
+			if cookie, err := r.Cookie(gptProxyLoginCookie); err == nil && cookie.Value != "" {
+				if session, ok := store.get(cookie.Value); ok {
+					token := store.tokenForSession(cookie.Value)
+					gptProxyWriteSyntheticSession(w, token, session)
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// gptProxyHandleLogin accepts a pasted access token or account JSON, extracts a
+// usable access token (and refresh token when present), registers a server-side
+// session and stores its opaque id in a cookie.
+func gptProxyHandleLogin(store *gptProxyTokenStore, w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	var token, refresh, sessionToken, expiresAt, email, name string
+	token = strings.TrimSpace(r.FormValue("token"))
+	sessionToken = strings.TrimSpace(r.FormValue("session_token"))
+	if raw := strings.TrimSpace(r.FormValue("json")); raw != "" {
+		if accounts, _, _, err := parseOpenAIAccountImportJSON([]byte(raw)); err == nil {
+			for _, account := range accounts {
+				if account.AccessToken != "" || account.RefreshToken != "" {
+					if token == "" {
+						token = account.AccessToken
+					}
+					refresh = account.RefreshToken
+					expiresAt = account.ExpiresAt
+					email = account.Email
+					name = account.Name
+					break
+				}
+			}
+		}
+		// The JSON may also carry a next-auth session token under various keys.
+		if sessionToken == "" {
+			sessionToken = gptProxySessionTokenFromJSON([]byte(raw))
+		}
+	}
+	// With only a refresh token we can still mint an access token immediately.
+	if token == "" && refresh != "" {
+		if refreshed, err := store.server.refreshOpenAIAccount(refresh); err == nil {
+			token = refreshed.AccessToken
+			if refreshed.RefreshToken != "" {
+				refresh = refreshed.RefreshToken
+			}
+			if refreshed.ExpiresAt != "" {
+				expiresAt = refreshed.ExpiresAt
+			}
+		}
+	}
+	// With only a session cookie we exchange it for an access token now.
+	if token == "" && sessionToken != "" {
+		if fetched, expiry, err := fetchChatGPTAccessTokenViaSessionCookie(sessionToken); err == nil {
+			token = fetched
+			if expiry != "" {
+				expiresAt = expiry
+			}
+		}
+	}
+	if token == "" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("<p>未找到可用的凭据。请粘贴 access token、含 access_token/refresh_token 的账号 JSON,或 session token。</p><p><a href=\"/__catie_login__\">返回</a></p>"))
+		return
+	}
+	if jwtEmail, jwtName := gptProxyClaimsFromJWT(token); email == "" || name == "" {
+		if email == "" {
+			email = jwtEmail
+		}
+		if name == "" {
+			name = jwtName
+		}
+	}
+	id := store.create(token, refresh, sessionToken, expiresAt, email, name)
+	http.SetCookie(w, &http.Cookie{
+		Name:     gptProxyLoginCookie,
+		Value:    id,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// gptProxyWriteSyntheticSession answers /api/auth/session with a minimal signed-in
+// payload built from the token session. The ChatGPT frontend reads accessToken
+// from this response to authorize its backend-api calls.
+func gptProxyWriteSyntheticSession(w http.ResponseWriter, token string, session *gptProxyTokenSession) {
+	name := session.Name
+	email := session.Email
+	if name == "" {
+		name = "ChatGPT User"
+	}
+	if email == "" {
+		email = "user@chatgpt.local"
+	}
+	payload := map[string]interface{}{
+		"user": map[string]interface{}{
+			"id":      "user-proxy",
+			"name":    name,
+			"email":   email,
+			"image":   "",
+			"picture": "",
+			"groups":  []string{},
+		},
+		"expires":          time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+		"accessToken":      token,
+		"authProvider":     "auth0",
+		"account_ordering": []string{},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(payload)
+}
+
+// gptProxySessionTokenFromJSON pulls a next-auth session token out of an account
+// JSON blob, tolerating the common key spellings.
+func gptProxySessionTokenFromJSON(raw []byte) string {
+	var payload map[string]interface{}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	return firstNonEmptyString(
+		stringFromMapAnyKeys(payload, "session_token", "sessionToken"),
+		stringFromMapAnyKeys(payload, "__Secure-next-auth.session-token", "next_auth_session_token", "nextAuthSessionToken"),
+	)
+}
+
+// gptProxyClaimsFromJWT best-effort extracts email and name from a JWT access
+// token payload without verifying the signature (display only).
+func gptProxyClaimsFromJWT(token string) (email string, name string) {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return "", ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", ""
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", ""
+	}
+	email, _ = claims["email"].(string)
+	if n, ok := claims["name"].(string); ok {
+		name = n
+	} else if n, ok := claims["nickname"].(string); ok {
+		name = n
+	}
+	return email, name
+}
+
+const gptProxyLoginPage = `<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChatGPT 反代登录</title>
+<style>
+:root{color-scheme:light dark}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:560px;margin:6vh auto;padding:0 20px;line-height:1.6}
+h1{font-size:22px}
+.card{border:1px solid rgba(128,128,128,.3);border-radius:12px;padding:20px;margin:16px 0}
+label{display:block;font-weight:600;margin-bottom:8px}
+textarea,input{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid rgba(128,128,128,.4);font-size:14px;font-family:inherit}
+textarea{min-height:120px;resize:vertical}
+button{margin-top:12px;padding:10px 18px;border:0;border-radius:8px;background:#007AFF;color:#fff;font-size:15px;cursor:pointer}
+.muted{color:rgba(128,128,128,1);font-size:13px}
+a{color:#007AFF}
+</style>
+</head>
+<body>
+<h1>ChatGPT 反代登录</h1>
+<p class="muted">三种方式任选其一。浏览器登录直接访问 <a href="/">首页</a> 用账号密码登录即可。</p>
+<div class="card">
+<form method="post" action="/__catie_login__">
+<label>方式一:粘贴 Access Token</label>
+<input name="token" placeholder="eyJhbGciOi..." autocomplete="off">
+<label style="margin-top:16px">方式二:粘贴账号 JSON（CPA / sub2api 格式）</label>
+<textarea name="json" placeholder='{"access_token":"...","refresh_token":"..."}'></textarea>
+<p class="muted">含 refresh_token 时会自动刷新，长期有效；只有 access_token 时到期需重新登录。</p>
+<label style="margin-top:16px">方式三:粘贴 Session Token（__Secure-next-auth.session-token）</label>
+<input name="session_token" placeholder="从浏览器 Cookie 复制" autocomplete="off">
+<p class="muted">Session Token 有效期很长，即使没有 refresh_token 也能长期自动续期。</p>
+<button type="submit">登录</button>
+</form>
+</div>
+<p class="muted">已登录？<a href="/__catie_logout__">退出 token 登录</a></p>
+</body>
+</html>`
+
+// gptProxyMatchUpstream picks the upstream whose prefix matches the request path.
+// The primary host (empty prefix) is the fallback.
+func gptProxyMatchUpstream(path string) gptProxyUpstream {
+	for _, up := range gptProxyUpstreams {
+		if up.Prefix == "" {
+			continue
+		}
+		if path == up.Prefix || strings.HasPrefix(path, up.Prefix+"/") {
+			return up
+		}
+	}
+	return gptProxyUpstreams[0]
+}
+
+// gptProxyRewriteReferer maps a proxied referer back to the upstream origin so
+// CSRF / same-origin checks on the upstream keep passing.
+func gptProxyRewriteReferer(referer string, up gptProxyUpstream) string {
+	parsed, err := url.Parse(referer)
+	if err != nil {
+		return up.Scheme + "://" + up.Host + "/"
+	}
+	path := parsed.Path
+	if matched := gptProxyMatchUpstream(path); matched.Prefix != "" {
+		path = strings.TrimPrefix(path, matched.Prefix)
+		if path == "" {
+			path = "/"
+		}
+		return matched.Scheme + "://" + matched.Host + path
+	}
+	return up.Scheme + "://" + up.Host + path
+}
+
+// gptProxyModifyResponse rewrites headers and (for text responses) the body so
+// the browser keeps every request on this proxy origin.
+func gptProxyModifyResponse(res *http.Response) error {
+	// Drop the upstream cookie domain so cookies bind to the proxy host.
+	if cookies := res.Header["Set-Cookie"]; len(cookies) > 0 {
+		for i, cookie := range cookies {
+			cookies[i] = gptProxyRewriteSetCookie(cookie)
+		}
+	}
+
+	// Rewrite redirect targets so 3xx responses stay on the proxy.
+	if location := res.Header.Get("Location"); location != "" {
+		res.Header.Set("Location", gptProxyRewriteURL(location))
+	}
+
+	// Remove headers that stop the app from running under a different origin.
+	res.Header.Del("Content-Security-Policy")
+	res.Header.Del("Content-Security-Policy-Report-Only")
+	res.Header.Del("X-Frame-Options")
+	res.Header.Del("Strict-Transport-Security")
+	res.Header.Del("Report-To")
+	res.Header.Del("Reporting-Endpoints")
+
+	ct := res.Header.Get("Content-Type")
+	if !gptProxyIsRewritable(ct) {
+		return nil
+	}
+
+	// Decode gzip (the only encoding we requested) before rewriting.
+	var reader io.Reader = res.Body
+	gzipped := strings.EqualFold(res.Header.Get("Content-Encoding"), "gzip")
+	if gzipped {
+		gr, err := gzip.NewReader(res.Body)
+		if err != nil {
+			return nil // cannot decode, leave the body untouched
+		}
+		defer gr.Close()
+		reader = gr
+	}
+
+	bodyBytes, err := io.ReadAll(reader)
+	res.Body.Close()
+	if err != nil {
+		return nil
+	}
+
+	newBody := gptProxyRewriteBody(bodyBytes)
+
+	res.Header.Del("Content-Encoding")
+	res.Header.Set("Content-Length", strconv.Itoa(len(newBody)))
+	res.ContentLength = int64(len(newBody))
+	res.Body = io.NopCloser(bytes.NewReader(newBody))
+	return nil
+}
+
+// gptProxyIsRewritable reports whether a content type carries URLs worth
+// rewriting. Binary assets (images, fonts, wasm) are passed through untouched.
+func gptProxyIsRewritable(contentType string) bool {
+	ct := strings.ToLower(contentType)
+	return strings.Contains(ct, "text/html") ||
+		strings.Contains(ct, "javascript") ||
+		strings.Contains(ct, "application/json") ||
+		strings.Contains(ct, "text/css") ||
+		strings.Contains(ct, "application/manifest") ||
+		strings.Contains(ct, "text/plain")
+}
+
+// gptProxyRewriteBody rewrites absolute upstream URLs in a response body so they
+// point back at the proxy. Asset hosts are mapped onto their path prefix and the
+// primary host is reduced to a same-origin absolute path.
+func gptProxyRewriteBody(body []byte) []byte {
+	for _, up := range gptProxyUpstreams {
+		if up.Prefix == "" {
+			continue
+		}
+		body = bytes.ReplaceAll(body, []byte("https://"+up.Host), []byte(up.Prefix))
+		// Escaped form found inside embedded JSON strings.
+		body = bytes.ReplaceAll(body, []byte("https:\\/\\/"+up.Host), []byte(escapeJSONSlashes(up.Prefix)))
+	}
+	// Primary host collapses to same-origin references.
+	body = bytes.ReplaceAll(body, []byte("https://chatgpt.com"), []byte(""))
+	body = bytes.ReplaceAll(body, []byte("https:\\/\\/chatgpt.com"), []byte(""))
+	return body
+}
+
+// gptProxyRewriteURL rewrites a single absolute URL (e.g. a Location header) so
+// it targets the proxy.
+func gptProxyRewriteURL(raw string) string {
+	for _, up := range gptProxyUpstreams {
+		if up.Prefix == "" {
+			continue
+		}
+		if strings.HasPrefix(raw, "https://"+up.Host) {
+			return up.Prefix + strings.TrimPrefix(raw, "https://"+up.Host)
+		}
+	}
+	if strings.HasPrefix(raw, "https://chatgpt.com") {
+		rest := strings.TrimPrefix(raw, "https://chatgpt.com")
+		if rest == "" {
+			return "/"
+		}
+		return rest
+	}
+	return raw
+}
+
+// gptProxyRewriteSetCookie strips the upstream Domain attribute so the cookie
+// binds to the proxy host, and downgrades SameSite=None which requires Secure.
+func gptProxyRewriteSetCookie(cookie string) string {
+	parts := strings.Split(cookie, ";")
+	kept := parts[:0]
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "domain=") {
+			continue // drop domain so it defaults to the proxy host
+		}
+		if lower == "secure" {
+			continue // proxy is served over http in local/dev use
+		}
+		kept = append(kept, part)
+	}
+	return strings.Join(kept, ";")
+}
+
+// escapeJSONSlashes converts a plain path prefix into its JSON-escaped form so
+// it can replace escaped upstream URLs embedded in JSON string literals.
+func escapeJSONSlashes(prefix string) string {
+	return strings.ReplaceAll(prefix, "/", "\\/")
+}
+
+// gptProxyStripCookie removes a single named cookie from the outbound request's
+// Cookie header, leaving any other cookies intact.
+func gptProxyStripCookie(req *http.Request, name string) {
+	cookies := req.Cookies()
+	if len(cookies) == 0 {
+		return
+	}
+	req.Header.Del("Cookie")
+	for _, c := range cookies {
+		if c.Name == name {
+			continue
+		}
+		req.AddCookie(c)
 	}
 }
 
