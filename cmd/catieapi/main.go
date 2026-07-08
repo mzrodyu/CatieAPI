@@ -75,6 +75,25 @@ type AppSettings struct {
 	Discord     DiscordSettings     `json:"discord,omitempty"`
 	Auth        AuthSettings        `json:"auth,omitempty"`
 	Maintenance MaintenanceSettings `json:"maintenance,omitempty"`
+	WebProxy    WebProxySettings    `json:"webProxy,omitempty"`
+}
+
+// WebProxySettings controls the ChatGPT web reverse proxy from the admin console
+// so it no longer needs environment variables. Changing these takes effect
+// immediately: the proxy listener is started, stopped, or moved to a new port.
+type WebProxySettings struct {
+	Managed     bool   `json:"managed,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	Port        int    `json:"port"`
+	AccessToken string `json:"accessToken,omitempty"`
+}
+
+// PublicWebProxySettings hides the raw access token from API responses.
+type PublicWebProxySettings struct {
+	Enabled        bool `json:"enabled"`
+	Port           int  `json:"port"`
+	AccessTokenSet bool `json:"accessTokenSet"`
+	Running        bool `json:"running"`
 }
 
 type MaintenanceSettings struct {
@@ -360,6 +379,9 @@ type Server struct {
 	authStates            map[string]time.Time
 	sessions              map[string]Session
 	openAIOAuthFlows      map[string]openAIOAuthFlow
+	webProxyMu            sync.Mutex
+	webProxyServer        *http.Server
+	webProxyPort          int
 }
 
 // openAIOAuthFlow tracks one in-progress ChatGPT OAuth (PKCE) authorization so
@@ -513,12 +535,9 @@ func main() {
 
 	server.registerRoutes(router)
 
-	// Start ChatGPT web proxy on a separate port
-	webProxyPort := env("GPT_WEB_PROXY_PORT", "")
-	if webProxyPort != "" {
-		go server.startGPTWebProxy(webProxyPort)
-	}
-
+	// Start the ChatGPT web reverse proxy based on persisted admin settings
+	// (with a one-time migration from the legacy env vars).
+	server.applyPersistedWebProxySettings()
 
 	addr := ":" + env("PORT", "8787")
 	fmt.Printf("CatieAPI Go server listening on http://localhost%s\n", addr)
@@ -832,12 +851,13 @@ func (s *Server) gptProxyStoreCapturedAccount(accessToken, sessionToken, expires
 	log.Printf("[GPT Web Proxy] captured new web-login account %s", firstNonEmptyString(email, accountID))
 }
 
-// startGPTWebProxy starts a reverse proxy in front of the ChatGPT web app on the
-// given port. It routes the primary host and its asset/telemetry origins through
-// path prefixes, rewrites response bodies so the browser stays on this origin,
-// preserves streaming for backend-api responses and strips headers that would
-// otherwise block the app from running under a different host.
-func (s *Server) startGPTWebProxy(port string) {
+// buildGPTWebProxyHandler builds the reverse proxy handler in front of the
+// ChatGPT web app. It routes the primary host and its asset/telemetry origins
+// through path prefixes, rewrites response bodies so the browser stays on this
+// origin, preserves streaming for backend-api responses and strips headers that
+// would otherwise block the app from running under a different host. accessToken
+// optionally gates access to the proxy.
+func (s *Server) buildGPTWebProxyHandler(accessToken string) http.Handler {
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		TLSHandshakeTimeout:   15 * time.Second,
@@ -912,13 +932,131 @@ func (s *Server) startGPTWebProxy(port string) {
 
 	// Optional access token. When set, the browser must unlock the proxy once
 	// (via ?__proxy_token=...) before any request is forwarded upstream.
-	handler = gptProxyAccessGate(env("GPT_WEB_PROXY_TOKEN", ""), handler)
+	handler = gptProxyAccessGate(accessToken, handler)
+	return handler
+}
 
-	addr := ":" + port
-	log.Printf("[GPT Web Proxy] listening on http://localhost%s -> https://chatgpt.com", addr)
-	if err := http.ListenAndServe(addr, handler); err != nil {
-		log.Printf("[GPT Web Proxy] server error: %v", err)
+// applyPersistedWebProxySettings starts (or leaves stopped) the web proxy based
+// on the persisted admin settings. On first run it migrates the legacy
+// GPT_WEB_PROXY_PORT / GPT_WEB_PROXY_TOKEN env vars into the stored settings.
+func (s *Server) applyPersistedWebProxySettings() {
+	s.mu.Lock()
+	settings := s.state.Settings.WebProxy
+	if !settings.Managed {
+		// Migrate from env vars once.
+		if envPort := strings.TrimSpace(env("GPT_WEB_PROXY_PORT", "")); envPort != "" {
+			if port, err := strconv.Atoi(envPort); err == nil && port > 0 {
+				settings = WebProxySettings{
+					Managed:     true,
+					Enabled:     true,
+					Port:        port,
+					AccessToken: strings.TrimSpace(env("GPT_WEB_PROXY_TOKEN", "")),
+				}
+				s.state.Settings.WebProxy = settings
+				s.saveStateLocked()
+			}
+		}
 	}
+	s.mu.Unlock()
+	s.reconcileWebProxy(settings)
+}
+
+// reconcileWebProxy starts, stops, or restarts the proxy listener so it matches
+// the desired settings. It is safe to call repeatedly.
+func (s *Server) reconcileWebProxy(settings WebProxySettings) {
+	s.webProxyMu.Lock()
+	defer s.webProxyMu.Unlock()
+
+	wantRunning := settings.Managed && settings.Enabled && settings.Port > 0
+	// Already running on the right port: nothing to do.
+	if s.webProxyServer != nil && s.webProxyPort == settings.Port && wantRunning {
+		return
+	}
+	// Stop the current listener if running.
+	if s.webProxyServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = s.webProxyServer.Shutdown(ctx)
+		cancel()
+		s.webProxyServer = nil
+		s.webProxyPort = 0
+		log.Printf("[GPT Web Proxy] stopped")
+	}
+	if !wantRunning {
+		return
+	}
+	handler := s.buildGPTWebProxyHandler(settings.AccessToken)
+	server := &http.Server{Addr: ":" + strconv.Itoa(settings.Port), Handler: handler}
+	s.webProxyServer = server
+	s.webProxyPort = settings.Port
+	go func() {
+		log.Printf("[GPT Web Proxy] listening on http://localhost:%d -> https://chatgpt.com", settings.Port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("[GPT Web Proxy] server error: %v", err)
+		}
+	}()
+}
+
+func (s *Server) webProxySettingsLocked() WebProxySettings {
+	return s.state.Settings.WebProxy
+}
+
+func (s *Server) publicWebProxySettingsLocked() PublicWebProxySettings {
+	settings := s.state.Settings.WebProxy
+	s.webProxyMu.Lock()
+	running := s.webProxyServer != nil
+	s.webProxyMu.Unlock()
+	return PublicWebProxySettings{
+		Enabled:        settings.Enabled,
+		Port:           settings.Port,
+		AccessTokenSet: strings.TrimSpace(settings.AccessToken) != "",
+		Running:        running,
+	}
+}
+
+func (s *Server) getWebProxySettings(c *gin.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c.JSON(http.StatusOK, gin.H{"webProxy": s.publicWebProxySettingsLocked()})
+}
+
+func (s *Server) updateWebProxySettings(c *gin.Context) {
+	var body struct {
+		Enabled        bool   `json:"enabled"`
+		Port           int    `json:"port"`
+		AccessToken    string `json:"accessToken"`
+		AccessTokenSet *bool  `json:"accessTokenSet"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		validationError(c, "无效的反代设置")
+		return
+	}
+	if body.Enabled && (body.Port < 1 || body.Port > 65535) {
+		validationError(c, "端口必须在 1 到 65535 之间")
+		return
+	}
+
+	s.mu.Lock()
+	settings := s.state.Settings.WebProxy
+	settings.Managed = true
+	settings.Enabled = body.Enabled
+	settings.Port = body.Port
+	// Only replace the token when a new value is provided; empty string with the
+	// "clear" flag wipes it, otherwise keep the existing token.
+	trimmed := strings.TrimSpace(body.AccessToken)
+	if trimmed != "" {
+		settings.AccessToken = trimmed
+	} else if body.AccessTokenSet != nil && !*body.AccessTokenSet {
+		settings.AccessToken = ""
+	}
+	s.state.Settings.WebProxy = settings
+	s.saveStateLocked()
+	s.mu.Unlock()
+
+	s.reconcileWebProxy(settings)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c.JSON(http.StatusOK, gin.H{"webProxy": s.publicWebProxySettingsLocked()})
 }
 
 const gptProxyTokenCookie = "__catie_proxy_token"
@@ -1301,6 +1439,8 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.PATCH("/settings/auth", s.updateAuthSettings)
 	admin.GET("/settings/maintenance", s.getMaintenanceSettings)
 	admin.PATCH("/settings/maintenance", s.updateMaintenanceSettings)
+	admin.GET("/settings/web-proxy", s.getWebProxySettings)
+	admin.PATCH("/settings/web-proxy", s.updateWebProxySettings)
 	admin.GET("/backup", s.exportBackup)
 	admin.POST("/restore", s.restoreBackup)
 
