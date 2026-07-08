@@ -3948,3 +3948,112 @@ button.table-row:hover {
   border-radius: 10px;
   font-size: 13px;
 }
+
+/* Account pool source guide + collapsible channel cards */
+.source-guide {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.source-guide-item {
+  padding: 14px 16px;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 16px;
+}
+
+.source-guide-item strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 14px;
+}
+
+.source-guide-item span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.channel-card-collapsible > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.channel-card-collapsible > summary::-webkit-details-marker {
+  display: none;
+}
+
+.channel-card-collapsible > summary::after {
+  content: "展开";
+  align-self: center;
+  margin-left: 10px;
+  padding: 4px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+}
+
+.channel-card-collapsible[open] > summary::after {
+  content: "收起";
+}
+
+.manual-add {
+  display: inline-block;
+}
+
+.manual-add > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.manual-add > summary::-webkit-details-marker {
+  display: none;
+}
+
+.manual-add-body {
+  margin-top: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+}
+
+.manual-add-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.source-tag {
+  margin-left: 8px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 999px;
+  vertical-align: middle;
+}
+
+.source-tag-web {
+  color: #0a7d28;
+  background: color-mix(in srgb, #34c759 16%, var(--surface-solid));
+  border: 1px solid color-mix(in srgb, #34c759 32%, var(--hairline));
+}
+
+.source-tag-manual {
+  color: var(--muted);
+  background: var(--group);
+  border: 1px solid var(--hairline);
+}
+
+@media (max-width: 720px) {
+  .source-guide {
+    grid-template-columns: 1fr;
+  }
+}

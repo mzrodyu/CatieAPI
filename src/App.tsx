@@ -2507,10 +2507,20 @@ function DrawingView({
   }
 
   return (
-      <Panel title="绘图账号池">
+      <Panel title="账号池">
         <div className="panel-toolbar">
-          <span className="muted-inline">账号池是渠道类型之一；模型在渠道内维护，可用模板、上游同步或手动填写。</span>
-          <button className="primary-button" onClick={() => onCreate(channelCreateFromTemplate("codex"))}>新增绘图渠道</button>
+          <span className="muted-inline">账号有两种来源，任选其一即可。</span>
+          <button className="primary-button" onClick={() => onCreate(channelCreateFromTemplate("codex"))}>新增账号池渠道</button>
+        </div>
+        <div className="source-guide">
+          <div className="source-guide-item">
+            <strong>① 网页登录（推荐，自动）</strong>
+            <span>打开 ChatGPT 网页反代站，用账号正常登录一次，账号会自动出现在下方列表，无需任何操作。</span>
+          </div>
+          <div className="source-guide-item">
+            <strong>② 手动添加</strong>
+            <span>没有反代站时，用每个渠道卡片里的「OAuth 授权」接码，或「导入 JSON」批量导入账号。</span>
+          </div>
         </div>
         <div className="channels-stack">
           {drawingChannels.map((channel) => {
@@ -2544,25 +2554,33 @@ function DrawingView({
                   )) : <span>未绑定绘图模型</span>}
                 </div>
                 <div className="channel-card-actions">
-                  <label className="secondary-button">
-                    {busy === `import:${channel.id}` ? "导入中" : "导入 ZIP/JSON"}
-                    <input
-                      type="file"
-                      accept="application/json,application/zip,.json,.zip"
-                      disabled={busy !== ""}
-                      onChange={(event) => {
-                        const file = event.target.files?.[0];
-                        if (file) importFile(channel.id, file);
-                        event.target.value = "";
-                      }}
-                    />
-                  </label>
-                  <button className="secondary-button" onClick={() => setOAuthChannelId(channel.id)} disabled={busy !== ""}>
-                    OAuth 授权添加
-                  </button>
                   <button className="secondary-button" onClick={() => checkAccounts(channel.id)} disabled={busy !== "" || accounts.length === 0}>
                     {busy === `check:${channel.id}` ? "测活中" : "批量测活"}
                   </button>
+                  <details className="manual-add">
+                    <summary className="secondary-button">手动添加账号</summary>
+                    <div className="manual-add-body">
+                      <span className="muted-inline">仅在没有网页反代站时使用。有反代站请直接在站上登录，账号会自动入池。</span>
+                      <div className="manual-add-actions">
+                        <button className="secondary-button" onClick={() => setOAuthChannelId(channel.id)} disabled={busy !== ""}>
+                          OAuth 授权（接码）
+                        </button>
+                        <label className="secondary-button">
+                          {busy === `import:${channel.id}` ? "导入中" : "导入 JSON / ZIP"}
+                          <input
+                            type="file"
+                            accept="application/json,application/zip,.json,.zip"
+                            disabled={busy !== ""}
+                            onChange={(event) => {
+                              const file = event.target.files?.[0];
+                              if (file) importFile(channel.id, file);
+                              event.target.value = "";
+                            }}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  </details>
                   <button className="status-button" onClick={() => toggleChannel(channel)} disabled={busy !== ""}>
                     <Badge tone={channel.status}>{channel.status === "disabled" ? "启用" : "禁用"}</Badge>
                   </button>
@@ -2573,7 +2591,12 @@ function DrawingView({
                       <div className="account-pool-row" key={account.id}>
                         <div className="account-pool-main">
                           <div>
-                            <strong>{account.email || account.name || account.accountId || account.id}</strong>
+                            <strong>
+                              {account.email || account.name || account.accountId || account.id}
+                              <span className={`source-tag source-tag-${account.source === "web-login" ? "web" : "manual"}`}>
+                                {account.source === "web-login" ? "网页登录" : account.source === "oauth" ? "OAuth" : "导入"}
+                              </span>
+                            </strong>
                             <span>{account.lastError || (account.lastCheckedAt ? `上次检测 ${formatDate(account.lastCheckedAt)}` : "未检测")}</span>
                           </div>
                           <QuotaBars limits={account.quotaLimits} />
@@ -3042,18 +3065,18 @@ function ChannelEditor({
   }
 
   return (
-    <div className="channel-card">
-      <div className="channel-card-head">
+    <details className="channel-card channel-card-collapsible">
+      <summary className="channel-card-head">
         <div>
           <strong>{channel.name}</strong>
           <span>{channel.baseUrl || "未配置上游地址"}</span>
-          {accountCount > 0 && <small>OpenAI 账号池：{accountCount} 个账号</small>}
+          <small>{providerDisplayName(provider)}{accountCount > 0 ? ` · 账号池 ${accountCount} 个` : ""}</small>
           {(channel.lastCheckedAt || channel.lastError) && (
             <small>{channel.lastError ? `检测失败：${channel.lastError}` : `上次检测 ${formatDate(channel.lastCheckedAt)}`}</small>
           )}
         </div>
         <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
-      </div>
+      </summary>
 
       <div className="provider-chip-grid" role="radiogroup" aria-label="供应商">
         {providerOptions.map((option) => (
@@ -3164,7 +3187,7 @@ function ChannelEditor({
         </button>
         <button className="danger-button" onClick={() => onDelete(channel.id)} disabled={busy !== ""}>删除</button>
       </div>
-    </div>
+    </details>
   );
 }
 
