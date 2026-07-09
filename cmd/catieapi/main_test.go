@@ -3075,14 +3075,11 @@ func TestImportSub2APIJSONAddsAccountsToExistingChannel(t *testing.T) {
 	if !containsString(channel.Models, "gpt-5.4") {
 		t.Fatalf("import did not add nested Sub2 model to target channel: %#v", channel.Models)
 	}
-	if !containsString(channel.Models, "gpt-image-1") {
-		t.Fatalf("import did not add default image model to target channel: %#v", channel.Models)
+	if containsString(channel.Models, "gpt-image-1") {
+		t.Fatalf("import added an unselected default image model: %#v", channel.Models)
 	}
 	if server.findModel("gpt-image-2") == nil {
 		t.Fatal("import did not create missing model")
-	}
-	if server.findModel("gpt-image-1") == nil {
-		t.Fatal("import did not create default image model")
 	}
 }
 
@@ -3245,12 +3242,12 @@ func TestImportOpenAIAccountsFromZipAddsAccountsToExistingChannel(t *testing.T) 
 	if channel.OpenAIAccounts[0].RefreshToken != "" {
 		t.Fatal("missing refresh_token should be stored as empty and still imported")
 	}
-	if !containsString(channel.Models, "gpt-image-2") || !containsString(channel.Models, "gpt-image-1") {
-		t.Fatalf("ZIP import did not add default image models: %#v", channel.Models)
+	if containsString(channel.Models, "gpt-image-2") || containsString(channel.Models, "gpt-image-1") {
+		t.Fatalf("ZIP import overwrote the channel model selection: %#v", channel.Models)
 	}
 }
 
-func TestNormalizeStateCollectionsAddsImageModelsToOpenAIAccountPools(t *testing.T) {
+func TestNormalizeStateCollectionsPreservesSelectedOpenAIAccountPoolModels(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, _ := testServerRouter(t)
 	server.mu.Lock()
@@ -3271,9 +3268,7 @@ func TestNormalizeStateCollectionsAddsImageModelsToOpenAIAccountPools(t *testing
 		},
 	}
 
-	if !server.normalizeStateCollections() {
-		t.Fatal("normalizeStateCollections did not report image model migration")
-	}
+	server.normalizeStateCollections()
 	channel := server.findChannel("chn_oauth_pool")
 	if channel == nil {
 		t.Fatal("oauth pool channel missing")
@@ -3284,10 +3279,8 @@ func TestNormalizeStateCollectionsAddsImageModelsToOpenAIAccountPools(t *testing
 	if channel.BaseURL != defaultChatGPTAPIBaseURL {
 		t.Fatalf("oauth pool base URL = %q", channel.BaseURL)
 	}
-	for _, modelID := range codexChannelModelIDs() {
-		if !containsString(channel.Models, modelID) {
-			t.Fatalf("oauth pool did not gain Codex model %s: %#v", modelID, channel.Models)
-		}
+	if !reflect.DeepEqual(channel.Models, []string{"gpt-5.4"}) {
+		t.Fatalf("normalization overwrote selected models: %#v", channel.Models)
 	}
 	for _, modelID := range codexChannelModelIDs() {
 		if server.findModel(modelID) == nil {
@@ -3390,7 +3383,7 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	channel := server.findChannel("chn_1002")
 	channel.BaseURL = upstream.URL + "/v1"
 	channel.Status = "disabled"
-	channel.Models = []string{}
+	channel.Models = []string{"gpt-image-2", "gpt-5.4"}
 	channel.OpenAIAccounts = []OpenAIAccount{
 		{ID: "oaiacc_good", Email: "good@example.com", AccessToken: "good-token", AccountID: "acc-good", Status: "unchecked"},
 		{ID: "oaiacc_rate_limit", Email: "rate-limit@example.com", AccessToken: "rate-limit-token", Status: "unchecked"},
@@ -3427,8 +3420,8 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 		channel.OpenAIAccounts[6].Status != "unchecked" {
 		t.Fatalf("account statuses = %#v", channel.OpenAIAccounts)
 	}
-	if channel.Status != "healthy" || !containsString(channel.Models, "gpt-image-2") || !containsString(channel.Models, "gpt-image-1") {
-		t.Fatalf("healthy check did not enable image pool: status=%s models=%#v", channel.Status, channel.Models)
+	if channel.Status != "healthy" || !reflect.DeepEqual(channel.Models, []string{"gpt-image-2", "gpt-5.4"}) {
+		t.Fatalf("healthy check overwrote channel models: status=%s models=%#v", channel.Status, channel.Models)
 	}
 	if len(channel.OpenAIAccounts[0].QuotaLimits) != 2 || channel.OpenAIAccounts[0].QuotaLimits[0].Label != "5h" || channel.OpenAIAccounts[0].QuotaLimits[0].PercentRemaining != 96 {
 		t.Fatalf("quota limits were not parsed: %#v", channel.OpenAIAccounts[0].QuotaLimits)

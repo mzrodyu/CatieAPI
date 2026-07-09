@@ -7802,11 +7802,6 @@ func (s *Server) ensureCodexChannelLocked(channel *Channel) bool {
 			changed = true
 		}
 	}
-	before := len(channel.Models)
-	channel.Models = mergeStrings(channel.Models, codexChannelModelIDs())
-	if len(channel.Models) != before {
-		changed = true
-	}
 	return changed
 }
 
