@@ -1204,6 +1204,8 @@ h3 {
 }
 
 .provider-icon-google svg text { fill: #4285f4; }
+.provider-icon-openai { color: var(--text); }
+.provider-icon-openai .openai-knot { stroke-linecap: round; stroke-linejoin: round; }
 .provider-icon-deepseek,
 .provider-icon-deepseek svg,
 .provider-icon-deepseek svg path {

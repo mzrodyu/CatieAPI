@@ -366,7 +366,7 @@ const providerOptions = [
   { value: "groq", label: "Groq" },
   { value: "siliconflow", label: "SiliconFlow" },
   { value: "moonshot", label: "Moonshot" },
-  { value: "compatible", label: "OpenAI Compatible" }
+  { value: "compatible", label: "OpenAI 兼容接口" }
 ];
 
 const defaultOpenAIBaseURL = "https://api.openai.com/v1";
@@ -400,7 +400,7 @@ const channelTemplates = [
   },
   {
     provider: "compatible",
-    label: "OpenAI Compatible",
+    label: "OpenAI 兼容接口",
     name: "兼容渠道",
     baseUrl: "",
     models: [] as string[]
@@ -582,10 +582,27 @@ function ProviderIcon({ provider }: { provider: string }) {
       </span>
     );
   }
+  if (provider === "openai") {
+    return (
+      <span className="provider-icon provider-icon-openai" aria-hidden="true">
+        <svg viewBox="0 0 32 32" role="img">
+          <rect x="1" y="1" width="30" height="30" rx="8" />
+          <g className="openai-knot" fill="none" stroke="currentColor" strokeWidth="2.25">
+            <path d="M16 7.1c2.66-1.54 5.98.38 5.98 3.45v2.33" />
+            <path d="M21.98 12.88c2.66 1.54 2.66 5.38 0 6.92l-2.02 1.17" />
+            <path d="M19.96 20.97c0 3.08-3.32 5-5.98 3.46l-2.02-1.17" />
+            <path d="M11.96 23.26c-2.66 1.54-5.98-.38-5.98-3.46v-2.33" />
+            <path d="M5.98 19.8c-2.66-1.54-2.66-5.38 0-6.92L8 11.71" />
+            <path d="M8 11.03c0-3.08 3.32-5 5.98-3.46L16 8.74" />
+            <path d="M16 8.74l3.96 2.29v4.58L16 17.9l-3.96-2.29v-4.58z" />
+          </g>
+        </svg>
+      </span>
+    );
+  }
   const mark = provider === "codex" ? "C"
     : provider === "cpa" || provider === "cliproxyapi" ? "CPA"
-    : provider === "openai" ? "◎"
-      : provider === "anthropic" ? "A"
+    : provider === "anthropic" ? "A"
         : provider === "google" ? "✦"
           : provider === "openrouter" ? "↗"
               : provider === "groq" ? "G"
@@ -1517,7 +1534,7 @@ function PublicHome({
 
       <section className="home-hero">
         <div className="home-copy">
-          <span className="home-kicker">OpenAI Compatible Gateway</span>
+          <span className="home-kicker">兼容 OpenAI 格式的网关</span>
           <h1>
             CatieAPI
             <span>轻量 AI 聚合网关</span>
@@ -1534,7 +1551,7 @@ function PublicHome({
           <div className="integration-row" aria-label="网关能力概览">
             <span>网关能力</span>
             <div>
-              <span>OpenAI Compatible</span>
+              <span>OpenAI 兼容接口</span>
               <span>额度控制</span>
               <span>调用审计</span>
             </div>
@@ -2899,9 +2916,17 @@ function ChannelsView({
         <form className="channel-card channel-create-form" onSubmit={submit}>
           <label className="channel-select-field">
             <span>选择渠道类型</span>
-            <select value={provider} onChange={(event) => applyTemplate(event.target.value)}>
-              {channelTemplates.map((template) => <option key={template.provider} value={template.provider}>{template.label}</option>)}
-            </select>
+            <details className="channel-choice-menu">
+              <summary><span>{channelTemplateFor(provider).label}</span><small>选择后自动填入建议配置</small></summary>
+              <div role="listbox" aria-label="选择渠道类型">
+                {channelTemplates.map((template) => (
+                  <button key={template.provider} type="button" className={provider === template.provider ? "selected" : ""} onClick={(event) => {
+                    applyTemplate(template.provider);
+                    event.currentTarget.closest("details")?.removeAttribute("open");
+                  }}><strong>{template.label}</strong><span>使用推荐的名称和地址</span></button>
+                ))}
+              </div>
+            </details>
           </label>
           <div className="channel-form-grid">
             <label>
@@ -3113,16 +3138,19 @@ function ChannelEditor({
       <div className="channel-editor-controls">
         <label className="channel-select-field">
           <span>供应商</span>
-          <select value={provider} onChange={(event) => {
-            const nextProvider = event.target.value;
-            setProvider(nextProvider);
-            const nextDefaultBaseUrl = defaultBaseURLForProvider(nextProvider);
-            if (nextDefaultBaseUrl && !/^https?:\/\//i.test(baseUrl.trim())) {
-              setBaseUrl(nextDefaultBaseUrl);
-            }
-          }}>
-            {providerOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-          </select>
+          <details className="channel-choice-menu">
+            <summary><span>{providerDisplayName(provider)}</span><small>修改上游协议类型</small></summary>
+            <div role="listbox" aria-label="供应商">
+              {providerOptions.map((option) => (
+                <button key={option.value} type="button" className={provider === option.value ? "selected" : ""} onClick={(event) => {
+                  setProvider(option.value);
+                  const nextDefaultBaseUrl = defaultBaseURLForProvider(option.value);
+                  if (nextDefaultBaseUrl && !/^https?:\/\//i.test(baseUrl.trim())) setBaseUrl(nextDefaultBaseUrl);
+                  event.currentTarget.closest("details")?.removeAttribute("open");
+                }}><strong>{option.label}</strong><span>{option.value === "compatible" ? "适用于兼容 OpenAI 格式的服务" : "选择对应的上游协议"}</span></button>
+              ))}
+            </div>
+          </details>
         </label>
         <label className="channel-select-field">
           <span>响应方式</span>
