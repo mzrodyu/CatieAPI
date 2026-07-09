@@ -3371,15 +3371,11 @@ function LogsView({ logs, onCopy }: { logs: RequestLog[]; onCopy: (value: string
         <span className="muted-inline">{loading ? "加载中" : `共 ${total} 条`}</span>
       </div>
       <div className="logs-layout">
-        <div>
-          <div className="table">
+        <div className="table">
             <div className="table-head logs-table">
               <span>请求</span>
               <span>模型</span>
               <span>渠道</span>
-              <span>输入</span>
-              <span>输出</span>
-              <span>消耗</span>
               <span>状态</span>
             </div>
             {items.map((log) => (
@@ -3399,25 +3395,21 @@ function LogsView({ logs, onCopy }: { logs: RequestLog[]; onCopy: (value: string
                   </span>
                   <span>{logModelText(log)}</span>
                   <span>{logChannelText(log)}</span>
-                  <span>{formatTokenCount(log.inputTokens)}</span>
-                  <span>{formatTokenCount(log.outputTokens)}</span>
-                  <span>{log.cost.toFixed(4)}</span>
                   <Badge tone={log.status}>{statusLabel(log.status)}</Badge>
                 </div>
               </div>
             ))}
             {!loading && items.length === 0 && <Empty text={query || status !== "all" ? "没有匹配的日志" : "暂无调用日志"} />}
-          </div>
-          {totalPages > 1 && (
-            <div className="pagination-bar">
-              <button className="secondary-button" disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button>
-              <span>{page} / {totalPages}</span>
-              <button className="secondary-button" disabled={page >= totalPages || loading} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>下一页</button>
-            </div>
-          )}
         </div>
-        <LogDetail log={selected} loading={detailLoading} onCopy={onCopy} />
       </div>
+      {totalPages > 1 && (
+        <div className="pagination-bar">
+          <button className="secondary-button" disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button>
+          <span>{page} / {totalPages}</span>
+          <button className="secondary-button" disabled={page >= totalPages || loading} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>下一页</button>
+        </div>
+      )}
+      {selected && <LogDetail log={selected} loading={detailLoading} onCopy={onCopy} />}
     </Panel>
   );
 }
