@@ -1160,7 +1160,7 @@ func TestEmbeddingsEndpointForwardsToCompatibleUpstream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	withEnv(t, map[string]string{"PERSISTENCE": "memory", "PROVIDER_MODE": "compatible"})
+	withEnv(t, map[string]string{"PERSISTENCE": "memory", "PROVIDER_MODE": "compatible", "UPSTREAM_API_KEY": "moderation-secret"})
 	server, router := testServerRouter(t)
 	seedGatewayFixtures(server)
 	server.mu.Lock()
@@ -1191,7 +1191,7 @@ func TestAudioSpeechForwardsBinaryResponse(t *testing.T) {
 		_, _ = w.Write([]byte("OggS-audio"))
 	}))
 	defer upstream.Close()
-	withEnv(t, map[string]string{"PERSISTENCE": "memory", "PROVIDER_MODE": "compatible"})
+	withEnv(t, map[string]string{"PERSISTENCE": "memory", "PROVIDER_MODE": "compatible", "UPSTREAM_API_KEY": "moderation-secret"})
 	server, router := testServerRouter(t)
 	seedGatewayFixtures(server)
 	server.mu.Lock()
@@ -1205,6 +1205,36 @@ func TestAudioSpeechForwardsBinaryResponse(t *testing.T) {
 	}
 	if upstreamPayload["model"] != "deepseek-v4" || upstreamPayload["voice"] != "alloy" || upstreamPayload["response_format"] != "opus" {
 		t.Fatalf("audio payload was not forwarded: %#v", upstreamPayload)
+	}
+}
+
+func TestModerationsForwardsToCompatibleUpstream(t *testing.T) {
+	var payload map[string]interface{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/moderations" {
+			t.Fatalf("moderation upstream path = %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode moderation request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"modr_1","model":"omni-moderation-latest","results":[{"flagged":false}]}`))
+	}))
+	defer upstream.Close()
+	withEnv(t, map[string]string{"PERSISTENCE": "memory", "PROVIDER_MODE": "compatible", "UPSTREAM_API_KEY": "moderation-secret"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	channel := server.findChannel("chn_1002")
+	channel.BaseURL = upstream.URL + "/v1"
+	channel.UpstreamAPIKey = "moderation-secret"
+	server.mu.Unlock()
+	response := perform(router, http.MethodPost, "/v1/moderations", `{"input":"hello","model":"omni-moderation-latest"}`, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"flagged":false`)) {
+		t.Fatalf("moderation response = %d %s", response.Code, response.Body.String())
+	}
+	if payload["input"] != "hello" {
+		t.Fatalf("moderation payload was not forwarded: %#v", payload)
 	}
 }
 

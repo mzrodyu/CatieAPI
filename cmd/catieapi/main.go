@@ -736,6 +736,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	router.POST("/v1/responses", s.responses)
 	router.POST("/v1/embeddings", s.embeddings)
 	router.POST("/v1/audio/speech", s.audioSpeech)
+	router.POST("/v1/moderations", s.moderations)
 	router.POST("/v1/images/generations", s.imageGenerations)
 	router.POST("/v1/images/edits", s.imageEdits)
 	router.GET("/models", s.openAIModels)
@@ -745,6 +746,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	router.POST("/responses", s.responses)
 	router.POST("/embeddings", s.embeddings)
 	router.POST("/audio/speech", s.audioSpeech)
+	router.POST("/moderations", s.moderations)
 	router.POST("/images/generations", s.imageGenerations)
 	router.POST("/images/edits", s.imageEdits)
 
@@ -3558,7 +3560,7 @@ func (s *Server) embeddings(c *gin.Context) {
 		if shouldMarkChannelUnhealthy(providerErr) {
 			s.updateChannelRuntimeHealth(channel.ID, false, providerErr.Message)
 		}
-		if !retryableProviderError(providerErr) || index == len(channels)-1 {
+		if (providerErr.Code != "upstream_not_configured" && !retryableProviderError(providerErr)) || index == len(channels)-1 {
 			break
 		}
 	}
@@ -3628,7 +3630,7 @@ func (s *Server) audioSpeech(c *gin.Context) {
 		if shouldMarkChannelUnhealthy(providerErr) {
 			s.updateChannelRuntimeHealth(channel.ID, false, providerErr.Message)
 		}
-		if !retryableProviderError(providerErr) || index == len(channels)-1 {
+		if providerErr.Code != "upstream_not_configured" && !retryableProviderError(providerErr) || index == len(channels)-1 {
 			break
 		}
 	}
@@ -3640,6 +3642,74 @@ func (s *Server) audioSpeech(c *gin.Context) {
 	s.recordSuccessfulCall(userID, keyID, prefix, modelID, selected.Name, requestID, 0, 0, 0, attempts, startedAt)
 	c.Header("X-Request-ID", requestID)
 	c.Data(http.StatusOK, contentType, content)
+}
+
+func (s *Server) moderations(c *gin.Context) {
+	startedAt := time.Now()
+	var payload map[string]interface{}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		s.openAIError(c, http.StatusBadRequest, "invalid_json", "Invalid JSON body: "+err.Error(), "invalid_request_error", nil)
+		return
+	}
+	if payload["input"] == nil {
+		s.openAIError(c, http.StatusBadRequest, "invalid_input", "input is required", "invalid_request_error", stringPtr("input"))
+		return
+	}
+	requestedModel, _ := payload["model"].(string)
+	if strings.TrimSpace(requestedModel) == "" {
+		requestedModel = "omni-moderation-latest"
+	}
+	s.mu.Lock()
+	auth := s.findUserByAPIKeyLocked(apiTokenFromRequest(c))
+	if auth == nil {
+		s.openAIErrorForCallLocked(c, http.StatusUnauthorized, "invalid_api_key", "Invalid CatieAPI key", "invalid_request_error", nil, "", "", requestedModel, "")
+		s.mu.Unlock()
+		return
+	}
+	if !s.checkRateLimitLocked(auth.Key) {
+		s.openAIErrorForCallLocked(c, http.StatusTooManyRequests, "rate_limit_exceeded", "Rate limit exceeded", "rate_limit_error", nil, auth.User.ID, auth.Key.Prefix, requestedModel, "")
+		s.mu.Unlock()
+		return
+	}
+	channels := make([]Channel, 0)
+	for _, channel := range s.state.Channels {
+		if channel.Status != "disabled" && s.shouldUseCompatibleProvider(channel) && len(channel.OpenAIAccounts) == 0 {
+			channels = append(channels, channel)
+		}
+	}
+	if len(channels) == 0 {
+		s.openAIErrorForCallLocked(c, http.StatusBadRequest, "moderation_not_available", "No compatible channel is available for moderations", "invalid_request_error", nil, auth.User.ID, auth.Key.Prefix, requestedModel, "")
+		s.mu.Unlock()
+		return
+	}
+	userID, keyID, prefix, requestID := auth.User.ID, auth.Key.ID, auth.Key.Prefix, newID("req")
+	s.mu.Unlock()
+	var result gin.H
+	var providerErr *ProviderError
+	var selected Channel
+	attempts := 0
+	for index, channel := range channels {
+		selected = channel
+		attempts++
+		result, providerErr = s.callOpenAICompatibleJSON(channel, requestID, "moderations", payload)
+		if providerErr == nil {
+			s.updateChannelRuntimeHealth(channel.ID, true, "")
+			break
+		}
+		if shouldMarkChannelUnhealthy(providerErr) {
+			s.updateChannelRuntimeHealth(channel.ID, false, providerErr.Message)
+		}
+		if !retryableProviderError(providerErr) || index == len(channels)-1 {
+			break
+		}
+	}
+	if providerErr != nil {
+		s.recordFailedCall(userID, prefix, requestedModel, selected.Name, requestID, providerErr.Code, attempts, startedAt)
+		writeOpenAIError(c, providerErr.Status, providerErr.Code, providerErr.Message, providerErr.Type, nil)
+		return
+	}
+	s.recordSuccessfulCall(userID, keyID, prefix, requestedModel, selected.Name, requestID, 0, 0, 0, attempts, startedAt)
+	c.JSON(http.StatusOK, result)
 }
 
 func (s *Server) chatCompletions(c *gin.Context) {
@@ -4417,6 +4487,47 @@ func (s *Server) callOpenAICompatibleAudioSpeech(channel Channel, requestID, mod
 		contentType = "audio/mpeg"
 	}
 	return content, contentType, nil
+}
+
+func (s *Server) callOpenAICompatibleJSON(channel Channel, requestID, operation string, payload map[string]interface{}) (gin.H, *ProviderError) {
+	key, err := s.channelUpstreamKey(channel)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_key_unavailable", Message: err.Error(), Type: "api_error"}
+	}
+	if strings.TrimSpace(key) == "" {
+		key = s.upstreamAPIKey
+	}
+	if strings.TrimSpace(key) == "" {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "Channel upstreamApiKey or UPSTREAM_API_KEY is required", Type: "api_error"}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "Failed to encode request", Type: "invalid_request_error"}
+	}
+	req, err := http.NewRequest(http.MethodPost, openAICompatibleOperationEndpoint(channel.BaseURL, operation), bytes.NewReader(encoded))
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", requestID)
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	defer resp.Body.Close()
+	content, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, providerErrorFromUpstream(resp.StatusCode, content)
+	}
+	var result gin.H
+	if err := json.Unmarshal(content, &result); err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "Upstream returned invalid JSON", Type: "api_error"}
+	}
+	return result, nil
 }
 
 func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *ProviderError) {
@@ -9424,6 +9535,17 @@ func openAICompatibleAudioSpeechEndpoint(base string) string {
 		}
 	}
 	return joinURL(apiBase, "audio/speech")
+}
+
+func openAICompatibleOperationEndpoint(base, operation string) string {
+	apiBase := strings.TrimRight(strings.TrimSpace(base), "/")
+	for _, suffix := range []string{"/chat/completions", "/completions", "/models", "/embeddings", "/audio/speech", "/moderations"} {
+		if strings.HasSuffix(apiBase, suffix) {
+			apiBase = strings.TrimRight(apiBase[:len(apiBase)-len(suffix)], "/")
+			break
+		}
+	}
+	return joinURL(apiBase, operation)
 }
 
 func openAICompatibleChatEndpointCandidates(base string) []string {
