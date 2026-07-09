@@ -134,7 +134,7 @@ func (s *Server) bootstrapChatGPTWeb(accessToken string, account OpenAIAccount, 
 	request.Header.Set("Sec-Fetch-Mode", "navigate")
 	request.Header.Set("Sec-Fetch-Site", "same-origin")
 	request.Header.Set("Upgrade-Insecure-Requests", "1")
-	response, err := s.httpClient.Do(request)
+	response, err := s.webHTTPClient.Do(request)
 	if err != nil {
 		return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
 	}
@@ -162,7 +162,7 @@ func (s *Server) generateChatGPTWebImage(accessToken string, account OpenAIAccou
 	s.setChatGPTWebImageHeaders(request, accessToken, account, config, deviceID, requirements, conduitToken, "f/conversation")
 	request.Header.Set("Accept", "text/event-stream")
 	request.Header.Set("Content-Type", "application/json")
-	response, err := s.httpClient.Do(request)
+	response, err := s.webHTTPClient.Do(request)
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
 	}
@@ -186,7 +186,7 @@ func (s *Server) postChatGPTWebImageJSON(path string, accessToken string, accoun
 	s.setChatGPTWebImageHeaders(request, accessToken, account, config, deviceID, requirements, conduitToken, path)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
-	response, err := s.httpClient.Do(request)
+	response, err := s.webHTTPClient.Do(request)
 	if err != nil {
 		return "", &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
 	}
@@ -279,7 +279,7 @@ func (s *Server) downloadChatGPTWebImage(accessToken string, account OpenAIAccou
 	}
 	s.setChatGPTWebHeaders(request, accessToken, account, config, deviceID)
 	request.Header.Set("Accept", "application/json, image/*")
-	response, err := s.httpClient.Do(request)
+	response, err := s.webHTTPClient.Do(request)
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
 	}
@@ -304,7 +304,7 @@ func (s *Server) downloadChatGPTWebImage(accessToken string, account OpenAIAccou
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
 	}
-	imageResponse, err := s.httpClient.Do(imageRequest)
+	imageResponse, err := s.webHTTPClient.Do(imageRequest)
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
 	}
@@ -457,7 +457,7 @@ func (s *Server) doChatGPTWebConversation(call GatewayCall, account OpenAIAccoun
 		setHeaderPreserveCase(request.Header, "Openai-Sentinel-Proof-Token", proof)
 	}
 
-	response, err := s.httpClient.Do(request)
+	response, err := s.webHTTPClient.Do(request)
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
 	}
@@ -481,7 +481,7 @@ func (s *Server) fetchChatGPTWebRequirements(accessToken string, account OpenAIA
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
 
-	response, err := s.httpClient.Do(request)
+	response, err := s.webHTTPClient.Do(request)
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
 	}

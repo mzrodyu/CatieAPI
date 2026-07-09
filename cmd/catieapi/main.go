@@ -343,6 +343,7 @@ type Server struct {
 	upstreamAPIKey        string
 	upstreamTimeout       time.Duration
 	httpClient            *http.Client
+	webHTTPClient         *http.Client
 	chatGPTAPIBase        string
 	openAIAuthBase        string
 	discordClientID       string
@@ -661,6 +662,7 @@ func NewServer() *Server {
 		sessions:              map[string]Session{},
 		openAIOAuthFlows:      map[string]openAIOAuthFlow{},
 	}
+	s.webHTTPClient = newChatGPTWebHTTPClient(s.upstreamTimeout)
 	s.initStorage()
 	s.loadState()
 	s.mu.Lock()
