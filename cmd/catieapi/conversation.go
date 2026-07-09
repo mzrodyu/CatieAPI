@@ -345,7 +345,7 @@ func (s *Server) downloadChatGPTWebImage(accessToken string, account OpenAIAccou
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, providerErrorFromUpstream(response.StatusCode, content)
 	}
-	if strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "image/") {
+	if chatGPTWebImageBytesValid(content) {
 		return content, nil
 	}
 	var result struct {
@@ -354,23 +354,65 @@ func (s *Server) downloadChatGPTWebImage(accessToken string, account OpenAIAccou
 	if json.Unmarshal(content, &result) != nil || strings.TrimSpace(result.DownloadURL) == "" {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "网页图片下载接口没有返回 URL", Type: "api_error"}
 	}
-	imageRequest, err := http.NewRequest(http.MethodGet, result.DownloadURL, nil)
-	if err != nil {
-		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	return s.fetchChatGPTWebImageURL(accessToken, account, config, deviceID, result.DownloadURL)
+}
+
+func (s *Server) fetchChatGPTWebImageURL(accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID, rawURL string) ([]byte, *ProviderError) {
+	currentURL := strings.TrimSpace(rawURL)
+	for attempt := 0; attempt < 3; attempt++ {
+		imageRequest, err := http.NewRequest(http.MethodGet, currentURL, nil)
+		if err != nil {
+			return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+		}
+		if chatGPTWebAuthenticatedHost(imageRequest.URL.Hostname()) {
+			s.setChatGPTWebHeaders(imageRequest, accessToken, account, config, deviceID)
+		}
+		imageRequest.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+		imageResponse, err := s.webHTTPClient.Do(imageRequest)
+		if err != nil {
+			return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+		}
+		content, readErr := io.ReadAll(io.LimitReader(imageResponse.Body, 64<<20))
+		_ = imageResponse.Body.Close()
+		if readErr != nil {
+			return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: readErr.Error(), Type: "api_error"}
+		}
+		if imageResponse.StatusCode < 200 || imageResponse.StatusCode >= 300 {
+			return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_image_download_failed", Message: imageResponse.Status, Type: "api_error"}
+		}
+		if chatGPTWebImageBytesValid(content) {
+			return content, nil
+		}
+		var nested struct {
+			DownloadURL string `json:"download_url"`
+			URL         string `json:"url"`
+		}
+		if json.Unmarshal(content, &nested) == nil {
+			nextURL := firstNonEmptyString(nested.DownloadURL, nested.URL)
+			if strings.TrimSpace(nextURL) != "" && nextURL != currentURL {
+				currentURL = nextURL
+				continue
+			}
+		}
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_image", Message: fmt.Sprintf("网页图片下载返回空内容或非图片内容（%d bytes, %s）", len(content), imageResponse.Header.Get("Content-Type")), Type: "api_error"}
 	}
-	imageResponse, err := s.webHTTPClient.Do(imageRequest)
-	if err != nil {
-		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_image_download_failed", Message: "网页图片下载重定向次数过多", Type: "api_error"}
+}
+
+func chatGPTWebAuthenticatedHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	return host == "chatgpt.com" || strings.HasSuffix(host, ".chatgpt.com") || host == "chat.openai.com" || strings.HasSuffix(host, ".chat.openai.com")
+}
+
+func chatGPTWebImageBytesValid(content []byte) bool {
+	if len(content) < 12 {
+		return false
 	}
-	defer imageResponse.Body.Close()
-	if imageResponse.StatusCode < 200 || imageResponse.StatusCode >= 300 {
-		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_image_download_failed", Message: imageResponse.Status, Type: "api_error"}
-	}
-	imageBytes, err := io.ReadAll(io.LimitReader(imageResponse.Body, 64<<20))
-	if err != nil {
-		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
-	}
-	return imageBytes, nil
+	return bytes.HasPrefix(content, []byte("\x89PNG\r\n\x1a\n")) ||
+		bytes.HasPrefix(content, []byte("\xff\xd8\xff")) ||
+		bytes.HasPrefix(content, []byte("GIF87a")) ||
+		bytes.HasPrefix(content, []byte("GIF89a")) ||
+		(bytes.HasPrefix(content, []byte("RIFF")) && string(content[8:12]) == "WEBP")
 }
 
 func chatGPTWebImagePreparePayload(call ImageGatewayCall, model, parentID, messageID string) gin.H {

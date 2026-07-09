@@ -69,3 +69,15 @@ func TestChatGPTWebImageStreamAcceptsFileServicePointer(t *testing.T) {
 		t.Fatalf("unexpected file-service fields: conversation=%q asset=%q", conversationID, assetPointer)
 	}
 }
+
+func TestChatGPTWebImageBytesValid(t *testing.T) {
+	if !chatGPTWebImageBytesValid([]byte("\x89PNG\r\n\x1a\nrest")) {
+		t.Fatal("PNG signature was not recognized")
+	}
+	if chatGPTWebImageBytesValid([]byte(`{"download_url":"https://chatgpt.com/file"}`)) {
+		t.Fatal("download JSON was incorrectly accepted as image bytes")
+	}
+	if chatGPTWebImageBytesValid(nil) {
+		t.Fatal("empty image was incorrectly accepted")
+	}
+}
