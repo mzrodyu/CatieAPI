@@ -357,6 +357,7 @@ const navItems = [
 
 const providerOptions = [
   { value: "codex", label: "Codex / ChatGPT OAuth" },
+  { value: "cpa", label: "CPA / CLIProxyAPI" },
   { value: "openai", label: "OpenAI" },
   { value: "anthropic", label: "Anthropic / Claude" },
   { value: "google", label: "Google Gemini" },
@@ -370,8 +371,10 @@ const providerOptions = [
 
 const defaultOpenAIBaseURL = "https://api.openai.com/v1";
 const defaultCodexBaseURL = "https://chatgpt.com/backend-api";
-const defaultCodexModels = "gpt-5.5, gpt-5.4, gpt-image-2, gpt-image-1";
-const defaultOpenAIModels = "gpt-5.5, gpt-5.4, gpt-image-2";
+const defaultCPABaseURL = "http://localhost:8317/v1";
+const defaultCodexModels = "gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, gpt-image-2, gpt-image-1";
+const defaultOpenAIModels = "gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, gpt-image-2";
+const defaultCPAModels = "gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, claude-sonnet-4, gemini-3.1-pro";
 
 const channelTemplates = [
   {
@@ -387,6 +390,13 @@ const channelTemplates = [
     name: "Codex 账号池",
     baseUrl: defaultCodexBaseURL,
     models: defaultCodexModels.split(",").map((model) => model.trim())
+  },
+  {
+    provider: "cpa",
+    label: "CPA / CLIProxyAPI",
+    name: "CPA 本地代理",
+    baseUrl: defaultCPABaseURL,
+    models: defaultCPAModels.split(",").map((model) => model.trim())
   },
   {
     provider: "compatible",
@@ -431,6 +441,13 @@ function channelCreateFromTemplate(provider: string): ChannelCreate {
     models: [...template.models],
     streamMode: "auto"
   };
+}
+
+function defaultBaseURLForProvider(provider: string) {
+  if (provider === "openai") return defaultOpenAIBaseURL;
+  if (provider === "codex") return defaultCodexBaseURL;
+  if (provider === "cpa" || provider === "cliproxyapi") return defaultCPABaseURL;
+  return "";
 }
 
 function modelTextToList(value: string) {
@@ -536,11 +553,13 @@ function channelModelSummary(models: string[]) {
 }
 
 function providerDisplayName(provider: string) {
+  if (provider === "cliproxyapi" || provider === "cli-proxy-api") return "CPA / CLIProxyAPI";
   return providerOptions.find((option) => option.value === provider)?.label || provider || "Custom";
 }
 
 function modelProvider(model: ModelItem) {
   const source = `${model.vendor} ${model.id} ${model.name}`.toLowerCase();
+  if (source.includes("cliproxyapi") || /\bcpa\b/.test(source)) return "cpa";
   if (source.includes("openai") || /\bgpt[-_/]/.test(source) || source.includes("o1-") || source.includes("o3-")) return "openai";
   if (source.includes("anthropic") || source.includes("claude")) return "anthropic";
   if (source.includes("google") || source.includes("gemini") || source.includes("gcli-")) return "google";
@@ -564,6 +583,7 @@ function ProviderIcon({ provider }: { provider: string }) {
     );
   }
   const mark = provider === "codex" ? "C"
+    : provider === "cpa" || provider === "cliproxyapi" ? "CPA"
     : provider === "openai" ? "◎"
       : provider === "anthropic" ? "A"
         : provider === "google" ? "✦"
@@ -2487,7 +2507,7 @@ function DrawingView({
     try {
       await onUpdate(channel.id, {
         status: channel.status === "disabled" ? "healthy" : "disabled",
-        baseUrl: channel.baseUrl || (channel.provider === "openai" ? defaultOpenAIBaseURL : defaultCodexBaseURL),
+        baseUrl: channel.baseUrl || defaultBaseURLForProvider(channel.provider) || defaultCodexBaseURL,
         provider: channel.provider || "codex",
         models: arrayOf(channel.models).length ? channel.models : defaultCodexModels.split(",").map((model) => model.trim())
       });
@@ -2538,7 +2558,7 @@ function DrawingView({
                 <div className="channel-card-head">
                   <div>
                     <strong>{channel.name}</strong>
-                    <span>{channel.baseUrl || (channel.provider === "openai" ? defaultOpenAIBaseURL : defaultCodexBaseURL)}</span>
+                    <span>{channel.baseUrl || defaultBaseURLForProvider(channel.provider) || defaultCodexBaseURL}</span>
                     <small>账号 {accounts.length} 个，可用 {healthy}，无效 {invalid}，未验证 {unchecked}</small>
                   </div>
                   <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
@@ -2870,27 +2890,31 @@ function ChannelsView({
   }
 
   return (
-    <Panel title="渠道管理">
-      <div className="panel-toolbar">
-        <span className="muted-inline">渠道内置模型；优先从上游同步，模板仅作起步建议，也可以手动填写。</span>
+    <Panel title="渠道">
+      <div className="channel-page-intro">
+        <div>
+          <strong>管理上游服务</strong>
+          <span>每个渠道对应一个 API 上游。先添加渠道，再检测连通性并同步可用模型。</span>
+        </div>
+        <div className="channel-page-summary">
+          <span><b>{channels.length}</b> 个渠道</span>
+          <span><b>{channels.filter((channel) => channel.status !== "disabled").length}</b> 个已启用</span>
+        </div>
+      </div>
+      <div className="panel-toolbar channel-toolbar">
+        <span className="muted-inline">列表显示当前状态；点击任一渠道可修改连接、模型和计费设置。</span>
         <button className="primary-button" onClick={() => setCreating((current) => !current)}>
-          {creating ? "收起" : "新增渠道"}
+          {creating ? "取消新增" : "+ 新增渠道"}
         </button>
       </div>
       {creating && (
         <form className="channel-card channel-create-form" onSubmit={submit}>
-          <div className="provider-chip-grid" role="radiogroup" aria-label="渠道模板">
-            {channelTemplates.map((template) => (
-              <button
-                key={template.provider}
-                type="button"
-                className={provider === template.provider ? "selected" : ""}
-                onClick={() => applyTemplate(template.provider)}
-              >
-                {template.label}
-              </button>
-            ))}
-          </div>
+          <label className="channel-select-field">
+            <span>选择渠道类型</span>
+            <select value={provider} onChange={(event) => applyTemplate(event.target.value)}>
+              {channelTemplates.map((template) => <option key={template.provider} value={template.provider}>{template.label}</option>)}
+            </select>
+          </label>
           <div className="channel-form-grid">
             <label>
               <span>渠道名称</span>
@@ -2906,7 +2930,7 @@ function ChannelsView({
             </label>
             <label>
               <span>上游 Key</span>
-              <input type="password" value={upstreamApiKey} onChange={(event) => setUpstreamApiKey(event.target.value)} placeholder={provider === "codex" ? "账号池导入后使用" : "可先留空，稍后编辑"} autoComplete="new-password" />
+              <input type="password" value={upstreamApiKey} onChange={(event) => setUpstreamApiKey(event.target.value)} placeholder={provider === "codex" ? "账号池导入后使用" : provider === "cpa" ? "填写 CPA 的 API key" : "可先留空，稍后编辑"} autoComplete="new-password" />
             </label>
             <div className="channel-form-wide channel-model-field">
               <div className="field-label-row">
@@ -2960,6 +2984,8 @@ function ChannelEditor({
   const [upstreamApiKey, setUpstreamApiKey] = useState("");
   const [busy, setBusy] = useState("");
   const accountCount = channel.openaiAccountCount ?? channel.openaiAccounts?.length ?? 0;
+  const modelCount = arrayOf(channel.models).length;
+  const isDisabled = channel.status === "disabled";
   const modelSourceLabel = {
     saved: "已保存",
     template: "模板",
@@ -2992,12 +3018,9 @@ function ChannelEditor({
   }
 
   function currentChannelPatch(): ChannelPatch {
-    const normalizedBaseUrl = !/^https?:\/\//i.test(baseUrl.trim())
-      ? provider === "openai"
-        ? defaultOpenAIBaseURL
-        : provider === "codex"
-          ? defaultCodexBaseURL
-          : baseUrl
+    const providerDefaultBaseUrl = defaultBaseURLForProvider(provider);
+    const normalizedBaseUrl = !/^https?:\/\//i.test(baseUrl.trim()) && providerDefaultBaseUrl
+      ? providerDefaultBaseUrl
       : baseUrl;
     const patch: ChannelPatch = {
       name: name.trim() || channel.name,
@@ -3070,46 +3093,48 @@ function ChannelEditor({
 
   return (
     <details className="channel-card channel-card-collapsible">
-      <summary className="channel-card-head">
-        <div>
+      <summary className="channel-card-head channel-list-row">
+        <div className="channel-identity">
           <strong>{channel.name}</strong>
-          <span>{channel.baseUrl || "未配置上游地址"}</span>
-          <small>{providerDisplayName(provider)}{accountCount > 0 ? ` · 账号池 ${accountCount} 个` : ""}</small>
-          {(channel.lastCheckedAt || channel.lastError) && (
-            <small>{channel.lastError ? `检测失败：${channel.lastError}` : `上次检测 ${formatDate(channel.lastCheckedAt)}`}</small>
-          )}
+          <span>{providerDisplayName(provider)}</span>
+          <small>{channel.baseUrl || "尚未配置上游地址"}</small>
         </div>
-        <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
+        <div className="channel-list-meta">
+          <span><b>{modelCount}</b> 个模型</span>
+          {accountCount > 0 && <span><b>{accountCount}</b> 个账号</span>}
+        </div>
+        <div className="channel-check-result">
+          <span>连通性</span>
+          <b className={channel.lastError ? "is-error" : channel.lastCheckedAt ? "is-ok" : ""}>
+            {channel.lastError ? "检测失败" : channel.lastCheckedAt ? `已检测 ${formatDate(channel.lastCheckedAt)}` : "尚未检测"}
+          </b>
+        </div>
+        <div className="channel-list-status">
+          <Badge tone={channel.status}>{isDisabled ? "已停用" : statusLabel(channel.status)}</Badge>
+          <span className="channel-expand-hint">配置</span>
+        </div>
       </summary>
 
-      <div className="provider-chip-grid" role="radiogroup" aria-label="供应商">
-        {providerOptions.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            className={provider === option.value ? "selected" : ""}
-            onClick={() => {
-              setProvider(option.value);
-              if (option.value === "codex" && !/^https?:\/\//i.test(baseUrl.trim())) {
-                setBaseUrl(defaultCodexBaseURL);
-              }
-              if (option.value === "openai" && !/^https?:\/\//i.test(baseUrl.trim())) {
-                setBaseUrl(defaultOpenAIBaseURL);
-              }
-            }}
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
-
-      <div className="stream-mode-grid" role="radiogroup" aria-label="流式处理">
-        {streamModeOptions.map((option) => (
-          <button key={option.value} type="button" className={streamMode === option.value ? "selected" : ""} onClick={() => setStreamMode(option.value)}>
-            <strong>{option.label}</strong>
-            <span>{option.description}</span>
-          </button>
-        ))}
+      <div className="channel-editor-controls">
+        <label className="channel-select-field">
+          <span>供应商</span>
+          <select value={provider} onChange={(event) => {
+            const nextProvider = event.target.value;
+            setProvider(nextProvider);
+            const nextDefaultBaseUrl = defaultBaseURLForProvider(nextProvider);
+            if (nextDefaultBaseUrl && !/^https?:\/\//i.test(baseUrl.trim())) {
+              setBaseUrl(nextDefaultBaseUrl);
+            }
+          }}>
+            {providerOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </label>
+        <label className="channel-select-field">
+          <span>流式处理</span>
+          <select value={streamMode} onChange={(event) => setStreamMode(event.target.value as Channel["streamMode"])}>
+            {streamModeOptions.map((option) => <option key={option.value} value={option.value}>{option.label} - {option.description}</option>)}
+          </select>
+        </label>
       </div>
 
       {(provider === "codex" || accountCount > 0) && (
@@ -3173,7 +3198,7 @@ function ChannelEditor({
         </div>
         <label>
           <span>上游 Key</span>
-          <input type="password" value={upstreamApiKey} onChange={(event) => setUpstreamApiKey(event.target.value)} placeholder={provider === "codex" ? "Codex 账号池不需要上游 Key" : "留空表示不修改"} autoComplete="new-password" />
+          <input type="password" value={upstreamApiKey} onChange={(event) => setUpstreamApiKey(event.target.value)} placeholder={provider === "codex" ? "Codex 账号池不需要上游 Key" : provider === "cpa" ? "填写 CPA 的 API key" : "留空表示不修改"} autoComplete="new-password" />
         </label>
         <label>
           <span>输入单价 / 1K Token</span>
@@ -3187,29 +3212,27 @@ function ChannelEditor({
       </div>
 
       <div className="channel-card-actions">
-        <label className="secondary-button">
-          {busy === "import" ? "导入中" : "导入账号 JSON"}
-          <input
-            type="file"
-            accept="application/json,application/zip,.json,.zip"
-            disabled={busy !== ""}
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) importFile(file);
-              event.target.value = "";
-            }}
-          />
-        </label>
         <button className="secondary-button" onClick={check} disabled={busy !== ""}>
           {busy === "check" ? "检测中" : "检测渠道"}
         </button>
-        <button className="secondary-button" onClick={save} disabled={busy !== ""}>
+        <button className="primary-button" onClick={save} disabled={busy !== ""}>
           {busy === "save" ? "保存中" : "保存"}
         </button>
-        <button className="status-button" onClick={toggleStatus} disabled={busy !== ""}>
-          <Badge tone={channel.status}>{channel.status === "disabled" ? "启用" : "禁用"}</Badge>
-        </button>
-        <button className="danger-button" onClick={() => onDelete(channel.id)} disabled={busy !== ""}>删除</button>
+        <details className="channel-more-actions">
+          <summary>更多操作</summary>
+          <div>
+            <label className="secondary-button">
+              {busy === "import" ? "导入中" : "导入账号 JSON"}
+              <input type="file" accept="application/json,application/zip,.json,.zip" disabled={busy !== ""} onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) importFile(file);
+                event.target.value = "";
+              }} />
+            </label>
+            <button className="secondary-button" onClick={toggleStatus} disabled={busy !== ""}>{channel.status === "disabled" ? "启用渠道" : "停用渠道"}</button>
+            <button className="danger-button" onClick={() => onDelete(channel.id)} disabled={busy !== ""}>删除渠道</button>
+          </div>
+        </details>
       </div>
     </details>
   );
