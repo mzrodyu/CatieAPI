@@ -3781,6 +3781,13 @@ func (s *Server) imageEdits(c *gin.Context) {
 }
 
 func startImageJSONKeepalive(c *gin.Context) func() {
+	// Set proxy/cache headers before the first body write. If these are added
+	// only inside the ticker, reverse proxies may already have chosen buffering
+	// or timeout behavior for the response.
+	c.Header("Content-Type", "application/json; charset=utf-8")
+	c.Header("Cache-Control", "no-cache, no-transform")
+	c.Header("X-Accel-Buffering", "no")
+	c.Header("Connection", "keep-alive")
 	done := make(chan struct{})
 	stopped := make(chan struct{})
 	requestDone := c.Request.Context().Done()
@@ -3795,9 +3802,6 @@ func startImageJSONKeepalive(c *gin.Context) func() {
 			case <-requestDone:
 				return
 			case <-ticker.C:
-				c.Header("Content-Type", "application/json; charset=utf-8")
-				c.Header("Cache-Control", "no-cache")
-				c.Header("X-Accel-Buffering", "no")
 				if _, err := c.Writer.Write([]byte(" \n")); err != nil {
 					return
 				}
