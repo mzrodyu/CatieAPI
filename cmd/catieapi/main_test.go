@@ -1178,6 +1178,36 @@ func TestEmbeddingsEndpointForwardsToCompatibleUpstream(t *testing.T) {
 	}
 }
 
+func TestAudioSpeechForwardsBinaryResponse(t *testing.T) {
+	var upstreamPayload map[string]interface{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/audio/speech" {
+			t.Fatalf("audio upstream path = %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamPayload); err != nil {
+			t.Fatalf("decode audio request: %v", err)
+		}
+		w.Header().Set("Content-Type", "audio/ogg")
+		_, _ = w.Write([]byte("OggS-audio"))
+	}))
+	defer upstream.Close()
+	withEnv(t, map[string]string{"PERSISTENCE": "memory", "PROVIDER_MODE": "compatible"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	channel := server.findChannel("chn_1002")
+	channel.BaseURL = upstream.URL + "/v1"
+	channel.UpstreamAPIKey = "audio-secret"
+	server.mu.Unlock()
+	response := perform(router, http.MethodPost, "/v1/audio/speech", `{"model":"ds","input":"hello","voice":"alloy","response_format":"opus"}`, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "audio/ogg" || response.Body.String() != "OggS-audio" {
+		t.Fatalf("audio response = %d %s %q", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+	}
+	if upstreamPayload["model"] != "deepseek-v4" || upstreamPayload["voice"] != "alloy" || upstreamPayload["response_format"] != "opus" {
+		t.Fatalf("audio payload was not forwarded: %#v", upstreamPayload)
+	}
+}
+
 func TestUnpricedModelAllowsZeroBalance(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)

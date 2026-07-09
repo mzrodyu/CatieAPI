@@ -2703,7 +2703,7 @@ function DrawingView({
         {authSessionChannelId && (
           <AuthSessionModal
             onImport={async (token) => {
-              await importFile(authSessionChannelId, new File([JSON.stringify([{ sessionToken: token }])], "authsession.json", { type: "application/json" }));
+              await importFile(authSessionChannelId, new File([JSON.stringify(authSessionImportPayload(token))], "authsession.json", { type: "application/json" }));
               setAuthSessionChannelId("");
             }}
             onClose={() => setAuthSessionChannelId("")}
@@ -2711,6 +2711,28 @@ function DrawingView({
         )}
       </Panel>
   );
+}
+
+function authSessionImportPayload(value: string) {
+  const raw = value.trim();
+  try {
+    const session = JSON.parse(raw) as Record<string, unknown>;
+    const accessToken = typeof session.accessToken === "string" ? session.accessToken : typeof session.access_token === "string" ? session.access_token : "";
+    const refreshToken = typeof session.refreshToken === "string" ? session.refreshToken : typeof session.refresh_token === "string" ? session.refresh_token : "";
+    const user = session.user && typeof session.user === "object" ? session.user as Record<string, unknown> : {};
+    if (accessToken || refreshToken) {
+      return [{
+        accessToken: accessToken || undefined,
+        refreshToken: refreshToken || undefined,
+        email: typeof user.email === "string" ? user.email : undefined,
+        name: typeof user.name === "string" ? user.name : undefined,
+        source: "web-login"
+      }];
+    }
+  } catch {
+    // A standalone token is valid input and does not need to be JSON.
+  }
+  return [{ sessionToken: raw, source: "web-login" }];
 }
 
 function AuthSessionModal({ onImport, onClose }: { onImport: (token: string) => Promise<void>; onClose: () => void }) {
@@ -2724,7 +2746,7 @@ function AuthSessionModal({ onImport, onClose }: { onImport: (token: string) => 
   }
   return <div className="modal-backdrop" onClick={onClose}><div className="modal-card" onClick={(event) => event.stopPropagation()}>
     <div className="modal-head"><strong>添加 authsession</strong><button type="button" className="icon-button" onClick={onClose}>×</button></div>
-    <p className="muted-inline">将作为单个网页会话账号导入。仅粘贴 token 本身，不要粘贴 Cookie 名称或 JSON。</p>
+    <p className="muted-inline">可直接粘贴 chatgpt.com/api/auth/session 的完整 JSON，系统会自动提取 accessToken；也可粘贴单独 token。</p>
     <label className="authsession-field"><span>authsession</span><textarea autoFocus value={token} onChange={(event) => setToken(event.target.value)} placeholder="eyJhbGci..." /></label>
     {error && <div className="form-error">{error}</div>}
     <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={busy} onClick={submit}>{busy ? "导入中" : "导入账号"}</button></div>
