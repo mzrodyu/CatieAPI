@@ -47,7 +47,7 @@ func TestChatGPTWebConfigShape(t *testing.T) {
 
 func TestChatGPTWebImageStreamExtractsAssetPointer(t *testing.T) {
 	stream := "data: \"v1\"\n\n" +
-		"data: {\"p\":\"\",\"o\":\"add\",\"v\":{\"conversation_id\":\"conv-1\",\"message\":{\"content\":{\"content_type\":\"multimodal_text\",\"parts\":[{\"content_type\":\"image_asset_pointer\",\"asset_pointer\":\"sediment://file_1\"}]}}}}\n\n" +
+		"data: {\"p\":\"\",\"o\":\"add\",\"v\":{\"conversation_id\":\"conv-1\",\"message\":{\"author\":{\"role\":\"tool\"},\"content\":{\"content_type\":\"multimodal_text\",\"parts\":[{\"content_type\":\"image_asset_pointer\",\"asset_pointer\":\"sediment://file_1\"}]},\"metadata\":{\"async_task_type\":\"image_gen\"}}}}\n\n" +
 		"data: [DONE]\n\n"
 	conversationID, assetPointer, providerErr := parseChatGPTWebImageStream(bytes.NewBufferString(stream))
 	if providerErr != nil {
@@ -55,6 +55,19 @@ func TestChatGPTWebImageStreamExtractsAssetPointer(t *testing.T) {
 	}
 	if conversationID != "conv-1" || assetPointer != "sediment://file_1" {
 		t.Fatalf("unexpected image stream fields: conversation=%q asset=%q", conversationID, assetPointer)
+	}
+}
+
+func TestChatGPTWebImageStreamIgnoresInputAssetPointer(t *testing.T) {
+	stream := "data: {\"v\":{\"conversation_id\":\"conv-edit\",\"message\":{\"author\":{\"role\":\"user\"},\"content\":{\"parts\":[{\"asset_pointer\":\"file-service://input-file\"}]}}}}\n\n" +
+		"data: {\"v\":{\"message\":{\"author\":{\"role\":\"tool\"},\"content\":{\"parts\":[{\"asset_pointer\":\"sediment://output-file\"}]},\"metadata\":{\"async_task_type\":\"image_gen\"}}}}\n\n" +
+		"data: [DONE]\n\n"
+	conversationID, assetPointer, providerErr := parseChatGPTWebImageStream(bytes.NewBufferString(stream))
+	if providerErr != nil {
+		t.Fatalf("image edit stream parse failed: %v", providerErr)
+	}
+	if conversationID != "conv-edit" || assetPointer != "sediment://output-file" {
+		t.Fatalf("input asset was not ignored: conversation=%q asset=%q", conversationID, assetPointer)
 	}
 }
 

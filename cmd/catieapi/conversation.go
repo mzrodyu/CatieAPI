@@ -7,6 +7,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
 	"net/url"
@@ -45,9 +49,6 @@ func isChatGPTWebImageChannel(channel Channel) bool {
 // not call the Codex responses endpoint: authsession credentials belong to the
 // web image service and require the prepare/conduit handshake first.
 func (s *Server) callChatGPTWebImage(call ImageGatewayCall) (gin.H, *ProviderError) {
-	if strings.EqualFold(strings.TrimSpace(call.Operation), "edit") {
-		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "web_image_edit_unsupported", Message: "网页图片编辑暂未支持，请先使用文生图", Type: "invalid_request_error"}
-	}
 	accounts := activeOpenAIAccounts(call.Channel.OpenAIAccounts)
 	if len(accounts) == 0 {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "没有可用的网页账号", Type: "api_error"}
@@ -92,12 +93,19 @@ func (s *Server) callChatGPTWebImageWithAccount(call ImageGatewayCall, account O
 	parentID := randomUUID()
 	messageID := randomUUID()
 	model := "gpt-5-5"
-	preparePayload := chatGPTWebImagePreparePayload(call, model, parentID, messageID)
+	assets := []chatGPTWebUploadAsset{}
+	if strings.EqualFold(strings.TrimSpace(call.Operation), "edit") {
+		assets, providerErr = s.uploadChatGPTWebInputImages(call, accessToken, account, config, deviceID)
+		if providerErr != nil {
+			return nil, providerErr
+		}
+	}
+	preparePayload := chatGPTWebImagePreparePayload(call, model, parentID, messageID, assets)
 	conduitToken, providerErr := s.prepareChatGPTWebImage(accessToken, account, config, deviceID, requirements, preparePayload)
 	if providerErr != nil {
 		return nil, providerErr
 	}
-	generatePayload := chatGPTWebImageGeneratePayload(call, model, parentID, messageID)
+	generatePayload := chatGPTWebImageGeneratePayload(call, model, parentID, messageID, assets)
 	response, providerErr := s.generateChatGPTWebImage(accessToken, account, config, deviceID, requirements, conduitToken, generatePayload)
 	if providerErr != nil {
 		return nil, providerErr
@@ -263,9 +271,9 @@ func extractChatGPTWebImageFields(value interface{}, conversationID, assetPointe
 		if text, ok := typed["conversation_id"].(string); ok && strings.TrimSpace(text) != "" {
 			*conversationID = text
 		}
-		if text, ok := typed["asset_pointer"].(string); ok {
-			if strings.HasPrefix(text, "sediment://") || strings.HasPrefix(text, "file-service://") {
-				*assetPointer = text
+		if message, ok := typed["message"].(map[string]interface{}); ok && chatGPTWebImageToolMessage(message) {
+			if pointer := findChatGPTWebAssetPointer(message["content"]); pointer != "" {
+				*assetPointer = pointer
 			}
 		}
 		for _, child := range typed {
@@ -276,6 +284,38 @@ func extractChatGPTWebImageFields(value interface{}, conversationID, assetPointe
 			extractChatGPTWebImageFields(child, conversationID, assetPointer)
 		}
 	}
+}
+
+func chatGPTWebImageToolMessage(message map[string]interface{}) bool {
+	author, _ := message["author"].(map[string]interface{})
+	role, _ := author["role"].(string)
+	if role != "tool" {
+		return false
+	}
+	metadata, _ := message["metadata"].(map[string]interface{})
+	taskType, _ := metadata["async_task_type"].(string)
+	return taskType == "" || taskType == "image_gen"
+}
+
+func findChatGPTWebAssetPointer(value interface{}) string {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		if pointer, ok := typed["asset_pointer"].(string); ok && (strings.HasPrefix(pointer, "sediment://") || strings.HasPrefix(pointer, "file-service://")) {
+			return pointer
+		}
+		for _, child := range typed {
+			if pointer := findChatGPTWebAssetPointer(child); pointer != "" {
+				return pointer
+			}
+		}
+	case []interface{}:
+		for _, child := range typed {
+			if pointer := findChatGPTWebAssetPointer(child); pointer != "" {
+				return pointer
+			}
+		}
+	}
+	return ""
 }
 
 func (s *Server) pollChatGPTWebImageAsset(accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID, conversationID string) (string, *ProviderError) {
@@ -415,22 +455,250 @@ func chatGPTWebImageBytesValid(content []byte) bool {
 		(bytes.HasPrefix(content, []byte("RIFF")) && string(content[8:12]) == "WEBP")
 }
 
-func chatGPTWebImagePreparePayload(call ImageGatewayCall, model, parentID, messageID string) gin.H {
+type chatGPTWebUploadAsset struct {
+	FileID   string
+	Name     string
+	MIMEType string
+	Size     int
+	Width    int
+	Height   int
+}
+
+func (asset chatGPTWebUploadAsset) pointer() gin.H {
+	return gin.H{
+		"asset_pointer": "file-service://" + asset.FileID,
+		"content_type":  "image_asset_pointer",
+		"height":        asset.Height,
+		"size_bytes":    asset.Size,
+		"width":         asset.Width,
+	}
+}
+
+func (asset chatGPTWebUploadAsset) attachment() gin.H {
+	return gin.H{
+		"id": asset.FileID, "mime_type": asset.MIMEType, "name": asset.Name,
+		"size": asset.Size, "height": asset.Height, "width": asset.Width,
+	}
+}
+
+func (s *Server) uploadChatGPTWebInputImages(call ImageGatewayCall, accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID string) ([]chatGPTWebUploadAsset, *ProviderError) {
+	imageRefs := imageURLsFromPayload(call.Body.Payload)
+	if len(imageRefs) == 0 {
+		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_image", Message: "垫图请求没有图片", Type: "invalid_request_error"}
+	}
+	assets := make([]chatGPTWebUploadAsset, 0, len(imageRefs))
+	for index, imageRef := range imageRefs {
+		content, mimeType, providerErr := s.loadChatGPTWebInputImage(imageRef, accessToken, account, config, deviceID)
+		if providerErr != nil {
+			return nil, providerErr
+		}
+		width, height := 0, 0
+		if dimensions, _, err := image.DecodeConfig(bytes.NewReader(content)); err == nil {
+			width, height = dimensions.Width, dimensions.Height
+		}
+		asset, providerErr := s.uploadChatGPTWebFile(content, fmt.Sprintf("reference-%d%s", index+1, chatGPTWebImageExtension(mimeType)), mimeType, width, height, accessToken, account, config, deviceID)
+		if providerErr != nil {
+			return nil, providerErr
+		}
+		assets = append(assets, asset)
+	}
+	return assets, nil
+}
+
+func (s *Server) loadChatGPTWebInputImage(imageRef, accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID string) ([]byte, string, *ProviderError) {
+	imageRef = strings.TrimSpace(imageRef)
+	if strings.HasPrefix(strings.ToLower(imageRef), "data:image/") {
+		comma := strings.Index(imageRef, ",")
+		if comma < 0 || !strings.Contains(strings.ToLower(imageRef[:comma]), ";base64") {
+			return nil, "", &ProviderError{Status: http.StatusBadRequest, Code: "invalid_image", Message: "垫图 data URL 无效", Type: "invalid_request_error"}
+		}
+		mimeType := strings.TrimSpace(strings.SplitN(imageRef[5:comma], ";", 2)[0])
+		content, err := base64.StdEncoding.DecodeString(strings.TrimSpace(imageRef[comma+1:]))
+		if err != nil || !chatGPTWebImageBytesValid(content) {
+			return nil, "", &ProviderError{Status: http.StatusBadRequest, Code: "invalid_image", Message: "垫图不是有效图片", Type: "invalid_request_error"}
+		}
+		return content, mimeType, nil
+	}
+	request, err := http.NewRequest(http.MethodGet, imageRef, nil)
+	if err != nil {
+		return nil, "", &ProviderError{Status: http.StatusBadRequest, Code: "invalid_image_url", Message: err.Error(), Type: "invalid_request_error"}
+	}
+	if chatGPTWebAuthenticatedHost(request.URL.Hostname()) {
+		s.setChatGPTWebHeaders(request, accessToken, account, config, deviceID)
+	}
+	response, err := s.webHTTPClient.Do(request)
+	if err != nil {
+		return nil, "", &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	defer response.Body.Close()
+	content, readErr := io.ReadAll(io.LimitReader(response.Body, 20<<20))
+	if readErr != nil || response.StatusCode < 200 || response.StatusCode >= 300 || !chatGPTWebImageBytesValid(content) {
+		return nil, "", &ProviderError{Status: http.StatusBadRequest, Code: "invalid_image", Message: "无法读取有效垫图", Type: "invalid_request_error"}
+	}
+	mimeType := strings.Split(response.Header.Get("Content-Type"), ";")[0]
+	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+		mimeType = chatGPTWebImageMIMEType(content)
+	}
+	return content, mimeType, nil
+}
+
+func (s *Server) uploadChatGPTWebFile(content []byte, name, mimeType string, width, height int, accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID string) (chatGPTWebUploadAsset, *ProviderError) {
+	metadata := gin.H{"file_name": name, "file_size": len(content), "use_case": "multimodal", "timezone_offset_min": -480, "reset_rate_limits": false}
+	encoded, _ := json.Marshal(metadata)
+	request, err := http.NewRequest(http.MethodPost, joinURL(s.chatGPTAPIBase, "files"), bytes.NewReader(encoded))
+	if err != nil {
+		return chatGPTWebUploadAsset{}, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	}
+	s.setChatGPTWebHeaders(request, accessToken, account, config, deviceID)
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := s.webHTTPClient.Do(request)
+	if err != nil {
+		return chatGPTWebUploadAsset{}, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	registration, providerErr := readChatGPTWebUploadRegistration(response)
+	if providerErr != nil {
+		return chatGPTWebUploadAsset{}, providerErr
+	}
+
+	uploadRequest, err := http.NewRequest(http.MethodPut, registration.UploadURL, bytes.NewReader(content))
+	if err != nil {
+		return chatGPTWebUploadAsset{}, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	}
+	uploadRequest.Header.Set("Accept", "application/json, text/plain, */*")
+	uploadRequest.Header.Set("Content-Type", mimeType)
+	uploadRequest.Header.Set("Origin", "https://chatgpt.com")
+	uploadRequest.Header.Set("Referer", "https://chatgpt.com/")
+	uploadRequest.Header.Set("x-ms-blob-type", "BlockBlob")
+	uploadRequest.Header.Set("x-ms-version", "2020-04-08")
+	uploadResponse, err := s.webHTTPClient.Do(uploadRequest)
+	if err != nil {
+		return chatGPTWebUploadAsset{}, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(uploadResponse.Body, 1<<20))
+	_ = uploadResponse.Body.Close()
+	if uploadResponse.StatusCode < 200 || uploadResponse.StatusCode >= 300 {
+		return chatGPTWebUploadAsset{}, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_upload_failed", Message: uploadResponse.Status, Type: "api_error"}
+	}
+	if providerErr := s.completeChatGPTWebUpload(registration.FileID, accessToken, account, config, deviceID); providerErr != nil {
+		return chatGPTWebUploadAsset{}, providerErr
+	}
+	return chatGPTWebUploadAsset{FileID: registration.FileID, Name: name, MIMEType: mimeType, Size: len(content), Width: width, Height: height}, nil
+}
+
+type chatGPTWebUploadRegistration struct {
+	FileID    string `json:"file_id"`
+	UploadURL string `json:"upload_url"`
+}
+
+func readChatGPTWebUploadRegistration(response *http.Response) (chatGPTWebUploadRegistration, *ProviderError) {
+	defer response.Body.Close()
+	content, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+	if err != nil {
+		return chatGPTWebUploadRegistration{}, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return chatGPTWebUploadRegistration{}, providerErrorFromUpstream(response.StatusCode, content)
+	}
+	var result chatGPTWebUploadRegistration
+	if json.Unmarshal(content, &result) != nil || result.FileID == "" || result.UploadURL == "" {
+		return chatGPTWebUploadRegistration{}, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "网页上传接口没有返回 file_id/upload_url", Type: "api_error"}
+	}
+	return result, nil
+}
+
+func (s *Server) completeChatGPTWebUpload(fileID, accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID string) *ProviderError {
+	for attempt := 0; attempt < 3; attempt++ {
+		request, err := http.NewRequest(http.MethodPost, joinURL(s.chatGPTAPIBase, "files/"+url.PathEscape(fileID)+"/uploaded"), strings.NewReader("{}"))
+		if err != nil {
+			return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+		}
+		s.setChatGPTWebHeaders(request, accessToken, account, config, deviceID)
+		request.Header.Set("Accept", "application/json")
+		request.Header.Set("Content-Type", "application/json")
+		response, err := s.webHTTPClient.Do(request)
+		if err != nil {
+			return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+		}
+		content, readErr := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+		_ = response.Body.Close()
+		if readErr != nil {
+			return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: readErr.Error(), Type: "api_error"}
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return providerErrorFromUpstream(response.StatusCode, content)
+		}
+		var status struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(content, &status) == nil && status.Status == "success" {
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+	return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_upload_processing", Message: "网页垫图上传处理超时", Type: "api_error"}
+}
+
+func chatGPTWebImageMIMEType(content []byte) string {
+	switch {
+	case bytes.HasPrefix(content, []byte("\x89PNG\r\n\x1a\n")):
+		return "image/png"
+	case bytes.HasPrefix(content, []byte("\xff\xd8\xff")):
+		return "image/jpeg"
+	case bytes.HasPrefix(content, []byte("GIF87a")), bytes.HasPrefix(content, []byte("GIF89a")):
+		return "image/gif"
+	case len(content) >= 12 && bytes.HasPrefix(content, []byte("RIFF")) && string(content[8:12]) == "WEBP":
+		return "image/webp"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+func chatGPTWebImageExtension(mimeType string) string {
+	switch strings.ToLower(mimeType) {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".png"
+	}
+}
+
+func chatGPTWebImageMessageContent(call ImageGatewayCall, assets []chatGPTWebUploadAsset) (gin.H, gin.H) {
+	if len(assets) == 0 {
+		return gin.H{"content_type": "text", "parts": []string{call.Body.Prompt}}, gin.H{"system_hints": []string{"picture_v2"}, "serialization_metadata": gin.H{"custom_symbol_offsets": []int{}}}
+	}
+	parts := make([]interface{}, 0, len(assets)+1)
+	attachments := make([]gin.H, 0, len(assets))
+	for _, asset := range assets {
+		parts = append(parts, asset.pointer())
+		attachments = append(attachments, asset.attachment())
+	}
+	parts = append(parts, call.Body.Prompt)
+	return gin.H{"content_type": "multimodal_text", "parts": parts}, gin.H{"attachments": attachments, "system_hints": []string{"picture_v2"}}
+}
+
+func chatGPTWebImagePreparePayload(call ImageGatewayCall, model, parentID, messageID string, assets []chatGPTWebUploadAsset) gin.H {
+	content, metadata := chatGPTWebImageMessageContent(call, assets)
 	return gin.H{
 		"action": "next", "parent_message_id": parentID, "model": model,
 		"client_prepare_state": "success", "timezone_offset_min": 480, "timezone": "Asia/Shanghai",
 		"conversation_mode": gin.H{"kind": "primary_assistant"}, "system_hints": []string{"picture_v2"},
-		"partial_query":      gin.H{"id": messageID, "author": gin.H{"role": "user"}, "content": gin.H{"content_type": "text", "parts": []string{call.Body.Prompt}}},
+		"partial_query":      gin.H{"id": messageID, "author": gin.H{"role": "user"}, "content": content, "metadata": metadata},
 		"supports_buffering": true, "supported_encodings": []string{"v1"}, "client_contextual_info": gin.H{"app_name": "chatgpt.com"},
 	}
 }
 
-func chatGPTWebImageGeneratePayload(call ImageGatewayCall, model, parentID, messageID string) gin.H {
+func chatGPTWebImageGeneratePayload(call ImageGatewayCall, model, parentID, messageID string, assets []chatGPTWebUploadAsset) gin.H {
+	content, metadata := chatGPTWebImageMessageContent(call, assets)
 	return gin.H{
 		"action": "next", "parent_message_id": parentID, "model": model,
 		"client_prepare_state": "sent", "timezone_offset_min": 480, "timezone": "Asia/Shanghai",
 		"conversation_mode": gin.H{"kind": "primary_assistant"}, "system_hints": []string{"picture_v2"},
-		"messages":           []gin.H{{"id": messageID, "author": gin.H{"role": "user"}, "create_time": float64(time.Now().Unix()), "content": gin.H{"content_type": "text", "parts": []string{call.Body.Prompt}}, "metadata": gin.H{"system_hints": []string{"picture_v2"}, "serialization_metadata": gin.H{"custom_symbol_offsets": []int{}}}}},
+		"messages":           []gin.H{{"id": messageID, "author": gin.H{"role": "user"}, "create_time": float64(time.Now().Unix()), "content": content, "metadata": metadata}},
 		"supports_buffering": true, "supported_encodings": []string{"v1"}, "client_contextual_info": gin.H{"is_dark_mode": false, "page_height": 1072, "page_width": 1724, "pixel_ratio": 1.2, "screen_height": 1440, "screen_width": 2560, "app_name": "chatgpt.com"}, "force_parallel_switch": "auto",
 	}
 }
