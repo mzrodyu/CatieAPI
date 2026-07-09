@@ -57,3 +57,15 @@ func TestChatGPTWebImageStreamExtractsAssetPointer(t *testing.T) {
 		t.Fatalf("unexpected image stream fields: conversation=%q asset=%q", conversationID, assetPointer)
 	}
 }
+
+func TestChatGPTWebImageStreamAcceptsFileServicePointer(t *testing.T) {
+	stream := "data: {\"v\":{\"conversation_id\":\"conv-2\",\"message\":{\"author\":{\"role\":\"tool\"},\"content\":{\"parts\":[{\"asset_pointer\":\"file-service://file_2\"}]},\"metadata\":{\"async_task_type\":\"image_gen\"}}}}\n\n" +
+		"data: [DONE]\n\n"
+	conversationID, assetPointer, providerErr := parseChatGPTWebImageStream(bytes.NewBufferString(stream))
+	if providerErr != nil {
+		t.Fatalf("file-service image stream parse failed: %v", providerErr)
+	}
+	if conversationID != "conv-2" || assetPointer != "file-service://file_2" {
+		t.Fatalf("unexpected file-service fields: conversation=%q asset=%q", conversationID, assetPointer)
+	}
+}

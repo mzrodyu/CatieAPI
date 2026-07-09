@@ -108,6 +108,12 @@ func (s *Server) callChatGPTWebImageWithAccount(call ImageGatewayCall, account O
 	if providerErr != nil {
 		return nil, providerErr
 	}
+	if conversationID != "" && assetPointer == "" {
+		assetPointer, providerErr = s.pollChatGPTWebImageAsset(accessToken, account, config, deviceID, conversationID)
+		if providerErr != nil {
+			return nil, providerErr
+		}
+	}
 	if conversationID == "" || assetPointer == "" {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_no_image_output", Message: "网页接口没有返回图片资产", Type: "api_error"}
 	}
@@ -257,8 +263,10 @@ func extractChatGPTWebImageFields(value interface{}, conversationID, assetPointe
 		if text, ok := typed["conversation_id"].(string); ok && strings.TrimSpace(text) != "" {
 			*conversationID = text
 		}
-		if text, ok := typed["asset_pointer"].(string); ok && strings.HasPrefix(text, "sediment://") {
-			*assetPointer = text
+		if text, ok := typed["asset_pointer"].(string); ok {
+			if strings.HasPrefix(text, "sediment://") || strings.HasPrefix(text, "file-service://") {
+				*assetPointer = text
+			}
 		}
 		for _, child := range typed {
 			extractChatGPTWebImageFields(child, conversationID, assetPointer)
@@ -270,9 +278,55 @@ func extractChatGPTWebImageFields(value interface{}, conversationID, assetPointe
 	}
 }
 
+func (s *Server) pollChatGPTWebImageAsset(accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID, conversationID string) (string, *ProviderError) {
+	path := "conversation/" + url.PathEscape(conversationID)
+	for attempt := 0; attempt < 20; attempt++ {
+		if attempt > 0 {
+			time.Sleep(2 * time.Second)
+		}
+		request, err := http.NewRequest(http.MethodGet, joinURL(s.chatGPTAPIBase, path), nil)
+		if err != nil {
+			return "", &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+		}
+		s.setChatGPTWebHeaders(request, accessToken, account, config, deviceID)
+		request.Header.Set("Accept", "application/json")
+		response, err := s.webHTTPClient.Do(request)
+		if err != nil {
+			return "", &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+		}
+		content, readErr := io.ReadAll(io.LimitReader(response.Body, 32<<20))
+		_ = response.Body.Close()
+		if readErr != nil {
+			return "", &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: readErr.Error(), Type: "api_error"}
+		}
+		if response.StatusCode == http.StatusAccepted || response.StatusCode == http.StatusNotFound {
+			continue
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return "", providerErrorFromUpstream(response.StatusCode, content)
+		}
+		var conversation interface{}
+		if json.Unmarshal(content, &conversation) != nil {
+			continue
+		}
+		resolvedConversationID := conversationID
+		assetPointer := ""
+		extractChatGPTWebImageFields(conversation, &resolvedConversationID, &assetPointer)
+		if assetPointer != "" {
+			return assetPointer, nil
+		}
+	}
+	return "", nil
+}
+
 func (s *Server) downloadChatGPTWebImage(accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID, conversationID, assetPointer string) ([]byte, *ProviderError) {
-	fileID := strings.TrimPrefix(assetPointer, "sediment://")
-	path := fmt.Sprintf("conversation/%s/attachment/%s/download", url.PathEscape(conversationID), url.PathEscape(fileID))
+	fileID := strings.TrimPrefix(strings.TrimPrefix(assetPointer, "sediment://"), "file-service://")
+	path := ""
+	if strings.HasPrefix(assetPointer, "file-service://") {
+		path = fmt.Sprintf("files/%s/download", url.PathEscape(fileID))
+	} else {
+		path = fmt.Sprintf("conversation/%s/attachment/%s/download", url.PathEscape(conversationID), url.PathEscape(fileID))
+	}
 	request, err := http.NewRequest(http.MethodGet, joinURL(s.chatGPTAPIBase, path), nil)
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
