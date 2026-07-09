@@ -6043,6 +6043,9 @@ func (s *Server) checkOpenAIAccountUsage(accessToken string, account OpenAIAccou
 
 func (s *Server) checkOpenAIAccountImageGeneration(channel Channel, accessToken string) *ProviderError {
 	modelID := imageHealthCheckModelID(channel)
+	if modelID == "" {
+		return &ProviderError{Status: http.StatusBadRequest, Code: "image_model_not_configured", Message: "No image model is configured for this channel", Type: "invalid_request_error"}
+	}
 	call := ImageGatewayCall{
 		RequestID: newID("req"),
 		Model:     Model{ID: modelID},
@@ -6064,8 +6067,8 @@ func (s *Server) checkOpenAIAccountImageGeneration(channel Channel, accessToken 
 
 func imageHealthCheckModelID(channel Channel) string {
 	for _, candidate := range channel.Models {
-		if strings.EqualFold(strings.TrimSpace(candidate), "gpt-image-1") {
-			return "gpt-image-1"
+		if strings.EqualFold(strings.TrimSpace(candidate), "gpt-image-2") {
+			return "gpt-image-2"
 		}
 	}
 	for _, candidate := range channel.Models {
@@ -6073,7 +6076,7 @@ func imageHealthCheckModelID(channel Channel) string {
 			return strings.TrimSpace(candidate)
 		}
 	}
-	return "gpt-image-1"
+	return ""
 }
 
 func upstreamBillingError(content []byte) bool {
