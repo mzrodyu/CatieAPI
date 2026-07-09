@@ -411,6 +411,15 @@ type ImageRequest struct {
 	Payload map[string]interface{} `json:"-"`
 }
 
+// EmbeddingRequest intentionally keeps input untyped: the OpenAI API accepts a
+// string, token array, or a batch of either, and compatible upstreams expect it
+// to be forwarded without the gateway narrowing that shape.
+type EmbeddingRequest struct {
+	Model   string                 `json:"model"`
+	Input   interface{}            `json:"input"`
+	Payload map[string]interface{} `json:"-"`
+}
+
 type ChatMessage struct {
 	Role    string      `json:"role"`
 	Content interface{} `json:"content"`
@@ -451,6 +460,19 @@ func (request *ImageRequest) UnmarshalJSON(data []byte) error {
 	request.Model = typed.Model
 	request.Prompt = typed.Prompt
 	request.Payload = payload
+	return nil
+}
+
+func (request *EmbeddingRequest) UnmarshalJSON(data []byte) error {
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return err
+	}
+	request.Payload = payload
+	if model, ok := payload["model"].(string); ok {
+		request.Model = model
+	}
+	request.Input = payload["input"]
 	return nil
 }
 
@@ -3454,7 +3476,80 @@ func (s *Server) responses(c *gin.Context) {
 }
 
 func (s *Server) embeddings(c *gin.Context) {
-	s.openAIError(c, http.StatusNotImplemented, "unsupported_endpoint", "Embeddings are not enabled yet. Configure a text-embedding model before exposing this endpoint.", "invalid_request_error", nil)
+	startedAt := time.Now()
+	var body EmbeddingRequest
+	if err := c.ShouldBindJSON(&body); err != nil {
+		s.openAIError(c, http.StatusBadRequest, "invalid_json", "Invalid JSON body: "+err.Error(), "invalid_request_error", nil)
+		return
+	}
+	if body.Input == nil {
+		s.openAIError(c, http.StatusBadRequest, "invalid_input", "input is required", "invalid_request_error", stringPtr("input"))
+		return
+	}
+
+	s.mu.Lock()
+	auth := s.findUserByAPIKeyLocked(apiTokenFromRequest(c))
+	if auth == nil {
+		s.openAIErrorForCallLocked(c, http.StatusUnauthorized, "invalid_api_key", "Invalid CatieAPI key", "invalid_request_error", nil, "", "", body.Model, "")
+		s.mu.Unlock()
+		return
+	}
+	if auth.User.Status == "limited" {
+		s.openAIErrorForCallLocked(c, http.StatusPaymentRequired, "insufficient_quota", "Insufficient quota", "billing_error", nil, auth.User.ID, auth.Key.Prefix, body.Model, "")
+		s.mu.Unlock()
+		return
+	}
+	if !s.checkRateLimitLocked(auth.Key) {
+		s.openAIErrorForCallLocked(c, http.StatusTooManyRequests, "rate_limit_exceeded", "Rate limit exceeded", "rate_limit_error", nil, auth.User.ID, auth.Key.Prefix, body.Model, "")
+		s.mu.Unlock()
+		return
+	}
+	model := s.resolveModelLocked(body.Model)
+	if model == nil || model.Status != "available" || !apiKeyAllowsModel(auth.Key, model.ID) {
+		s.openAIErrorForCallLocked(c, http.StatusBadRequest, "model_not_available", "No available model: "+body.Model, "invalid_request_error", stringPtr("model"), auth.User.ID, auth.Key.Prefix, body.Model, "")
+		s.mu.Unlock()
+		return
+	}
+	channels := s.channelCandidatesLocked(model.ID)
+	if len(channels) == 0 {
+		s.openAIErrorForCallLocked(c, http.StatusBadRequest, "model_not_available", "No available channel for model: "+model.ID, "invalid_request_error", stringPtr("model"), auth.User.ID, auth.Key.Prefix, model.ID, "")
+		s.mu.Unlock()
+		return
+	}
+	userID, keyID, keyPrefix, modelID := auth.User.ID, auth.Key.ID, auth.Key.Prefix, model.ID
+	requestID := newID("req")
+	s.mu.Unlock()
+
+	var responseBody gin.H
+	var providerErr *ProviderError
+	var selected Channel
+	attempts := 0
+	for index, channel := range channels {
+		selected = channel
+		attempts++
+		if !s.shouldUseCompatibleProvider(channel) || len(channel.OpenAIAccounts) > 0 {
+			providerErr = &ProviderError{Status: http.StatusNotImplemented, Code: "embedding_not_supported", Message: "Selected channel does not expose an embeddings endpoint", Type: "invalid_request_error"}
+		} else {
+			responseBody, providerErr = s.callOpenAICompatibleEmbeddings(channel, requestID, modelID, body.Payload)
+		}
+		if providerErr == nil {
+			s.updateChannelRuntimeHealth(channel.ID, true, "")
+			break
+		}
+		if shouldMarkChannelUnhealthy(providerErr) {
+			s.updateChannelRuntimeHealth(channel.ID, false, providerErr.Message)
+		}
+		if !retryableProviderError(providerErr) || index == len(channels)-1 {
+			break
+		}
+	}
+	if providerErr != nil {
+		s.recordFailedCall(userID, keyPrefix, modelID, selected.Name, requestID, providerErr.Code, attempts, startedAt)
+		writeOpenAIError(c, providerErr.Status, providerErr.Code, providerErr.Message, providerErr.Type, stringPtr("model"))
+		return
+	}
+	s.recordSuccessfulCall(userID, keyID, keyPrefix, modelID, selected.Name, requestID, 0, 0, 0, attempts, startedAt)
+	c.JSON(http.StatusOK, responseBody)
 }
 
 func (s *Server) chatCompletions(c *gin.Context) {
@@ -4136,6 +4231,54 @@ func (s *Server) callOpenAICompatible(call GatewayCall) (gin.H, *ProviderError) 
 		body["model"] = call.Model.ID
 	}
 	return body, nil
+}
+
+func (s *Server) callOpenAICompatibleEmbeddings(channel Channel, requestID string, modelID string, payload map[string]interface{}) (gin.H, *ProviderError) {
+	upstreamKey, err := s.channelUpstreamKey(channel)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_key_unavailable", Message: err.Error(), Type: "api_error"}
+	}
+	if strings.TrimSpace(upstreamKey) == "" {
+		upstreamKey = s.upstreamAPIKey
+	}
+	if strings.TrimSpace(upstreamKey) == "" {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "Channel upstreamApiKey or UPSTREAM_API_KEY is required for embeddings", Type: "api_error"}
+	}
+	body := gin.H{}
+	for key, value := range payload {
+		if value != nil {
+			body[key] = value
+		}
+	}
+	body["model"] = modelID
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "Failed to encode embedding request", Type: "invalid_request_error"}
+	}
+	request, err := http.NewRequest(http.MethodPost, openAICompatibleEmbeddingsEndpoint(channel.BaseURL), bytes.NewReader(encoded))
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	}
+	request.Header.Set("Authorization", "Bearer "+upstreamKey)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Request-ID", requestID)
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	defer response.Body.Close()
+	content, err := io.ReadAll(io.LimitReader(response.Body, 32<<20))
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, providerErrorFromUpstream(response.StatusCode, content)
+	}
+	var result gin.H
+	if err := json.Unmarshal(content, &result); err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "Upstream returned invalid JSON", Type: "api_error"}
+	}
+	return result, nil
 }
 
 func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *ProviderError) {
@@ -7332,7 +7475,7 @@ func openAIImageModelIDs() []string {
 }
 
 func codexChannelModelIDs() []string {
-	return mergeStrings([]string{"gpt-5.5", "gpt-5.4"}, openAIImageModelIDs())
+	return mergeStrings([]string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"}, openAIImageModelIDs())
 }
 
 func isCodexChannel(channel Channel) bool {
@@ -7432,6 +7575,8 @@ func providerLabel(provider string) string {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "codex":
 		return "Codex"
+	case "cpa", "cliproxyapi", "cli-proxy-api":
+		return "CLIProxyAPI"
 	case "openai":
 		return "OpenAI"
 	case "anthropic":
@@ -9119,6 +9264,17 @@ func openAICompatibleChatEndpoint(base string) string {
 		}
 	}
 	return joinURL(apiBase, "chat/completions")
+}
+
+func openAICompatibleEmbeddingsEndpoint(base string) string {
+	apiBase := strings.TrimRight(strings.TrimSpace(base), "/")
+	for _, suffix := range []string{"/chat/completions", "/completions", "/models", "/embeddings"} {
+		if strings.HasSuffix(apiBase, suffix) {
+			apiBase = strings.TrimRight(apiBase[:len(apiBase)-len(suffix)], "/")
+			break
+		}
+	}
+	return joinURL(apiBase, "embeddings")
 }
 
 func openAICompatibleChatEndpointCandidates(base string) []string {

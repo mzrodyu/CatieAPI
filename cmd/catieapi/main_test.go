@@ -1130,16 +1130,51 @@ func TestOpenAIAccountPoolChatRetriesNextAccountOnUsageLimit(t *testing.T) {
 	}
 }
 
-func TestEmbeddingsEndpointReturnsClearUnsupportedError(t *testing.T) {
+func TestEmbeddingsEndpointUsesGatewayAuthentication(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	_, router := testServerRouter(t)
 
 	response := perform(router, http.MethodPost, "/v1/embeddings", `{"model":"embedding","input":"hello"}`, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
-	if response.Code != http.StatusNotImplemented {
+	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("embeddings status = %d body = %s", response.Code, response.Body.String())
 	}
-	if !bytes.Contains(response.Body.Bytes(), []byte(`unsupported_endpoint`)) {
-		t.Fatalf("embeddings error was not clear: %s", response.Body.String())
+	if !bytes.Contains(response.Body.Bytes(), []byte(`invalid_api_key`)) {
+		t.Fatalf("embeddings did not use gateway authentication: %s", response.Body.String())
+	}
+}
+
+func TestEmbeddingsEndpointForwardsToCompatibleUpstream(t *testing.T) {
+	var upstreamPayload map[string]interface{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/embeddings" {
+			t.Fatalf("embeddings upstream path = %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer embedding-secret" {
+			t.Fatalf("embeddings upstream authorization = %q", r.Header.Get("Authorization"))
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamPayload); err != nil {
+			t.Fatalf("decode embedding request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"object":"embedding","embedding":[0.1,0.2],"index":0}],"model":"deepseek-v4","usage":{"prompt_tokens":2,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{"PERSISTENCE": "memory", "PROVIDER_MODE": "compatible"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	channel := server.findChannel("chn_1002")
+	channel.BaseURL = upstream.URL + "/v1"
+	channel.UpstreamAPIKey = "embedding-secret"
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/embeddings", `{"model":"ds","input":["hello","world"],"encoding_format":"float"}`, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("embeddings status = %d body = %s", response.Code, response.Body.String())
+	}
+	if upstreamPayload["model"] != "deepseek-v4" || upstreamPayload["encoding_format"] != "float" {
+		t.Fatalf("embedding payload was not forwarded: %#v", upstreamPayload)
 	}
 }
 
@@ -1214,6 +1249,65 @@ func TestCreateChannelDefaultsToDisabled(t *testing.T) {
 	channels := perform(router, http.MethodGet, "/api/channels", "", nil)
 	if channels.Code != http.StatusOK || !bytes.Contains(channels.Body.Bytes(), []byte("Edge Provider")) {
 		t.Fatalf("created channel was not listed: %d body = %s", channels.Code, channels.Body.String())
+	}
+}
+
+func TestCPAChannelSyncsModelsThroughCompatibleUpstream(t *testing.T) {
+	var upstreamAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamAuth = r.Header.Get("Authorization")
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("CPA upstream path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-5.6-sol"},{"id":"claude-sonnet-4"}]}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	_, router := testServerRouter(t)
+
+	body := `{"name":"CPA Local","provider":"cpa","baseUrl":"` + upstream.URL + `/v1","upstreamApiKey":"cpa-secret"}`
+	created := perform(router, http.MethodPost, "/api/channels", body, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create CPA channel status = %d body = %s", created.Code, created.Body.String())
+	}
+	var payload struct {
+		Channel PublicChannel `json:"channel"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode CPA channel: %v", err)
+	}
+	if payload.Channel.Provider != "cpa" || payload.Channel.UpstreamKeySet != true {
+		t.Fatalf("CPA channel not stored correctly: %#v", payload.Channel)
+	}
+
+	synced := perform(router, http.MethodPost, "/api/channels/"+payload.Channel.ID+"/sync-models", `{}`, nil)
+	if synced.Code != http.StatusOK {
+		t.Fatalf("sync CPA models status = %d body = %s", synced.Code, synced.Body.String())
+	}
+	if upstreamAuth != "Bearer cpa-secret" {
+		t.Fatalf("CPA upstream auth = %s", upstreamAuth)
+	}
+	if !bytes.Contains(synced.Body.Bytes(), []byte(`gpt-5.6-sol`)) || !bytes.Contains(synced.Body.Bytes(), []byte(`claude-sonnet-4`)) {
+		t.Fatalf("sync CPA models response missing model: %s", synced.Body.String())
+	}
+}
+
+func TestCodexChannelModelIDsIncludeGPT56Family(t *testing.T) {
+	for _, modelID := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
+		if !containsString(codexChannelModelIDs(), modelID) {
+			t.Fatalf("codexChannelModelIDs missing %s: %#v", modelID, codexChannelModelIDs())
+		}
+	}
+}
+
+func TestProviderLabelSupportsCPA(t *testing.T) {
+	if got := providerLabel("cpa"); got != "CLIProxyAPI" {
+		t.Fatalf("providerLabel(cpa) = %q", got)
+	}
+	if got := providerLabel("CLIProxyAPI"); got != "CLIProxyAPI" {
+		t.Fatalf("providerLabel(CLIProxyAPI) = %q", got)
 	}
 }
 

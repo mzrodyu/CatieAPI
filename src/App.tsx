@@ -1536,10 +1536,10 @@ function PublicHome({
         <div className="home-copy">
           <span className="home-kicker">兼容 OpenAI 格式的网关</span>
           <h1>
-            一个入口
-            <span>管理全部模型</span>
+            CatieAPI
+            <span>轻量 AI 聚合网关</span>
           </h1>
-          <p>统一管理 API Key、模型渠道、额度与调用日志。保持 OpenAI 接口兼容，同时让日常运维更清楚。</p>
+          <p>面向个人用户和团队的模型接入层。把 API Key、额度、模型渠道和调用日志放在一个清爽控制台里，保持轻量，也便于排障。</p>
           <div className="home-cta">
             <button className="primary-button" onClick={enterConsole}>
               进入控制台
@@ -1548,48 +1548,57 @@ function PublicHome({
               了解功能
             </a>
           </div>
-          <div className="integration-row home-status-row" aria-label="网关能力概览">
-            <span>已就绪</span>
+          <div className="integration-row" aria-label="网关能力概览">
+            <span>网关能力</span>
             <div>
-              <span>OpenAI 格式兼容</span>
-              <span>模型路由</span>
+              <span>OpenAI 兼容接口</span>
+              <span>额度控制</span>
               <span>调用审计</span>
             </div>
           </div>
         </div>
 
-        <div className="gateway-terminal home-gateway-card" aria-label="CatieAPI 网关状态">
+        <div className="gateway-terminal" aria-label="CatieAPI 终端请求示意">
           <div className="terminal-titlebar">
             <div className="terminal-dots" aria-hidden="true">
               <span />
               <span />
               <span />
             </div>
-            <strong>网关状态</strong>
+            <strong>CatieAPI Terminal</strong>
             <div className="terminal-status">
               <span className="pulse-dot" />
-              <strong>运行中</strong>
+              <strong>Online</strong>
             </div>
           </div>
           <div className="terminal-endpoint">
             <span>POST</span>
-            <strong>统一调用入口</strong>
+            <strong>/v1/chat/completions</strong>
           </div>
           <div className="terminal-body">
             <div className="terminal-block">
-              <span>API 地址</span>
-              <pre>{`POST /v1/chat/completions
-Authorization: Bearer cat_...`}</pre>
+              <span>REQUEST</span>
+              <pre>{`curl https://api.catie.local/v1/chat/completions \\
+  -H "Authorization: Bearer cat_..." \\
+  -d '{
+    "model": "catie-fast",
+    "messages": [{ "role": "user", "content": "ping" }]
+  }'`}</pre>
             </div>
             <div className="terminal-route">
-              <div><span>认证</span><strong>已启用</strong></div>
-              <div><span>额度</span><strong>实时校验</strong></div>
-              <div><span>路由</span><strong>自动选择</strong></div>
-              <div><span>日志</span><strong>完整记录</strong></div>
+              <div><span>auth</span><strong>pass</strong></div>
+              <div><span>quota</span><strong>ok</strong></div>
+              <div><span>route</span><strong>catie-fast</strong></div>
+              <div><span>latency</span><strong>186ms</strong></div>
             </div>
             <div className="terminal-block response">
-              <span>下一步</span>
-              <pre>进入控制台，添加渠道并创建 API Key。</pre>
+              <span>RESPONSE</span>
+              <pre>{`{
+  "status": 200,
+  "model": "catie-fast",
+  "usage": { "total_tokens": 27 },
+  "message": "request routed"
+}`}</pre>
             </div>
           </div>
         </div>
@@ -2477,6 +2486,7 @@ function DrawingView({
   const [busy, setBusy] = useState("");
   const [accountVisibleCounts, setAccountVisibleCounts] = useState<Record<string, number>>({});
   const [oauthChannelId, setOAuthChannelId] = useState("");
+  const [authSessionChannelId, setAuthSessionChannelId] = useState("");
   const defaultVisibleAccounts = 24;
   const accountBatchSize = 48;
 
@@ -2581,6 +2591,9 @@ function DrawingView({
                       <div className="manual-add-actions">
                         <button className="secondary-button" onClick={() => setOAuthChannelId(channel.id)} disabled={busy !== ""}>
                           OAuth 授权（接码）
+                        </button>
+                        <button className="secondary-button" onClick={() => setAuthSessionChannelId(channel.id)} disabled={busy !== ""}>
+                          填写 authsession
                         </button>
                         <label className="secondary-button">
                           {busy === `import:${channel.id}` ? "导入中" : "导入 JSON / ZIP"}
@@ -2687,8 +2700,35 @@ function DrawingView({
             onClose={() => setOAuthChannelId("")}
           />
         )}
+        {authSessionChannelId && (
+          <AuthSessionModal
+            onImport={async (token) => {
+              await importFile(authSessionChannelId, new File([JSON.stringify([{ sessionToken: token }])], "authsession.json", { type: "application/json" }));
+              setAuthSessionChannelId("");
+            }}
+            onClose={() => setAuthSessionChannelId("")}
+          />
+        )}
       </Panel>
   );
+}
+
+function AuthSessionModal({ onImport, onClose }: { onImport: (token: string) => Promise<void>; onClose: () => void }) {
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit() {
+    if (!token.trim()) { setError("请粘贴 authsession"); return; }
+    setBusy(true); setError("");
+    try { await onImport(token.trim()); } catch (err) { setError(err instanceof Error ? err.message : "导入失败"); } finally { setBusy(false); }
+  }
+  return <div className="modal-backdrop" onClick={onClose}><div className="modal-card" onClick={(event) => event.stopPropagation()}>
+    <div className="modal-head"><strong>添加 authsession</strong><button type="button" className="icon-button" onClick={onClose}>×</button></div>
+    <p className="muted-inline">将作为单个网页会话账号导入。仅粘贴 token 本身，不要粘贴 Cookie 名称或 JSON。</p>
+    <label className="authsession-field"><span>authsession</span><textarea autoFocus value={token} onChange={(event) => setToken(event.target.value)} placeholder="eyJhbGci..." /></label>
+    {error && <div className="form-error">{error}</div>}
+    <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={busy} onClick={submit}>{busy ? "导入中" : "导入账号"}</button></div>
+  </div></div>;
 }
 
 function OpenAIOAuthModal({
@@ -3361,7 +3401,7 @@ function LogsView({ logs, onCopy }: { logs: RequestLog[]; onCopy: (value: string
         </div>
         <span className="muted-inline">{loading ? "加载中" : `共 ${total} 条`}</span>
       </div>
-      <div className="logs-layout">
+      <div className={selected ? "logs-layout has-detail" : "logs-layout"}>
         <div className="table">
             <div className="table-head logs-table">
               <span>请求</span>
@@ -3392,6 +3432,7 @@ function LogsView({ logs, onCopy }: { logs: RequestLog[]; onCopy: (value: string
             ))}
             {!loading && items.length === 0 && <Empty text={query || status !== "all" ? "没有匹配的日志" : "暂无调用日志"} />}
         </div>
+        {selected && <LogDetail log={selected} loading={detailLoading} onCopy={onCopy} />}
       </div>
       {totalPages > 1 && (
         <div className="pagination-bar">
@@ -3400,7 +3441,6 @@ function LogsView({ logs, onCopy }: { logs: RequestLog[]; onCopy: (value: string
           <button className="secondary-button" disabled={page >= totalPages || loading} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>下一页</button>
         </div>
       )}
-      {selected && <LogDetail log={selected} loading={detailLoading} onCopy={onCopy} />}
     </Panel>
   );
 }
