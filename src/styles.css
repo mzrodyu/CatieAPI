@@ -300,8 +300,9 @@ h3 {
 .primary-button {
   padding: 0 18px;
   color: #fff;
-  background: var(--blue);
+  background: linear-gradient(135deg, #1683ff, #0071e3);
   font-weight: 700;
+  box-shadow: 0 5px 14px color-mix(in srgb, var(--blue) 24%, transparent);
 }
 
 .secondary-button {
@@ -4058,6 +4059,25 @@ button.table-row:hover {
   }
 }
 
+.primary-button,
+.secondary-button,
+.danger-button,
+.icon-button,
+.theme-toggle {
+  transition: transform 160ms ease, background 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.primary-button:hover:not(:disabled) {
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--blue) 32%, transparent);
+  transform: translateY(-1px);
+}
+
+.secondary-button:hover:not(:disabled),
+.icon-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--blue) 9%, var(--surface-solid));
+  border-color: color-mix(in srgb, var(--blue) 18%, var(--hairline));
+}
+
 /* Channel overview: keep operational information visible before editing. */
 .channel-page-intro {
   display: flex;
@@ -4286,6 +4306,64 @@ button.table-row:hover {
 
 .channel-more-actions label { cursor: pointer; }
 .channel-more-actions input { display: none; }
+
+/* Channel actions are intentionally quiet: save is the only filled action. */
+.channel-card-actions {
+  gap: 4px;
+}
+
+.channel-card-actions > .secondary-button,
+.channel-card-actions .channel-more-actions > summary,
+.channel-model-actions .secondary-button {
+  min-height: 34px;
+  padding-inline: 10px;
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.channel-card-actions > .secondary-button:hover:not(:disabled),
+.channel-card-actions .channel-more-actions > summary:hover,
+.channel-model-actions .secondary-button:hover:not(:disabled) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--blue) 9%, var(--group));
+  border-color: transparent;
+}
+
+.channel-card-actions > .primary-button {
+  min-height: 36px;
+  padding-inline: 15px;
+}
+
+.channel-more-actions > summary {
+  line-height: 34px;
+}
+
+.channel-more-actions > div {
+  padding: 6px;
+  border-radius: 14px;
+}
+
+.channel-more-actions > div .secondary-button,
+.channel-more-actions > div .danger-button {
+  justify-content: flex-start;
+  min-height: 34px;
+  padding-inline: 10px;
+  background: transparent;
+  border-color: transparent;
+  border-radius: 9px;
+}
+
+.channel-more-actions > div .secondary-button:hover:not(:disabled) {
+  background: var(--group);
+  border-color: transparent;
+}
+
+.channel-more-actions > div .danger-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--red) 10%, var(--surface-solid));
+  border-color: transparent;
+}
 
 @media (max-width: 780px) {
   .channel-page-intro { align-items: flex-start; flex-direction: column; gap: 14px; }
