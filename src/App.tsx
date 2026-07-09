@@ -2601,7 +2601,7 @@ function DrawingView({
                             <strong>
                               {account.email || account.name || account.accountId || account.id}
                               <span className={`source-tag source-tag-${account.source === "web-login" ? "web" : "manual"}`}>
-                                {account.source === "web-login" ? "网页登录" : account.source === "oauth" ? "OAuth" : "导入"}
+                                {account.source === "web-login" ? "网页登录" : account.source === "web-oauth" ? "网页 OAuth" : account.source === "oauth" ? "Codex OAuth" : "导入"}
                               </span>
                             </strong>
                             <span>{account.lastError || (account.lastCheckedAt ? `上次检测 ${formatDate(account.lastCheckedAt)}` : "未检测")}</span>
@@ -2859,10 +2859,10 @@ function OpenAIOAuthModal({
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-card" onClick={(event) => event.stopPropagation()}>
         <div className="modal-head">
-          <strong>OAuth 授权添加 Codex 账号</strong>
+          <strong>OAuth 授权添加网页账号</strong>
           <button type="button" className="icon-button" onClick={onClose}>×</button>
         </div>
-        <p className="muted-inline">OAuth 授权得到的账号带 refresh_token，可长期自动刷新，不会像纯 token 导入那样过期后画图报 401。</p>
+        <p className="muted-inline">使用 ChatGPT 网页兼容的 OAuth 客户端获取 refresh_token，只调用网页 backend-api，不会走 Codex 接口。</p>
         <ol className="oauth-steps">
           <li>
             <button type="button" className="primary-button" onClick={begin} disabled={busy}>
@@ -2879,7 +2879,7 @@ function OpenAIOAuthModal({
             <label>② 粘贴授权后浏览器跳转的完整回调地址</label>
             <input
               value={callback}
-              placeholder="http://localhost:1455/auth/callback?code=...&state=..."
+              placeholder="https://platform.openai.com/auth/callback?code=...&state=..."
               onChange={(event) => setCallback(event.target.value)}
               disabled={!authorizeUrl || busy}
             />

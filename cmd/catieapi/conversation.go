@@ -55,7 +55,7 @@ func (s *Server) callChatGPTWebImage(call ImageGatewayCall) (gin.H, *ProviderErr
 	}
 	var lastErr *ProviderError
 	for _, account := range accounts {
-		accessToken, err := s.revealSecret(account.AccessToken)
+		accessToken, err := s.resolveChatGPTWebAccessToken(account)
 		if err != nil {
 			lastErr = &ProviderError{Status: http.StatusBadGateway, Code: "upstream_key_unavailable", Message: err.Error(), Type: "api_error"}
 			continue
@@ -75,6 +75,43 @@ func (s *Server) callChatGPTWebImage(call ImageGatewayCall) (gin.H, *ProviderErr
 		return nil, lastErr
 	}
 	return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: "网页图片请求失败", Type: "api_error"}
+}
+
+func (s *Server) resolveChatGPTWebAccessToken(account OpenAIAccount) (string, error) {
+	s.openAIRefreshMu.Lock()
+	defer s.openAIRefreshMu.Unlock()
+
+	s.mu.Lock()
+	for _, channel := range s.state.Channels {
+		for _, stored := range channel.OpenAIAccounts {
+			if stored.ID == account.ID {
+				account = stored
+				break
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	accessToken, err := s.revealSecret(account.AccessToken)
+	if err != nil {
+		return "", err
+	}
+	if !openAIAccountAccessTokenExpiring(accessToken, account.ExpiresAt, 24*time.Hour) || strings.TrimSpace(account.RefreshToken) == "" {
+		return accessToken, nil
+	}
+	refreshToken, err := s.revealSecret(account.RefreshToken)
+	if err != nil {
+		return "", err
+	}
+	refreshed, err := s.refreshOpenAIAccount(refreshToken, account.Source)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(refreshed.AccessToken) == "" {
+		return "", fmt.Errorf("refresh returned empty access_token")
+	}
+	s.persistRefreshedPoolAccount(account.ID, refreshed)
+	return refreshed.AccessToken, nil
 }
 
 func (s *Server) callChatGPTWebImageWithAccount(call ImageGatewayCall, account OpenAIAccount, accessToken string) (gin.H, *ProviderError) {

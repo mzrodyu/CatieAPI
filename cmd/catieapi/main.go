@@ -53,6 +53,10 @@ const (
 	openAIAuthClientID            = "app_EMoamEEZ73f0CkXaXp7hrann"
 	openAIOAuthRedirectURI        = "http://localhost:1455/auth/callback"
 	openAIOAuthScope              = "openid profile email offline_access"
+	openAIWebAuthClientID         = "app_2SKx67EdpoN0G6j64rFvigXD"
+	openAIWebOAuthRedirectURI     = "https://platform.openai.com/auth/callback"
+	openAIWebOAuthAudience        = "https://api.openai.com/v1"
+	openAIWebAuth0Client          = "eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjEuMjEuMCJ9"
 )
 
 var imageJSONKeepaliveInterval = 8 * time.Second
@@ -329,6 +333,7 @@ type QuotaEntry struct {
 
 type Server struct {
 	mu                    sync.Mutex
+	openAIRefreshMu       sync.Mutex
 	state                 AppState
 	dataFile              string
 	databaseURL           string
@@ -2475,11 +2480,10 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 	})
 }
 
-// startOpenAIOAuth begins a ChatGPT OAuth (PKCE) authorization for a channel. It
+// startOpenAIOAuth begins a ChatGPT web-compatible OAuth (PKCE) authorization.
 // generates a PKCE verifier/challenge and state, stores the verifier server-side
 // and returns the authorize URL for the admin to open in a browser. Accounts
-// obtained this way include a refresh token, so they auto-refresh and do not hit
-// the 401 that token-only imports do once the access token expires.
+// This deliberately uses the platform web client rather than the Codex client.
 func (s *Server) startOpenAIOAuth(c *gin.Context) {
 	s.mu.Lock()
 	channel := s.findChannel(c.Param("id"))
@@ -2503,21 +2507,27 @@ func (s *Server) startOpenAIOAuth(c *gin.Context) {
 	s.mu.Unlock()
 
 	params := url.Values{}
+	params.Set("issuer", s.openAIAuthBase)
 	params.Set("response_type", "code")
-	params.Set("client_id", openAIAuthClientID)
-	params.Set("redirect_uri", openAIOAuthRedirectURI)
+	params.Set("response_mode", "query")
+	params.Set("client_id", openAIWebAuthClientID)
+	params.Set("audience", openAIWebOAuthAudience)
+	params.Set("redirect_uri", openAIWebOAuthRedirectURI)
 	params.Set("scope", openAIOAuthScope)
 	params.Set("code_challenge", challenge)
 	params.Set("code_challenge_method", "S256")
-	params.Set("id_token_add_organizations", "true")
-	params.Set("codex_cli_simplified_flow", "true")
+	params.Set("device_id", randomUUID())
+	params.Set("screen_hint", "login_or_signup")
+	params.Set("max_age", "0")
+	params.Set("nonce", randomHex(24))
+	params.Set("auth0Client", openAIWebAuth0Client)
 	params.Set("state", state)
-	authorizeURL := joinURL(s.openAIAuthBase, "oauth/authorize") + "?" + params.Encode()
+	authorizeURL := joinURL(s.openAIAuthBase, "api/accounts/authorize") + "?" + params.Encode()
 
 	c.JSON(http.StatusOK, gin.H{
 		"authorizeUrl": authorizeURL,
 		"state":        state,
-		"redirectUri":  openAIOAuthRedirectURI,
+		"redirectUri":  openAIWebOAuthRedirectURI,
 	})
 }
 
@@ -2617,8 +2627,8 @@ func (s *Server) completeOpenAIOAuth(c *gin.Context) {
 		ExpiresAt:     tokens.ExpiresAt,
 		LastRefresh:   now(),
 		PlanType:      planType,
-		Source:        "oauth",
-		ClientProfile: codexClientProfileForImport("oauth", ""),
+		Source:        "web-oauth",
+		ClientProfile: "chatgpt-web",
 		ImportedAt:    time.Now().UTC().Format(time.RFC3339),
 		Status:        "unchecked",
 	}
@@ -2634,19 +2644,20 @@ func (s *Server) completeOpenAIOAuth(c *gin.Context) {
 // exchangeOpenAIOAuthCode exchanges an authorization code + PKCE verifier for
 // ChatGPT tokens.
 func (s *Server) exchangeOpenAIOAuthCode(code, verifier string) (OpenAIRefreshResult, error) {
-	form := url.Values{}
-	form.Set("grant_type", "authorization_code")
-	form.Set("client_id", openAIAuthClientID)
-	form.Set("code", code)
-	form.Set("redirect_uri", openAIOAuthRedirectURI)
-	form.Set("code_verifier", verifier)
-
-	request, err := http.NewRequest(http.MethodPost, joinURL(s.openAIAuthBase, "oauth/token"), strings.NewReader(form.Encode()))
+	payload, _ := json.Marshal(gin.H{
+		"grant_type": "authorization_code", "client_id": openAIWebAuthClientID,
+		"code": code, "redirect_uri": openAIWebOAuthRedirectURI, "code_verifier": verifier,
+	})
+	request, err := http.NewRequest(http.MethodPost, joinURL(s.openAIAuthBase, "api/accounts/oauth/token"), bytes.NewReader(payload))
 	if err != nil {
 		return OpenAIRefreshResult{}, err
 	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Origin", s.openAIAuthBase)
+	request.Header.Set("Referer", "https://platform.openai.com/")
+	request.Header.Set("Auth0-Client", openAIWebAuth0Client)
+	request.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145.0.0.0 Safari/537.36")
 	response, err := s.httpClient.Do(request)
 	if err != nil {
 		return OpenAIRefreshResult{}, err
@@ -5921,7 +5932,7 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 		}
 	}
 	if openAIAccountAccessExpired(account.ExpiresAt) && strings.TrimSpace(refreshToken) != "" {
-		refreshed, err := s.refreshOpenAIAccount(refreshToken)
+		refreshed, err := s.refreshOpenAIAccount(refreshToken, account.Source)
 		if err == nil && strings.TrimSpace(refreshed.AccessToken) != "" {
 			accessToken = refreshed.AccessToken
 			protectedAccess, err := s.protectSecret(refreshed.AccessToken)
@@ -5955,7 +5966,7 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 			result.Message = "missing access_token and refresh_token"
 			return result
 		}
-		refreshed, err := s.refreshOpenAIAccount(refreshToken)
+		refreshed, err := s.refreshOpenAIAccount(refreshToken, account.Source)
 		if err != nil || strings.TrimSpace(refreshed.AccessToken) == "" {
 			if err != nil {
 				result.Message = "refresh failed: " + err.Error()
@@ -5990,7 +6001,7 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 			result.Message = "access_token expired, missing refresh_token"
 			return result
 		}
-		refreshed, err := s.refreshOpenAIAccount(refreshToken)
+		refreshed, err := s.refreshOpenAIAccount(refreshToken, account.Source)
 		if err != nil || strings.TrimSpace(refreshed.AccessToken) == "" {
 			if err != nil {
 				result.Message = "refresh failed: " + err.Error()
@@ -6617,9 +6628,13 @@ func jwtExpiry(token string) (time.Time, bool) {
 	return time.Unix(claims.Exp, 0).UTC(), true
 }
 
-func (s *Server) refreshOpenAIAccount(refreshToken string) (OpenAIRefreshResult, error) {
+func (s *Server) refreshOpenAIAccount(refreshToken, source string) (OpenAIRefreshResult, error) {
 	form := url.Values{}
-	form.Set("client_id", openAIAuthClientID)
+	clientID := openAIAuthClientID
+	if strings.EqualFold(strings.TrimSpace(source), "web-oauth") {
+		clientID = openAIWebAuthClientID
+	}
+	form.Set("client_id", clientID)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 	form.Set("scope", "openid profile email")
