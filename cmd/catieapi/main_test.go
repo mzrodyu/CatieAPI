@@ -1906,6 +1906,53 @@ func TestImageGenerationsRetryNextOpenAIAccountOnBillingError(t *testing.T) {
 	}
 }
 
+func TestImageGenerationsCPAAccountPrefersDirectImageEndpoint(t *testing.T) {
+	var upstreamPayload map[string]interface{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/codex/images/generations" {
+			t.Fatalf("CPA image path = %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamPayload); err != nil {
+			t.Fatalf("decode CPA image request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":1780000000,"data":[{"b64_json":"cpa-direct-image"}]}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{
+		"PERSISTENCE":      "memory",
+		"PROVIDER_MODE":    "mock",
+		"CHATGPT_API_BASE": upstream.URL + "/backend-api",
+	})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.state.Models = append(server.state.Models, Model{
+		ID: "gpt-image-2", Name: "GPT Image 2", Vendor: "OpenAI", Aliases: []string{"image2"}, Category: "图像", Status: "available",
+	})
+	server.state.Channels = append(server.state.Channels, Channel{
+		ID: "chn_image_cpa", Name: "CPA Image Pool", Provider: "openai", BaseURL: upstream.URL + "/v1", Status: "healthy", Priority: 1, Weight: 100, Models: []string{"gpt-image-2"},
+		OpenAIAccounts: []OpenAIAccount{
+			{ID: "oaiacc_cpa", Email: "cpa@example.com", AccessToken: "cpa-token", Source: "cpa", AccountID: "account-cpa", Status: "healthy"},
+		},
+	})
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/images/generations", `{"model":"gpt-image-2","prompt":"direct CPA image"}`, map[string]string{
+		"Authorization": "Bearer cat_fixture_live_secret",
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("CPA image generation status = %d body = %s", response.Code, response.Body.String())
+	}
+	if upstreamPayload["model"] != "gpt-image-2" {
+		t.Fatalf("unexpected CPA direct image payload = %#v", upstreamPayload)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"b64_json":"cpa-direct-image"`)) {
+		t.Fatalf("CPA direct image response was not proxied: %s", response.Body.String())
+	}
+}
+
 func TestImageGenerationsOpenAIAccountUsesCodexResponsesForGPTImage2(t *testing.T) {
 	var upstreamAuth string
 	var upstreamAccept string

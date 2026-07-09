@@ -4883,6 +4883,18 @@ func (s *Server) streamChatGPTCodexWithAccount(c *gin.Context, call GatewayCall,
 }
 
 func (s *Server) callChatGPTCodexImageWithAccount(call ImageGatewayCall, account OpenAIAccount, accessToken string) (gin.H, *ProviderError) {
+	// Browser auth-session/CPA accounts expose the OpenAI-compatible image
+	// endpoint. Prefer it for image models; keep Responses as a compatibility
+	// fallback for older Codex account profiles.
+	if directModel := chatGPTCodexDirectImageModel(call); directModel != "" && isCodexProxyImportSource(account.Source) {
+		body, providerErr := s.callChatGPTCodexDirectImageWithAccount(call, account, accessToken, directModel)
+		if providerErr == nil {
+			return body, nil
+		}
+		if !shouldFallbackChatGPTCodexDirectImage(providerErr) {
+			return nil, providerErr
+		}
+	}
 	var lastErr *ProviderError
 	for _, mainModel := range chatGPTCodexImageMainModels() {
 		body, providerErr := s.callChatGPTCodexImageResponsesWithAccount(call, account, accessToken, mainModel)
