@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -24,22 +25,294 @@ import (
 // streamed events into the OpenAI chat.completion shape.
 
 const (
-	chatGPTWebConversationPath  = "conversation"
-	chatGPTWebRequirementsPath  = "sentinel/chat-requirements"
-	chatGPTWebUserAgent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
-	chatGPTWebProofRetryBudget  = 500000
-	chatGPTWebDefaultDifficulty = "000032"
-	chatGPTWebProofPrefix       = "gAAAAAB"
+	chatGPTWebConversationPath   = "conversation"
+	chatGPTWebRequirementsPath   = "sentinel/chat-requirements"
+	chatGPTWebUserAgent          = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+	chatGPTWebProofRetryBudget   = 500000
+	chatGPTWebDefaultDifficulty  = "000032"
+	chatGPTWebProofPrefix        = "gAAAAAB"
 	chatGPTWebRequirementsPrefix = "gAAAAAC"
-	chatGPTWebSentinelSDKURL    = "https://chatgpt.com/backend-api/sentinel/sdk.js"
-	chatGPTWebTimeLayout        = "Mon Jan 02 2006 15:04:05"
+	chatGPTWebSentinelSDKURL     = "https://chatgpt.com/backend-api/sentinel/sdk.js"
+	chatGPTWebTimeLayout         = "Mon Jan 02 2006 15:04:05"
 )
+
+func isChatGPTWebImageChannel(channel Channel) bool {
+	base := strings.ToLower(strings.TrimSpace(channel.BaseURL))
+	return channel.WebEndpoint || strings.Contains(base, "chatgpt.com/backend-api") || strings.Contains(base, "chat.openai.com/backend-api")
+}
+
+// callChatGPTWebImage uses the ChatGPT Images web flow. It deliberately does
+// not call the Codex responses endpoint: authsession credentials belong to the
+// web image service and require the prepare/conduit handshake first.
+func (s *Server) callChatGPTWebImage(call ImageGatewayCall) (gin.H, *ProviderError) {
+	if strings.EqualFold(strings.TrimSpace(call.Operation), "edit") {
+		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "web_image_edit_unsupported", Message: "网页图片编辑暂未支持，请先使用文生图", Type: "invalid_request_error"}
+	}
+	accounts := activeOpenAIAccounts(call.Channel.OpenAIAccounts)
+	if len(accounts) == 0 {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_not_configured", Message: "没有可用的网页账号", Type: "api_error"}
+	}
+	var lastErr *ProviderError
+	for _, account := range accounts {
+		accessToken, err := s.revealSecret(account.AccessToken)
+		if err != nil {
+			lastErr = &ProviderError{Status: http.StatusBadGateway, Code: "upstream_key_unavailable", Message: err.Error(), Type: "api_error"}
+			continue
+		}
+		body, providerErr := s.callChatGPTWebImageWithAccount(call, account, accessToken)
+		if providerErr == nil {
+			return body, nil
+		}
+		lastErr = providerErr
+		if providerErr.Status == http.StatusUnauthorized || providerErr.Status == http.StatusForbidden {
+			s.markOpenAIAccountInvalid(call.Channel.ID, account.ID, providerErr.Message)
+			continue
+		}
+		return nil, providerErr
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: "网页图片请求失败", Type: "api_error"}
+}
+
+func (s *Server) callChatGPTWebImageWithAccount(call ImageGatewayCall, account OpenAIAccount, accessToken string) (gin.H, *ProviderError) {
+	config := newChatGPTWebConfig()
+	deviceID := randomUUID()
+	requirements, providerErr := s.fetchChatGPTWebRequirements(accessToken, account, config, deviceID)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+	if requirements.Arkose.Required {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_challenge_required", Message: "网页账号需要额外验证，暂时无法生图", Type: "api_error"}
+	}
+	parentID := randomUUID()
+	messageID := randomUUID()
+	model := "gpt-5-5"
+	preparePayload := chatGPTWebImagePreparePayload(call, model, parentID, messageID)
+	conduitToken, providerErr := s.prepareChatGPTWebImage(accessToken, account, config, deviceID, requirements, preparePayload)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+	generatePayload := chatGPTWebImageGeneratePayload(call, model, parentID, messageID)
+	response, providerErr := s.generateChatGPTWebImage(accessToken, account, config, deviceID, requirements, conduitToken, generatePayload)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+	defer response.Body.Close()
+
+	conversationID, assetPointer, providerErr := parseChatGPTWebImageStream(response.Body)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+	if conversationID == "" || assetPointer == "" {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_no_image_output", Message: "网页接口没有返回图片资产", Type: "api_error"}
+	}
+	imageBytes, providerErr := s.downloadChatGPTWebImage(accessToken, account, config, deviceID, conversationID, assetPointer)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+	return gin.H{"created": unixNow(), "data": []gin.H{{"b64_json": base64.StdEncoding.EncodeToString(imageBytes)}}}, nil
+}
+
+func (s *Server) prepareChatGPTWebImage(accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID string, requirements *chatGPTWebRequirements, payload gin.H) (string, *ProviderError) {
+	return s.postChatGPTWebImageJSON("f/conversation/prepare", accessToken, account, config, deviceID, requirements, "", payload)
+}
+
+func (s *Server) generateChatGPTWebImage(accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID string, requirements *chatGPTWebRequirements, conduitToken string, payload gin.H) (*http.Response, *ProviderError) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "无法编码网页生图请求", Type: "invalid_request_error"}
+	}
+	request, err := http.NewRequest(http.MethodPost, joinURL(s.chatGPTAPIBase, "f/conversation"), bytes.NewReader(body))
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	}
+	s.setChatGPTWebImageHeaders(request, accessToken, account, config, deviceID, requirements, conduitToken, "f/conversation")
+	request.Header.Set("Accept", "text/event-stream")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		content, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+		_ = response.Body.Close()
+		return nil, providerErrorFromUpstream(response.StatusCode, content)
+	}
+	return response, nil
+}
+
+func (s *Server) postChatGPTWebImageJSON(path string, accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID string, requirements *chatGPTWebRequirements, conduitToken string, payload gin.H) (string, *ProviderError) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "无法编码网页生图准备请求", Type: "invalid_request_error"}
+	}
+	request, err := http.NewRequest(http.MethodPost, joinURL(s.chatGPTAPIBase, path), bytes.NewReader(body))
+	if err != nil {
+		return "", &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	}
+	s.setChatGPTWebImageHeaders(request, accessToken, account, config, deviceID, requirements, conduitToken, path)
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return "", &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	defer response.Body.Close()
+	content, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+	if err != nil {
+		return "", &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", providerErrorFromUpstream(response.StatusCode, content)
+	}
+	var result struct {
+		ConduitToken string `json:"conduit_token"`
+	}
+	if err := json.Unmarshal(content, &result); err != nil || strings.TrimSpace(result.ConduitToken) == "" {
+		return "", &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "网页生图准备接口没有返回 conduit_token", Type: "api_error"}
+	}
+	return result.ConduitToken, nil
+}
+
+func (s *Server) setChatGPTWebImageHeaders(request *http.Request, accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID string, requirements *chatGPTWebRequirements, conduitToken, path string) {
+	s.setChatGPTWebHeaders(request, accessToken, account, config, deviceID)
+	setHeaderPreserveCase(request.Header, "X-OpenAI-Target-Path", "/backend-api/"+strings.TrimPrefix(path, "/"))
+	setHeaderPreserveCase(request.Header, "X-OpenAI-Target-Route", "/backend-api/"+strings.TrimPrefix(path, "/"))
+	setHeaderPreserveCase(request.Header, "Oai-Session-Id", randomUUID())
+	setHeaderPreserveCase(request.Header, "Oai-Client-Version", "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad")
+	setHeaderPreserveCase(request.Header, "Oai-Client-Build-Number", "5955942")
+	if requirements != nil {
+		setHeaderPreserveCase(request.Header, "OpenAI-Sentinel-Chat-Requirements-Token", requirements.Token)
+		if requirements.ProofOfWork.Required {
+			proof, _ := solveChatGPTWebProof(requirements.ProofOfWork.Seed, requirements.ProofOfWork.Difficulty, config)
+			setHeaderPreserveCase(request.Header, "OpenAI-Sentinel-Proof-Token", proof)
+		}
+	}
+	if conduitToken != "" {
+		setHeaderPreserveCase(request.Header, "X-Conduit-Token", conduitToken)
+		setHeaderPreserveCase(request.Header, "X-Oai-Turn-Trace-Id", randomUUID())
+	}
+}
+
+func parseChatGPTWebImageStream(reader io.Reader) (conversationID, assetPointer string, providerErr *ProviderError) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 64*1024), 32<<20)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" || data == "[DONE]" || data == `"v1"` {
+			continue
+		}
+		var event interface{}
+		if json.Unmarshal([]byte(data), &event) != nil {
+			continue
+		}
+		extractChatGPTWebImageFields(event, &conversationID, &assetPointer)
+	}
+	if err := scanner.Err(); err != nil {
+		return conversationID, assetPointer, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
+	}
+	return conversationID, assetPointer, nil
+}
+
+func extractChatGPTWebImageFields(value interface{}, conversationID, assetPointer *string) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		if text, ok := typed["conversation_id"].(string); ok && strings.TrimSpace(text) != "" {
+			*conversationID = text
+		}
+		if text, ok := typed["asset_pointer"].(string); ok && strings.HasPrefix(text, "sediment://") {
+			*assetPointer = text
+		}
+		for _, child := range typed {
+			extractChatGPTWebImageFields(child, conversationID, assetPointer)
+		}
+	case []interface{}:
+		for _, child := range typed {
+			extractChatGPTWebImageFields(child, conversationID, assetPointer)
+		}
+	}
+}
+
+func (s *Server) downloadChatGPTWebImage(accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID, conversationID, assetPointer string) ([]byte, *ProviderError) {
+	fileID := strings.TrimPrefix(assetPointer, "sediment://")
+	path := fmt.Sprintf("conversation/%s/attachment/%s/download", url.PathEscape(conversationID), url.PathEscape(fileID))
+	request, err := http.NewRequest(http.MethodGet, joinURL(s.chatGPTAPIBase, path), nil)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	}
+	s.setChatGPTWebHeaders(request, accessToken, account, config, deviceID)
+	request.Header.Set("Accept", "application/json, image/*")
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	defer response.Body.Close()
+	content, err := io.ReadAll(io.LimitReader(response.Body, 64<<20))
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, providerErrorFromUpstream(response.StatusCode, content)
+	}
+	if strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "image/") {
+		return content, nil
+	}
+	var result struct {
+		DownloadURL string `json:"download_url"`
+	}
+	if json.Unmarshal(content, &result) != nil || strings.TrimSpace(result.DownloadURL) == "" {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "网页图片下载接口没有返回 URL", Type: "api_error"}
+	}
+	imageRequest, err := http.NewRequest(http.MethodGet, result.DownloadURL, nil)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	}
+	imageResponse, err := s.httpClient.Do(imageRequest)
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	defer imageResponse.Body.Close()
+	if imageResponse.StatusCode < 200 || imageResponse.StatusCode >= 300 {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_image_download_failed", Message: imageResponse.Status, Type: "api_error"}
+	}
+	imageBytes, err := io.ReadAll(io.LimitReader(imageResponse.Body, 64<<20))
+	if err != nil {
+		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_read_error", Message: err.Error(), Type: "api_error"}
+	}
+	return imageBytes, nil
+}
+
+func chatGPTWebImagePreparePayload(call ImageGatewayCall, model, parentID, messageID string) gin.H {
+	return gin.H{
+		"action": "next", "parent_message_id": parentID, "model": model,
+		"client_prepare_state": "success", "timezone_offset_min": 480, "timezone": "Asia/Shanghai",
+		"conversation_mode": gin.H{"kind": "primary_assistant"}, "system_hints": []string{"picture_v2"},
+		"partial_query":      gin.H{"id": messageID, "author": gin.H{"role": "user"}, "content": gin.H{"content_type": "text", "parts": []string{call.Body.Prompt}}},
+		"supports_buffering": true, "supported_encodings": []string{"v1"}, "client_contextual_info": gin.H{"app_name": "chatgpt.com"},
+	}
+}
+
+func chatGPTWebImageGeneratePayload(call ImageGatewayCall, model, parentID, messageID string) gin.H {
+	return gin.H{
+		"action": "next", "parent_message_id": parentID, "model": model,
+		"client_prepare_state": "sent", "timezone_offset_min": 480, "timezone": "Asia/Shanghai",
+		"conversation_mode": gin.H{"kind": "primary_assistant"}, "system_hints": []string{"picture_v2"},
+		"messages":           []gin.H{{"id": messageID, "author": gin.H{"role": "user"}, "create_time": float64(time.Now().Unix()), "content": gin.H{"content_type": "text", "parts": []string{call.Body.Prompt}}, "metadata": gin.H{"system_hints": []string{"picture_v2"}, "serialization_metadata": gin.H{"custom_symbol_offsets": []int{}}}}},
+		"supports_buffering": true, "supported_encodings": []string{"v1"}, "client_contextual_info": gin.H{"is_dark_mode": false, "page_height": 1072, "page_width": 1724, "pixel_ratio": 1.2, "screen_height": 1440, "screen_width": 2560, "app_name": "chatgpt.com"}, "force_parallel_switch": "auto",
+	}
+}
 
 // chatGPTWebRequirements is the response from the chat-requirements endpoint.
 type chatGPTWebRequirements struct {
-	Token         string `json:"token"`
-	Persona       string `json:"persona"`
-	Arkose        struct {
+	Token   string `json:"token"`
+	Persona string `json:"persona"`
+	Arkose  struct {
 		Required bool   `json:"required"`
 		DX       string `json:"dx"`
 	} `json:"arkose"`
@@ -240,15 +513,15 @@ func buildChatGPTWebConversationPayload(call GatewayCall, stream bool) ([]byte, 
 		})
 	}
 	payload := gin.H{
-		"action":                       "next",
-		"messages":                     messages,
-		"parent_message_id":            randomUUID(),
-		"model":                        chatGPTWebModelID(call.Model.ID),
-		"timezone_offset_min":          0,
-		"suggestions":                  []string{},
+		"action":                        "next",
+		"messages":                      messages,
+		"parent_message_id":             randomUUID(),
+		"model":                         chatGPTWebModelID(call.Model.ID),
+		"timezone_offset_min":           0,
+		"suggestions":                   []string{},
 		"history_and_training_disabled": true,
-		"conversation_mode":            gin.H{"kind": "primary_assistant"},
-		"websocket_request_id":         randomUUID(),
+		"conversation_mode":             gin.H{"kind": "primary_assistant"},
+		"websocket_request_id":          randomUUID(),
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

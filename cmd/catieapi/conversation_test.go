@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -41,5 +42,18 @@ func TestChatGPTWebConfigShape(t *testing.T) {
 	}
 	if len(config) != 18 {
 		t.Fatalf("expected 18 slots, got %d", len(config))
+	}
+}
+
+func TestChatGPTWebImageStreamExtractsAssetPointer(t *testing.T) {
+	stream := "data: \"v1\"\n\n" +
+		"data: {\"p\":\"\",\"o\":\"add\",\"v\":{\"conversation_id\":\"conv-1\",\"message\":{\"content\":{\"content_type\":\"multimodal_text\",\"parts\":[{\"content_type\":\"image_asset_pointer\",\"asset_pointer\":\"sediment://file_1\"}]}}}}\n\n" +
+		"data: [DONE]\n\n"
+	conversationID, assetPointer, providerErr := parseChatGPTWebImageStream(bytes.NewBufferString(stream))
+	if providerErr != nil {
+		t.Fatalf("image stream parse failed: %v", providerErr)
+	}
+	if conversationID != "conv-1" || assetPointer != "sediment://file_1" {
+		t.Fatalf("unexpected image stream fields: conversation=%q asset=%q", conversationID, assetPointer)
 	}
 }

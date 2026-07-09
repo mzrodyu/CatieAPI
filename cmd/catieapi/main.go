@@ -4535,6 +4535,9 @@ func (s *Server) callOpenAICompatibleJSON(channel Channel, requestID, operation 
 }
 
 func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *ProviderError) {
+	if isChatGPTWebImageChannel(call.Channel) {
+		return s.callChatGPTWebImage(call)
+	}
 	if len(call.Channel.OpenAIAccounts) > 0 {
 		var lastErr *ProviderError
 		accounts := activeOpenAIAccounts(call.Channel.OpenAIAccounts)
