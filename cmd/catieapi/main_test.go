@@ -1970,7 +1970,7 @@ func TestImageGenerationsOpenAIAccountUsesCodexResponsesForGPTImage2(t *testing.
 
 func TestChatGPTImageModelOrderUsesFullCodexModelForCPA(t *testing.T) {
 	models := chatGPTCodexImageMainModelsForAccount(OpenAIAccount{Source: "cpa"})
-	if !reflect.DeepEqual(models, []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini"}) {
+	if !reflect.DeepEqual(models, []string{"gpt-5.4", "gpt-5.5", "gpt-5.4-mini"}) {
 		t.Fatalf("unexpected CPA Codex image model order: %#v", models)
 	}
 }

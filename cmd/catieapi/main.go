@@ -4890,7 +4890,12 @@ func (s *Server) callChatGPTCodexImageWithAccount(call ImageGatewayCall, account
 			return body, nil
 		}
 		lastErr = providerErr
-		if !shouldRetryChatGPTCodexImageMainModel(providerErr) {
+		shouldRetryModel := shouldRetryChatGPTCodexImageMainModel(providerErr)
+		if isCodexProxyImportSource(account.Source) &&
+			(providerErr.Status == http.StatusUnauthorized || providerErr.Status == http.StatusForbidden) {
+			shouldRetryModel = true
+		}
+		if !shouldRetryModel {
 			return nil, providerErr
 		}
 	}
@@ -4946,7 +4951,7 @@ func chatGPTCodexImageMainModelsForAccount(account OpenAIAccount) []string {
 		// ChatGPT auth-session accounts use the Responses image tool. The
 		// subscription transport accepts the full Codex models here; the image
 		// model remains gpt-image-2 in the tool payload.
-		return []string{"gpt-5.5", "gpt-5.4", chatGPTCodexImageModel}
+		return []string{"gpt-5.4", "gpt-5.5", chatGPTCodexImageModel}
 	}
 	return chatGPTCodexImageMainModels()
 }
