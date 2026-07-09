@@ -2395,16 +2395,18 @@ function ModelCompactRow({
       </div>
       <div className="model-row-actions">
         <Badge tone={model.status}>{statusLabel(model.status)}</Badge>
+        {model.recommended && <span className="model-recommended-mark">推荐</span>}
         <button className="icon-button" title="复制模型 ID" onClick={() => onCopy(model.id, "模型 ID 已复制")}>
           <Icon name="copy" />
         </button>
-        <button className="secondary-button compact-button" type="button" onClick={() => onUpdate(model.id, { recommended: !model.recommended })}>
-          {model.recommended ? "取消推荐" : "推荐"}
-        </button>
-        <button className="secondary-button compact-button" type="button" onClick={() => onUpdate(model.id, { status: disabled ? "available" : "disabled" })}>
-          {disabled ? "启用" : "停用"}
-        </button>
-        <button className="danger-button compact-button" type="button" onClick={() => onDelete(model.id)}>删除</button>
+        <details className="model-row-menu">
+          <summary aria-label="模型操作">•••</summary>
+          <div>
+            <button type="button" onClick={() => onUpdate(model.id, { recommended: !model.recommended })}>{model.recommended ? "取消推荐" : "设为推荐"}</button>
+            <button type="button" onClick={() => onUpdate(model.id, { status: disabled ? "available" : "disabled" })}>{disabled ? "启用模型" : "停用模型"}</button>
+            <button className="is-danger" type="button" onClick={() => onDelete(model.id)}>删除模型</button>
+          </div>
+        </details>
       </div>
     </article>
   );
@@ -2992,6 +2994,13 @@ function ChannelEditor({
     manual: "手动",
     synced: "上游同步"
   }[modelSource];
+  const selectedStreamMode = streamModeOptions.find((option) => option.value === streamMode) || streamModeOptions[0];
+  const streamModeTitle: Record<Channel["streamMode"], string> = {
+    auto: "自动处理（推荐）",
+    real: "强制流式",
+    fake: "兼容流式",
+    disabled: "关闭流式"
+  };
 
   useEffect(() => {
     setName(channel.name);
@@ -3130,10 +3139,24 @@ function ChannelEditor({
           </select>
         </label>
         <label className="channel-select-field">
-          <span>流式处理</span>
-          <select value={streamMode} onChange={(event) => setStreamMode(event.target.value as Channel["streamMode"])}>
-            {streamModeOptions.map((option) => <option key={option.value} value={option.value}>{option.label} - {option.description}</option>)}
-          </select>
+          <span>响应方式</span>
+          <details className="channel-choice-menu">
+            <summary>
+              <span>{streamModeTitle[selectedStreamMode.value]}</span>
+              <small>{selectedStreamMode.description}</small>
+            </summary>
+            <div role="listbox" aria-label="响应方式">
+              {streamModeOptions.map((option) => (
+                <button key={option.value} type="button" className={streamMode === option.value ? "selected" : ""} onClick={(event) => {
+                  setStreamMode(option.value);
+                  event.currentTarget.closest("details")?.removeAttribute("open");
+                }}>
+                  <strong>{streamModeTitle[option.value]}</strong>
+                  <span>{option.description}</span>
+                </button>
+              ))}
+            </div>
+          </details>
         </label>
       </div>
 
