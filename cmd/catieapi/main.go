@@ -53,10 +53,6 @@ const (
 	openAIAuthClientID            = "app_EMoamEEZ73f0CkXaXp7hrann"
 	openAIOAuthRedirectURI        = "http://localhost:1455/auth/callback"
 	openAIOAuthScope              = "openid profile email offline_access"
-	openAIWebAuthClientID         = "app_2SKx67EdpoN0G6j64rFvigXD"
-	openAIWebOAuthRedirectURI     = "https://platform.openai.com/auth/callback"
-	openAIWebOAuthAudience        = "https://api.openai.com/v1"
-	openAIWebAuth0Client          = "eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjEuMjEuMCJ9"
 )
 
 var imageJSONKeepaliveInterval = 8 * time.Second
@@ -268,6 +264,7 @@ type ImportedOpenAIAccount struct {
 	Email         string
 	AccessToken   string
 	RefreshToken  string
+	SessionToken  string
 	IDToken       string
 	AccountID     string
 	UserID        string
@@ -569,38 +566,41 @@ func main() {
 // exactly as the browser would. The session cookie is long-lived, so this keeps
 // web-login accounts alive without an OAuth refresh token.
 func fetchChatGPTAccessTokenViaSessionCookie(sessionToken string) (accessToken string, expiresAt string, err error) {
-	req, err := http.NewRequest(http.MethodGet, "https://chatgpt.com/api/auth/session", nil)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0")
-	req.AddCookie(&http.Cookie{Name: "__Secure-next-auth.session-token", Value: sessionToken})
-
 	client := &http.Client{Timeout: 30 * time.Second}
-	res, err := client.Do(req)
-	if err != nil {
-		return "", "", err
+	var lastErr error
+	for _, cookieName := range []string{"__Secure-next-auth.session-token", "__Secure-authjs.session-token"} {
+		req, requestErr := http.NewRequest(http.MethodGet, "https://chatgpt.com/api/auth/session", nil)
+		if requestErr != nil {
+			return "", "", requestErr
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "Mozilla/5.0")
+		req.AddCookie(&http.Cookie{Name: cookieName, Value: sessionToken})
+		res, requestErr := client.Do(req)
+		if requestErr != nil {
+			lastErr = requestErr
+			continue
+		}
+		content, readErr := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		_ = res.Body.Close()
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			lastErr = fmt.Errorf("session endpoint returned HTTP %d", res.StatusCode)
+			continue
+		}
+		var body struct {
+			AccessToken string `json:"accessToken"`
+			Expires     string `json:"expires"`
+		}
+		if json.Unmarshal(content, &body) == nil && strings.TrimSpace(body.AccessToken) != "" {
+			return strings.TrimSpace(body.AccessToken), strings.TrimSpace(body.Expires), nil
+		}
+		lastErr = fmt.Errorf("session endpoint returned no accessToken")
 	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return "", "", fmt.Errorf("session endpoint returned HTTP %d", res.StatusCode)
-	}
-	content, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	if err != nil {
-		return "", "", err
-	}
-	var body struct {
-		AccessToken string `json:"accessToken"`
-		Expires     string `json:"expires"`
-	}
-	if err := json.Unmarshal(content, &body); err != nil {
-		return "", "", err
-	}
-	if strings.TrimSpace(body.AccessToken) == "" {
-		return "", "", fmt.Errorf("session endpoint returned no accessToken")
-	}
-	return strings.TrimSpace(body.AccessToken), strings.TrimSpace(body.Expires), nil
+	return "", "", lastErr
 }
 
 // persistRefreshedPoolAccount writes refreshed tokens back into the matching
@@ -2420,6 +2420,9 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 		}
 	}
 	for _, account := range accounts {
+		if strings.TrimSpace(account.AccessToken) == "" && strings.TrimSpace(account.SessionToken) != "" {
+			account.AccessToken, account.ExpiresAt, _ = fetchChatGPTAccessTokenViaSessionCookie(account.SessionToken)
+		}
 		if strings.TrimSpace(account.AccessToken) == "" {
 			invalid++
 			continue
@@ -2438,6 +2441,15 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 				return
 			}
 		}
+		protectedSession := ""
+		if strings.TrimSpace(account.SessionToken) != "" {
+			var err error
+			protectedSession, err = s.protectSecret(strings.TrimSpace(account.SessionToken))
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "Failed to protect session token"}})
+				return
+			}
+		}
 		protectedID := ""
 		if strings.TrimSpace(account.IDToken) != "" {
 			var err error
@@ -2453,6 +2465,7 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 			Email:         account.Email,
 			AccessToken:   protectedKey,
 			RefreshToken:  protectedRefresh,
+			SessionToken:  protectedSession,
 			IDToken:       protectedID,
 			AccountID:     account.AccountID,
 			UserID:        account.UserID,
@@ -2480,10 +2493,10 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 	})
 }
 
-// startOpenAIOAuth begins a ChatGPT web-compatible OAuth (PKCE) authorization.
+// startOpenAIOAuth begins a ChatGPT OAuth (PKCE) authorization for a channel. It
 // generates a PKCE verifier/challenge and state, stores the verifier server-side
 // and returns the authorize URL for the admin to open in a browser. Accounts
-// This deliberately uses the platform web client rather than the Codex client.
+// obtained this way include a refresh token for Codex-compatible accounts.
 func (s *Server) startOpenAIOAuth(c *gin.Context) {
 	s.mu.Lock()
 	channel := s.findChannel(c.Param("id"))
@@ -2507,27 +2520,21 @@ func (s *Server) startOpenAIOAuth(c *gin.Context) {
 	s.mu.Unlock()
 
 	params := url.Values{}
-	params.Set("issuer", s.openAIAuthBase)
 	params.Set("response_type", "code")
-	params.Set("response_mode", "query")
-	params.Set("client_id", openAIWebAuthClientID)
-	params.Set("audience", openAIWebOAuthAudience)
-	params.Set("redirect_uri", openAIWebOAuthRedirectURI)
+	params.Set("client_id", openAIAuthClientID)
+	params.Set("redirect_uri", openAIOAuthRedirectURI)
 	params.Set("scope", openAIOAuthScope)
 	params.Set("code_challenge", challenge)
 	params.Set("code_challenge_method", "S256")
-	params.Set("device_id", randomUUID())
-	params.Set("screen_hint", "login_or_signup")
-	params.Set("max_age", "0")
-	params.Set("nonce", randomHex(24))
-	params.Set("auth0Client", openAIWebAuth0Client)
+	params.Set("id_token_add_organizations", "true")
+	params.Set("codex_cli_simplified_flow", "true")
 	params.Set("state", state)
-	authorizeURL := joinURL(s.openAIAuthBase, "api/accounts/authorize") + "?" + params.Encode()
+	authorizeURL := joinURL(s.openAIAuthBase, "oauth/authorize") + "?" + params.Encode()
 
 	c.JSON(http.StatusOK, gin.H{
 		"authorizeUrl": authorizeURL,
 		"state":        state,
-		"redirectUri":  openAIWebOAuthRedirectURI,
+		"redirectUri":  openAIOAuthRedirectURI,
 	})
 }
 
@@ -2627,8 +2634,8 @@ func (s *Server) completeOpenAIOAuth(c *gin.Context) {
 		ExpiresAt:     tokens.ExpiresAt,
 		LastRefresh:   now(),
 		PlanType:      planType,
-		Source:        "web-oauth",
-		ClientProfile: "chatgpt-web",
+		Source:        "oauth",
+		ClientProfile: codexClientProfileForImport("oauth", ""),
 		ImportedAt:    time.Now().UTC().Format(time.RFC3339),
 		Status:        "unchecked",
 	}
@@ -2644,20 +2651,18 @@ func (s *Server) completeOpenAIOAuth(c *gin.Context) {
 // exchangeOpenAIOAuthCode exchanges an authorization code + PKCE verifier for
 // ChatGPT tokens.
 func (s *Server) exchangeOpenAIOAuthCode(code, verifier string) (OpenAIRefreshResult, error) {
-	payload, _ := json.Marshal(gin.H{
-		"grant_type": "authorization_code", "client_id": openAIWebAuthClientID,
-		"code": code, "redirect_uri": openAIWebOAuthRedirectURI, "code_verifier": verifier,
-	})
-	request, err := http.NewRequest(http.MethodPost, joinURL(s.openAIAuthBase, "api/accounts/oauth/token"), bytes.NewReader(payload))
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("client_id", openAIAuthClientID)
+	form.Set("code", code)
+	form.Set("redirect_uri", openAIOAuthRedirectURI)
+	form.Set("code_verifier", verifier)
+	request, err := http.NewRequest(http.MethodPost, joinURL(s.openAIAuthBase, "oauth/token"), strings.NewReader(form.Encode()))
 	if err != nil {
 		return OpenAIRefreshResult{}, err
 	}
-	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("Origin", s.openAIAuthBase)
-	request.Header.Set("Referer", "https://platform.openai.com/")
-	request.Header.Set("Auth0-Client", openAIWebAuth0Client)
-	request.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145.0.0.0 Safari/537.36")
 	response, err := s.httpClient.Do(request)
 	if err != nil {
 		return OpenAIRefreshResult{}, err
@@ -5932,7 +5937,7 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 		}
 	}
 	if openAIAccountAccessExpired(account.ExpiresAt) && strings.TrimSpace(refreshToken) != "" {
-		refreshed, err := s.refreshOpenAIAccount(refreshToken, account.Source)
+		refreshed, err := s.refreshOpenAIAccount(refreshToken)
 		if err == nil && strings.TrimSpace(refreshed.AccessToken) != "" {
 			accessToken = refreshed.AccessToken
 			protectedAccess, err := s.protectSecret(refreshed.AccessToken)
@@ -5966,7 +5971,7 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 			result.Message = "missing access_token and refresh_token"
 			return result
 		}
-		refreshed, err := s.refreshOpenAIAccount(refreshToken, account.Source)
+		refreshed, err := s.refreshOpenAIAccount(refreshToken)
 		if err != nil || strings.TrimSpace(refreshed.AccessToken) == "" {
 			if err != nil {
 				result.Message = "refresh failed: " + err.Error()
@@ -6001,7 +6006,7 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 			result.Message = "access_token expired, missing refresh_token"
 			return result
 		}
-		refreshed, err := s.refreshOpenAIAccount(refreshToken, account.Source)
+		refreshed, err := s.refreshOpenAIAccount(refreshToken)
 		if err != nil || strings.TrimSpace(refreshed.AccessToken) == "" {
 			if err != nil {
 				result.Message = "refresh failed: " + err.Error()
@@ -6628,13 +6633,9 @@ func jwtExpiry(token string) (time.Time, bool) {
 	return time.Unix(claims.Exp, 0).UTC(), true
 }
 
-func (s *Server) refreshOpenAIAccount(refreshToken, source string) (OpenAIRefreshResult, error) {
+func (s *Server) refreshOpenAIAccount(refreshToken string) (OpenAIRefreshResult, error) {
 	form := url.Values{}
-	clientID := openAIAuthClientID
-	if strings.EqualFold(strings.TrimSpace(source), "web-oauth") {
-		clientID = openAIWebAuthClientID
-	}
-	form.Set("client_id", clientID)
+	form.Set("client_id", openAIAuthClientID)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 	form.Set("scope", "openid profile email")
@@ -7489,6 +7490,11 @@ func parseOpenAIAccountImport(payload map[string]interface{}) []ImportedOpenAIAc
 					stringFromMapAnyKeys(tokens, "refresh_token", "refreshToken", "chatgpt_refresh_token"),
 					stringFromMapAnyKeys(item, "refresh_token", "refreshToken", "chatgpt_refresh_token"),
 				),
+				SessionToken: firstNonEmptyString(
+					stringFromMapAnyKeys(credentials, "session_token", "sessionToken"),
+					stringFromMapAnyKeys(tokens, "session_token", "sessionToken"),
+					stringFromMapAnyKeys(item, "session_token", "sessionToken"),
+				),
 				IDToken: firstNonEmptyString(
 					stringFromMapAnyKeys(credentials, "id_token", "idToken"),
 					stringFromMapAnyKeys(tokens, "id_token", "idToken"),
@@ -7536,6 +7542,7 @@ func parseOpenAIAccountImport(payload map[string]interface{}) []ImportedOpenAIAc
 	}
 	if stringFromMapAnyKeys(payload, "access_token", "accessToken") != "" ||
 		stringFromMapAnyKeys(payload, "refresh_token", "refreshToken", "chatgpt_refresh_token") != "" ||
+		stringFromMapAnyKeys(payload, "session_token", "sessionToken") != "" ||
 		stringFromMapAnyKeys(payload, "id_token", "idToken") != "" {
 		accountInfo, _ := firstMapFromAnyKeys(payload, "account", "accountInfo")
 		userInfo, _ := firstMapFromAnyKeys(payload, "user", "userInfo")
@@ -7544,6 +7551,7 @@ func parseOpenAIAccountImport(payload map[string]interface{}) []ImportedOpenAIAc
 			Email:         firstNonEmptyString(stringFromMap(payload, "email"), stringFromMap(userInfo, "email")),
 			AccessToken:   stringFromMapAnyKeys(payload, "access_token", "accessToken"),
 			RefreshToken:  stringFromMapAnyKeys(payload, "refresh_token", "refreshToken", "chatgpt_refresh_token"),
+			SessionToken:  stringFromMapAnyKeys(payload, "session_token", "sessionToken"),
 			IDToken:       stringFromMapAnyKeys(payload, "id_token", "idToken"),
 			AccountID:     firstNonEmptyString(stringFromMapAnyKeys(payload, "account_id", "accountId", "chatgpt_account_id"), stringFromMapAnyKeys(accountInfo, "id", "account_id", "accountId")),
 			UserID:        firstNonEmptyString(stringFromMapAnyKeys(payload, "chatgpt_user_id", "user_id", "userId"), stringFromMapAnyKeys(userInfo, "id", "user_id", "userId")),

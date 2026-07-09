@@ -92,6 +92,18 @@ func (s *Server) resolveChatGPTWebAccessToken(account OpenAIAccount) (string, er
 	}
 	s.mu.Unlock()
 
+	if strings.TrimSpace(account.SessionToken) != "" {
+		sessionToken, err := s.revealSecret(account.SessionToken)
+		if err != nil {
+			return "", err
+		}
+		accessToken, expiresAt, err := fetchChatGPTAccessTokenViaSessionCookie(sessionToken)
+		if err == nil && strings.TrimSpace(accessToken) != "" {
+			s.persistRefreshedPoolAccount(account.ID, OpenAIRefreshResult{AccessToken: accessToken, ExpiresAt: expiresAt})
+			return accessToken, nil
+		}
+	}
+
 	accessToken, err := s.revealSecret(account.AccessToken)
 	if err != nil {
 		return "", err
@@ -103,7 +115,7 @@ func (s *Server) resolveChatGPTWebAccessToken(account OpenAIAccount) (string, er
 	if err != nil {
 		return "", err
 	}
-	refreshed, err := s.refreshOpenAIAccount(refreshToken, account.Source)
+	refreshed, err := s.refreshOpenAIAccount(refreshToken)
 	if err != nil {
 		return "", err
 	}

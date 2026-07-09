@@ -2542,8 +2542,8 @@ function DrawingView({
         </div>
         <div className="source-guide">
           <div className="source-guide-item">
-            <strong>OAuth 授权（推荐）</strong>
-            <span>用每个渠道卡片里的「OAuth 授权」接码添加，得到的账号带 refresh_token，可长期自动刷新。</span>
+            <strong>网页会话（推荐）</strong>
+            <span>导入 authsession 的完整 JSON，保存 sessionToken 并在调用前重新获取网页 accessToken。</span>
           </div>
           <div className="source-guide-item">
             <strong>导入 JSON</strong>
@@ -2682,10 +2682,6 @@ function DrawingView({
         {addAccountChannelId && (
           <AccountAddModal
             busy={busy !== ""}
-            onOAuth={() => {
-              setOAuthChannelId(addAccountChannelId);
-              setAddAccountChannelId("");
-            }}
             onAuthSession={() => {
               setAuthSessionChannelId(addAccountChannelId);
               setAddAccountChannelId("");
@@ -2712,13 +2708,11 @@ function DrawingView({
 
 function AccountAddModal({
   busy,
-  onOAuth,
   onAuthSession,
   onImport,
   onClose
 }: {
   busy: boolean;
-  onOAuth: () => void;
   onAuthSession: () => void;
   onImport: (file: File) => Promise<void>;
   onClose: () => void;
@@ -2734,15 +2728,10 @@ function AccountAddModal({
           <button type="button" className="icon-button" onClick={onClose}>×</button>
         </div>
         <div className="account-add-options">
-          <button type="button" className="account-add-option recommended" onClick={onOAuth} disabled={busy}>
-            <span className="account-add-icon">O</span>
-            <strong>OAuth 授权</strong>
-            <small>推荐，可自动刷新登录状态</small>
-          </button>
-          <button type="button" className="account-add-option" onClick={onAuthSession} disabled={busy}>
+          <button type="button" className="account-add-option recommended" onClick={onAuthSession} disabled={busy}>
             <span className="account-add-icon">A</span>
-            <strong>填写 authsession</strong>
-            <small>粘贴网页会话 JSON</small>
+            <strong>导入网页会话</strong>
+            <small>粘贴完整 authsession JSON，保留 sessionToken</small>
           </button>
           <label className={`account-add-option${busy ? " disabled" : ""}`}>
             <span className="account-add-icon">J</span>
@@ -2774,11 +2763,13 @@ function authSessionImportPayload(value: string) {
     const session = JSON.parse(raw) as Record<string, unknown>;
     const accessToken = typeof session.accessToken === "string" ? session.accessToken : typeof session.access_token === "string" ? session.access_token : "";
     const refreshToken = typeof session.refreshToken === "string" ? session.refreshToken : typeof session.refresh_token === "string" ? session.refresh_token : "";
+    const sessionToken = typeof session.sessionToken === "string" ? session.sessionToken : typeof session.session_token === "string" ? session.session_token : "";
     const user = session.user && typeof session.user === "object" ? session.user as Record<string, unknown> : {};
-    if (accessToken || refreshToken) {
+    if (accessToken || refreshToken || sessionToken) {
       return {
         accessToken: accessToken || undefined,
         refreshToken: refreshToken || undefined,
+        sessionToken: sessionToken || undefined,
         email: typeof user.email === "string" ? user.email : undefined,
         name: typeof user.name === "string" ? user.name : undefined,
         source: "web-login"
@@ -2801,7 +2792,7 @@ function AuthSessionModal({ onImport, onClose }: { onImport: (token: string) => 
   }
   return <div className="modal-backdrop" onClick={onClose}><div className="modal-card" onClick={(event) => event.stopPropagation()}>
     <div className="modal-head"><strong>添加 authsession</strong><button type="button" className="icon-button" onClick={onClose}>×</button></div>
-    <p className="muted-inline">可直接粘贴 chatgpt.com/api/auth/session 的完整 JSON，系统会自动提取 accessToken；也可粘贴单独 token。</p>
+    <p className="muted-inline">请粘贴 chatgpt.com/api/auth/session 的完整 JSON。系统会保存 sessionToken，并在每次调用前重新获取网页 accessToken。</p>
     <label className="authsession-field"><span>authsession</span><textarea autoFocus value={token} onChange={(event) => setToken(event.target.value)} placeholder="eyJhbGci..." /></label>
     {error && <div className="form-error">{error}</div>}
     <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={busy} onClick={submit}>{busy ? "导入中" : "导入账号"}</button></div>
