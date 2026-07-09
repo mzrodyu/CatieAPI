@@ -9365,6 +9365,10 @@ func providerErrorFromUpstream(status int, content []byte) *ProviderError {
 	code := "upstream_error"
 	message := strings.TrimSpace(string(content))
 	errorType := "api_error"
+	if status == http.StatusForbidden && strings.HasPrefix(strings.ToLower(strings.TrimSpace(message)), "<html") {
+		message = "网页上游返回 HTML 403，通常是浏览器校验或反爬拦截"
+		return &ProviderError{Status: status, Code: "upstream_web_blocked", Message: message, Type: errorType}
+	}
 	var payload struct {
 		Error struct {
 			Code    interface{} `json:"code"`

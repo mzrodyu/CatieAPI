@@ -79,6 +79,9 @@ func (s *Server) callChatGPTWebImage(call ImageGatewayCall) (gin.H, *ProviderErr
 func (s *Server) callChatGPTWebImageWithAccount(call ImageGatewayCall, account OpenAIAccount, accessToken string) (gin.H, *ProviderError) {
 	config := newChatGPTWebConfig()
 	deviceID := randomUUID()
+	if providerErr := s.bootstrapChatGPTWeb(accessToken, account, config, deviceID); providerErr != nil {
+		return nil, providerErr
+	}
 	requirements, providerErr := s.fetchChatGPTWebRequirements(accessToken, account, config, deviceID)
 	if providerErr != nil {
 		return nil, providerErr
@@ -113,6 +116,34 @@ func (s *Server) callChatGPTWebImageWithAccount(call ImageGatewayCall, account O
 		return nil, providerErr
 	}
 	return gin.H{"created": unixNow(), "data": []gin.H{{"b64_json": base64.StdEncoding.EncodeToString(imageBytes)}}}, nil
+}
+
+func (s *Server) bootstrapChatGPTWeb(accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID string) *ProviderError {
+	base, err := url.Parse(s.chatGPTAPIBase)
+	if err != nil {
+		return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	}
+	base.Path = strings.TrimSuffix(strings.TrimSuffix(base.Path, "/"), "/backend-api") + "/"
+	request, err := http.NewRequest(http.MethodGet, base.String(), nil)
+	if err != nil {
+		return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+	}
+	s.setChatGPTWebHeaders(request, accessToken, account, config, deviceID)
+	request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+	request.Header.Set("Sec-Fetch-Dest", "document")
+	request.Header.Set("Sec-Fetch-Mode", "navigate")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	request.Header.Set("Upgrade-Insecure-Requests", "1")
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		content, _ := io.ReadAll(io.LimitReader(response.Body, 512<<10))
+		return providerErrorFromUpstream(response.StatusCode, content)
+	}
+	return nil
 }
 
 func (s *Server) prepareChatGPTWebImage(accessToken string, account OpenAIAccount, config chatGPTWebConfig, deviceID string, requirements *chatGPTWebRequirements, payload gin.H) (string, *ProviderError) {
@@ -482,8 +513,14 @@ func (s *Server) setChatGPTWebHeaders(request *http.Request, accessToken string,
 	setHeaderPreserveCase(request.Header, "User-Agent", userAgent)
 	setHeaderPreserveCase(request.Header, "Oai-Device-Id", deviceID)
 	setHeaderPreserveCase(request.Header, "Oai-Language", "en-US")
+	setHeaderPreserveCase(request.Header, "Accept-Language", "en-US,en;q=0.9")
+	setHeaderPreserveCase(request.Header, "Cache-Control", "no-cache")
+	setHeaderPreserveCase(request.Header, "Pragma", "no-cache")
 	setHeaderPreserveCase(request.Header, "Origin", "https://chatgpt.com")
 	setHeaderPreserveCase(request.Header, "Referer", "https://chatgpt.com/")
+	setHeaderPreserveCase(request.Header, "Sec-Fetch-Dest", "empty")
+	setHeaderPreserveCase(request.Header, "Sec-Fetch-Mode", "cors")
+	setHeaderPreserveCase(request.Header, "Sec-Fetch-Site", "same-origin")
 	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
 		setHeaderPreserveCase(request.Header, "Chatgpt-Account-Id", accountID)
 	}
