@@ -2468,7 +2468,7 @@ button.table-row:hover {
 .account-pool-list {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
   margin-top: 14px;
 }
 
@@ -2495,20 +2495,31 @@ button.table-row:hover {
   min-width: 0;
 }
 
-.account-pool-row strong,
-.account-pool-row span {
+.account-pool-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.account-pool-title strong {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.account-pool-row span {
+.account-pool-main > div > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--muted);
   font-size: 12px;
 }
 
 .account-pool-meta {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 8px;
   justify-content: flex-end;
@@ -4427,7 +4438,7 @@ button.table-row:hover {
 }
 
 .source-tag {
-  margin-left: 8px;
+  flex: 0 0 auto;
   padding: 1px 8px;
   font-size: 11px;
   font-weight: 700;
@@ -4450,6 +4461,10 @@ button.table-row:hover {
 @media (max-width: 720px) {
   .source-guide {
     grid-template-columns: 1fr;
+  }
+
+  .account-pool-list {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

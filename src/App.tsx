@@ -2598,12 +2598,14 @@ function DrawingView({
                       <div className="account-pool-row" key={account.id}>
                         <div className="account-pool-main">
                           <div>
-                            <strong>
-                              {account.email || account.name || account.accountId || account.id}
+                            <div className="account-pool-title">
+                              <strong title={account.email || account.name || account.accountId || account.id}>
+                                {account.email || account.name || account.accountId || account.id}
+                              </strong>
                               <span className={`source-tag source-tag-${account.source === "web-login" ? "web" : "manual"}`}>
                                 {account.source === "web-login" ? "网页登录" : account.source === "web-oauth" ? "网页 OAuth" : account.source === "oauth" ? "Codex OAuth" : "导入"}
                               </span>
-                            </strong>
+                            </div>
                             <span>{account.lastError || (account.lastCheckedAt ? `上次检测 ${formatDate(account.lastCheckedAt)}` : "未检测")}</span>
                           </div>
                           <QuotaBars limits={account.quotaLimits} />
