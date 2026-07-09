@@ -1536,10 +1536,10 @@ function PublicHome({
         <div className="home-copy">
           <span className="home-kicker">兼容 OpenAI 格式的网关</span>
           <h1>
-            CatieAPI
-            <span>轻量 AI 聚合网关</span>
+            一个入口
+            <span>管理全部模型</span>
           </h1>
-          <p>面向个人用户和团队的模型接入层。把 API Key、额度、模型渠道和调用日志放在一个清爽控制台里，保持轻量，也便于排障。</p>
+          <p>统一管理 API Key、模型渠道、额度与调用日志。保持 OpenAI 接口兼容，同时让日常运维更清楚。</p>
           <div className="home-cta">
             <button className="primary-button" onClick={enterConsole}>
               进入控制台
@@ -1548,57 +1548,48 @@ function PublicHome({
               了解功能
             </a>
           </div>
-          <div className="integration-row" aria-label="网关能力概览">
-            <span>网关能力</span>
+          <div className="integration-row home-status-row" aria-label="网关能力概览">
+            <span>已就绪</span>
             <div>
-              <span>OpenAI 兼容接口</span>
-              <span>额度控制</span>
+              <span>OpenAI 格式兼容</span>
+              <span>模型路由</span>
               <span>调用审计</span>
             </div>
           </div>
         </div>
 
-        <div className="gateway-terminal" aria-label="CatieAPI 终端请求示意">
+        <div className="gateway-terminal home-gateway-card" aria-label="CatieAPI 网关状态">
           <div className="terminal-titlebar">
             <div className="terminal-dots" aria-hidden="true">
               <span />
               <span />
               <span />
             </div>
-            <strong>CatieAPI Terminal</strong>
+            <strong>网关状态</strong>
             <div className="terminal-status">
               <span className="pulse-dot" />
-              <strong>Online</strong>
+              <strong>运行中</strong>
             </div>
           </div>
           <div className="terminal-endpoint">
             <span>POST</span>
-            <strong>/v1/chat/completions</strong>
+            <strong>统一调用入口</strong>
           </div>
           <div className="terminal-body">
             <div className="terminal-block">
-              <span>REQUEST</span>
-              <pre>{`curl https://api.catie.local/v1/chat/completions \\
-  -H "Authorization: Bearer cat_..." \\
-  -d '{
-    "model": "catie-fast",
-    "messages": [{ "role": "user", "content": "ping" }]
-  }'`}</pre>
+              <span>API 地址</span>
+              <pre>{`POST /v1/chat/completions
+Authorization: Bearer cat_...`}</pre>
             </div>
             <div className="terminal-route">
-              <div><span>auth</span><strong>pass</strong></div>
-              <div><span>quota</span><strong>ok</strong></div>
-              <div><span>route</span><strong>catie-fast</strong></div>
-              <div><span>latency</span><strong>186ms</strong></div>
+              <div><span>认证</span><strong>已启用</strong></div>
+              <div><span>额度</span><strong>实时校验</strong></div>
+              <div><span>路由</span><strong>自动选择</strong></div>
+              <div><span>日志</span><strong>完整记录</strong></div>
             </div>
             <div className="terminal-block response">
-              <span>RESPONSE</span>
-              <pre>{`{
-  "status": 200,
-  "model": "catie-fast",
-  "usage": { "total_tokens": 27 },
-  "message": "request routed"
-}`}</pre>
+              <span>下一步</span>
+              <pre>进入控制台，添加渠道并创建 API Key。</pre>
             </div>
           </div>
         </div>

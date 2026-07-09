@@ -4307,6 +4307,27 @@ button.table-row:hover {
   }
 }
 
+.home-gateway-card {
+  min-height: 390px;
+}
+
+.home-gateway-card .terminal-body {
+  gap: 24px;
+}
+
+.home-gateway-card .terminal-block pre {
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.home-gateway-card .terminal-route strong {
+  font-size: 12px;
+}
+
+.home-status-row > span {
+  color: var(--blue);
+}
+
 .primary-button,
 .secondary-button,
 .danger-button,
