@@ -2721,18 +2721,18 @@ function authSessionImportPayload(value: string) {
     const refreshToken = typeof session.refreshToken === "string" ? session.refreshToken : typeof session.refresh_token === "string" ? session.refresh_token : "";
     const user = session.user && typeof session.user === "object" ? session.user as Record<string, unknown> : {};
     if (accessToken || refreshToken) {
-      return [{
+      return {
         accessToken: accessToken || undefined,
         refreshToken: refreshToken || undefined,
         email: typeof user.email === "string" ? user.email : undefined,
         name: typeof user.name === "string" ? user.name : undefined,
         source: "web-login"
-      }];
+      };
     }
   } catch {
     // A standalone token is valid input and does not need to be JSON.
   }
-  return [{ sessionToken: raw, source: "web-login" }];
+  return { sessionToken: raw, source: "web-login" };
 }
 
 function AuthSessionModal({ onImport, onClose }: { onImport: (token: string) => Promise<void>; onClose: () => void }) {
