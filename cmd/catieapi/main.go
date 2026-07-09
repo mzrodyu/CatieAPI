@@ -4883,20 +4883,8 @@ func (s *Server) streamChatGPTCodexWithAccount(c *gin.Context, call GatewayCall,
 }
 
 func (s *Server) callChatGPTCodexImageWithAccount(call ImageGatewayCall, account OpenAIAccount, accessToken string) (gin.H, *ProviderError) {
-	// Browser auth-session/CPA accounts expose the OpenAI-compatible image
-	// endpoint. Prefer it for image models; keep Responses as a compatibility
-	// fallback for older Codex account profiles.
-	if directModel := chatGPTCodexDirectImageModel(call); directModel != "" && isCodexProxyImportSource(account.Source) {
-		body, providerErr := s.callChatGPTCodexDirectImageWithAccount(call, account, accessToken, directModel)
-		if providerErr == nil {
-			return body, nil
-		}
-		if !shouldFallbackChatGPTCodexDirectImage(providerErr) {
-			return nil, providerErr
-		}
-	}
 	var lastErr *ProviderError
-	for _, mainModel := range chatGPTCodexImageMainModels() {
+	for _, mainModel := range chatGPTCodexImageMainModelsForAccount(account) {
 		body, providerErr := s.callChatGPTCodexImageResponsesWithAccount(call, account, accessToken, mainModel)
 		if providerErr == nil {
 			return body, nil
@@ -4951,6 +4939,16 @@ func (s *Server) callChatGPTCodexImageResponsesWithAccount(call ImageGatewayCall
 
 func chatGPTCodexImageMainModels() []string {
 	return []string{chatGPTCodexImageModel, "gpt-5.5", "gpt-5.4"}
+}
+
+func chatGPTCodexImageMainModelsForAccount(account OpenAIAccount) []string {
+	if isCodexProxyImportSource(account.Source) {
+		// ChatGPT auth-session accounts use the Responses image tool. The
+		// subscription transport accepts the full Codex models here; the image
+		// model remains gpt-image-2 in the tool payload.
+		return []string{"gpt-5.5", "gpt-5.4", chatGPTCodexImageModel}
+	}
+	return chatGPTCodexImageMainModels()
 }
 
 func shouldRetryChatGPTCodexImageMainModel(providerErr *ProviderError) bool {
