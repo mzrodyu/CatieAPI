@@ -2543,7 +2543,7 @@ function DrawingView({
         <div className="source-guide">
           <div className="source-guide-item">
             <strong>网页会话（推荐）</strong>
-            <span>导入 authsession 的完整 JSON，保存 sessionToken 并在调用前重新获取网页 accessToken。</span>
+            <span>保存浏览器的网页会话 Cookie，并在调用前重新获取 accessToken；auth/session JSON 仅适合临时使用。</span>
           </div>
           <div className="source-guide-item">
             <strong>导入 JSON</strong>
@@ -2759,17 +2759,17 @@ function AccountAddModal({
 
 function authSessionImportPayload(value: string) {
   const raw = value.trim();
+  const cookieMatch = raw.match(/(?:^|[;\s])(__Secure-(?:next-auth|authjs)\.session-token)=([^;\s]+)/);
+  if (cookieMatch) return { sessionToken: cookieMatch[2], source: "web-login" };
   try {
     const session = JSON.parse(raw) as Record<string, unknown>;
     const accessToken = typeof session.accessToken === "string" ? session.accessToken : typeof session.access_token === "string" ? session.access_token : "";
     const refreshToken = typeof session.refreshToken === "string" ? session.refreshToken : typeof session.refresh_token === "string" ? session.refresh_token : "";
-    const sessionToken = typeof session.sessionToken === "string" ? session.sessionToken : typeof session.session_token === "string" ? session.session_token : "";
     const user = session.user && typeof session.user === "object" ? session.user as Record<string, unknown> : {};
-    if (accessToken || refreshToken || sessionToken) {
+    if (accessToken || refreshToken) {
       return {
         accessToken: accessToken || undefined,
         refreshToken: refreshToken || undefined,
-        sessionToken: sessionToken || undefined,
         email: typeof user.email === "string" ? user.email : undefined,
         name: typeof user.name === "string" ? user.name : undefined,
         source: "web-login"
@@ -2791,8 +2791,8 @@ function AuthSessionModal({ onImport, onClose }: { onImport: (token: string) => 
     try { await onImport(token.trim()); } catch (err) { setError(err instanceof Error ? err.message : "导入失败"); } finally { setBusy(false); }
   }
   return <div className="modal-backdrop" onClick={onClose}><div className="modal-card" onClick={(event) => event.stopPropagation()}>
-    <div className="modal-head"><strong>添加 authsession</strong><button type="button" className="icon-button" onClick={onClose}>×</button></div>
-    <p className="muted-inline">请粘贴 chatgpt.com/api/auth/session 的完整 JSON。系统会保存 sessionToken，并在每次调用前重新获取网页 accessToken。</p>
+    <div className="modal-head"><strong>添加网页会话</strong><button type="button" className="icon-button" onClick={onClose}>×</button></div>
+    <p className="muted-inline">长期使用请从浏览器开发者工具的 Application → Cookies → chatgpt.com 复制 <code>__Secure-next-auth.session-token</code> 的值；也支持粘贴完整 Cookie 字符串。auth/session JSON 只能临时导入。</p>
     <label className="authsession-field"><span>authsession</span><textarea autoFocus value={token} onChange={(event) => setToken(event.target.value)} placeholder="eyJhbGci..." /></label>
     {error && <div className="form-error">{error}</div>}
     <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={busy} onClick={submit}>{busy ? "导入中" : "导入账号"}</button></div>

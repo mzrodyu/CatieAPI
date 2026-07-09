@@ -3161,6 +3161,17 @@ func TestParseOpenAIAccountImportSupportsChatGPTAuthSessionShape(t *testing.T) {
 	}
 }
 
+func TestChatGPTSessionCookieCandidatesParsesCookieHeader(t *testing.T) {
+	cookies := chatGPTSessionCookieCandidates("foo=bar; __Secure-next-auth.session-token=web-session; theme=dark")
+	if len(cookies) != 1 || cookies[0].Name != "__Secure-next-auth.session-token" || cookies[0].Value != "web-session" {
+		t.Fatalf("unexpected cookie candidates: %#v", cookies)
+	}
+	raw := chatGPTSessionCookieCandidates("raw-session-value")
+	if len(raw) != 2 || raw[0].Value != "raw-session-value" || raw[1].Name != "__Secure-authjs.session-token" {
+		t.Fatalf("raw cookie value was not expanded: %#v", raw)
+	}
+}
+
 func TestImportOpenAIAccountsFromZipAddsAccountsToExistingChannel(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)

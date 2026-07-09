@@ -568,14 +568,14 @@ func main() {
 func fetchChatGPTAccessTokenViaSessionCookie(sessionToken string) (accessToken string, expiresAt string, err error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	var lastErr error
-	for _, cookieName := range []string{"__Secure-next-auth.session-token", "__Secure-authjs.session-token"} {
+	for _, cookie := range chatGPTSessionCookieCandidates(sessionToken) {
 		req, requestErr := http.NewRequest(http.MethodGet, "https://chatgpt.com/api/auth/session", nil)
 		if requestErr != nil {
 			return "", "", requestErr
 		}
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", "Mozilla/5.0")
-		req.AddCookie(&http.Cookie{Name: cookieName, Value: sessionToken})
+		req.AddCookie(&cookie)
 		res, requestErr := client.Do(req)
 		if requestErr != nil {
 			lastErr = requestErr
@@ -601,6 +601,20 @@ func fetchChatGPTAccessTokenViaSessionCookie(sessionToken string) (accessToken s
 		lastErr = fmt.Errorf("session endpoint returned no accessToken")
 	}
 	return "", "", lastErr
+}
+
+func chatGPTSessionCookieCandidates(value string) []http.Cookie {
+	value = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(value), "Cookie:"))
+	for _, part := range strings.Split(value, ";") {
+		name, token, found := strings.Cut(strings.TrimSpace(part), "=")
+		if found && (name == "__Secure-next-auth.session-token" || name == "__Secure-authjs.session-token") && strings.TrimSpace(token) != "" {
+			return []http.Cookie{{Name: name, Value: strings.TrimSpace(token)}}
+		}
+	}
+	return []http.Cookie{
+		{Name: "__Secure-next-auth.session-token", Value: value},
+		{Name: "__Secure-authjs.session-token", Value: value},
+	}
 }
 
 // persistRefreshedPoolAccount writes refreshed tokens back into the matching
@@ -7558,7 +7572,7 @@ func parseOpenAIAccountImport(payload map[string]interface{}) []ImportedOpenAIAc
 			ExpiresAt:     stringFromMapAnyKeys(payload, "expired", "expires", "expires_at", "expiresAt"),
 			LastRefresh:   stringFromMapAnyKeys(payload, "last_refresh", "lastRefresh"),
 			PlanType:      firstNonEmptyString(stringFromMapAnyKeys(payload, "plan_type", "planType"), stringFromMapAnyKeys(accountInfo, "plan_type", "planType")),
-			Source:        "cpa",
+			Source:        firstNonEmptyString(stringFromMapAnyKeys(payload, "source"), "cpa"),
 			ClientProfile: stringFromMapAnyKeys(payload, "client_profile", "clientProfile", "codex_client_profile", "codexClientProfile", "originator"),
 		}
 		return []ImportedOpenAIAccount{account}

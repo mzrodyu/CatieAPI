@@ -102,6 +102,10 @@ func (s *Server) resolveChatGPTWebAccessToken(account OpenAIAccount) (string, er
 			s.persistRefreshedPoolAccount(account.ID, OpenAIRefreshResult{AccessToken: accessToken, ExpiresAt: expiresAt})
 			return accessToken, nil
 		}
+		if err == nil {
+			err = fmt.Errorf("session endpoint returned no accessToken")
+		}
+		return "", fmt.Errorf("网页会话 Cookie 已失效或不是有效的 __Secure-next-auth.session-token: %w", err)
 	}
 
 	accessToken, err := s.revealSecret(account.AccessToken)
