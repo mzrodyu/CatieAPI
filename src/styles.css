@@ -28,6 +28,40 @@ button {
   border: 0;
 }
 
+/* Normalise the browser controls that remain in forms. */
+.app-shell select:not([multiple]) {
+  appearance: none;
+  padding-right: 38px !important;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%) !important;
+  background-position: calc(100% - 17px) 50%, calc(100% - 12px) 50% !important;
+  background-size: 5px 5px, 5px 5px !important;
+  background-repeat: no-repeat !important;
+  cursor: pointer;
+}
+
+.app-shell input[type="datetime-local"],
+.app-shell input[type="date"],
+.app-shell input[type="time"] {
+  color-scheme: dark;
+}
+
+.app-shell input[type="datetime-local"]::-webkit-calendar-picker-indicator,
+.app-shell input[type="date"]::-webkit-calendar-picker-indicator,
+.app-shell input[type="time"]::-webkit-calendar-picker-indicator {
+  opacity: 0.72;
+  cursor: pointer;
+}
+
+.app-shell input[type="number"] {
+  appearance: textfield;
+}
+
+.app-shell input[type="number"]::-webkit-inner-spin-button,
+.app-shell input[type="number"]::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
 .app-shell {
   --bg: #f2f2f7;
   --surface: rgba(255, 255, 255, 0.78);
@@ -1326,6 +1360,46 @@ h3 {
 .model-row-menu button.is-danger { color: var(--red); }
 .model-row-menu button.is-danger:hover { background: color-mix(in srgb, var(--red) 10%, var(--surface-solid)); }
 
+/* Settings navigation is a compact section switcher, not six equal-sized cards. */
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px;
+  gap: 2px;
+  overflow-x: auto;
+  background: var(--group);
+  border-radius: 14px;
+}
+
+.settings-tabs button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+}
+
+.settings-tabs button small { display: none; }
+
+.settings-tab-note {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.settings-tab-note strong { color: var(--text); font-size: 14px; }
+
+@media (max-width: 720px) {
+  .settings-tabs { flex-wrap: nowrap; width: 100%; }
+  .settings-tab-note { align-items: flex-start; flex-direction: column; gap: 2px; }
+}
+
 .pager {
   display: flex;
   align-items: center;
@@ -2410,6 +2484,47 @@ button.table-row:hover {
   margin-top: 12px;
 }
 
+.key-editor-collapsible {
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 16px;
+}
+
+.key-editor-collapsible[open] {
+  gap: 0;
+}
+
+.key-editor-collapsible > summary {
+  min-height: 74px;
+  padding: 14px 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.key-editor-collapsible > summary::-webkit-details-marker { display: none; }
+
+.key-editor-collapsible[open] > summary {
+  border-bottom: 1px solid var(--hairline);
+}
+
+.key-editor-body {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.key-expand-hint {
+  padding: 5px 10px;
+  color: var(--muted);
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.key-editor-collapsible[open] .key-expand-hint::after { content: "中"; }
+
 .key-editor-head {
   display: flex;
   align-items: center;
@@ -2466,6 +2581,7 @@ button.table-row:hover {
 
 .key-editor-actions {
   display: flex;
+  gap: 8px;
   justify-content: flex-end;
 }
 

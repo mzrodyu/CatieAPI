@@ -2120,45 +2120,31 @@ function KeyEditor({
   }
 
   return (
-    <div className="key-editor">
-      <div className="key-editor-head">
+    <details className="key-editor key-editor-collapsible">
+      <summary className="key-editor-head">
         <div>
           <strong>{apiKey.name}</strong>
           <span>{apiKey.prefix}*** · {modelSummary} · 最后使用 {formatDate(apiKey.lastUsedAt)}</span>
         </div>
         <div className="row-actions">
           <Badge tone={apiKey.status}>{statusLabel(apiKey.status)}</Badge>
-          <button
-            className="secondary-button compact-button"
-            onClick={() => onSave(apiKey.id, { status: apiKey.status === "active" ? "disabled" : "active" })}
-          >
-            {apiKey.status === "active" ? "禁用" : "启用"}
-          </button>
-          <button className="danger-button compact-button" onClick={() => onDelete(apiKey.id)}>删除</button>
+          <span className="key-expand-hint">管理</span>
+        </div>
+      </summary>
+      <div className="key-editor-body">
+        <div className="key-editor-grid">
+          <label>名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+          <label>允许模型<input value={allowedModels} onChange={(event) => setAllowedModels(event.target.value)} placeholder="留空表示全部模型，多个用逗号分隔" /></label>
+          <label>过期时间<input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} /></label>
+          <label>每分钟限制<input type="number" min="0" value={rateLimit} onChange={(event) => setRateLimit(event.target.value)} placeholder="0 使用全局限制" /></label>
+        </div>
+        <div className="key-editor-actions">
+          <button className="secondary-button" onClick={() => onSave(apiKey.id, { status: apiKey.status === "active" ? "disabled" : "active" })}>{apiKey.status === "active" ? "停用密钥" : "启用密钥"}</button>
+          <button className="danger-button" onClick={() => onDelete(apiKey.id)}>删除密钥</button>
+          <button className="primary-button" disabled={saving} onClick={save}>{saving ? "保存中" : "保存设置"}</button>
         </div>
       </div>
-      <div className="key-editor-grid">
-        <label>
-          名称
-          <input value={name} onChange={(event) => setName(event.target.value)} />
-        </label>
-        <label>
-          允许模型
-          <input value={allowedModels} onChange={(event) => setAllowedModels(event.target.value)} placeholder="留空表示全部模型，多个用逗号分隔" />
-        </label>
-        <label>
-          过期时间
-          <input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} />
-        </label>
-        <label>
-          每分钟限制
-          <input type="number" min="0" value={rateLimit} onChange={(event) => setRateLimit(event.target.value)} placeholder="0 使用全局限制" />
-        </label>
-      </div>
-      <div className="key-editor-actions">
-        <button className="primary-button" disabled={saving} onClick={save}>{saving ? "保存中" : "保存设置"}</button>
-      </div>
-    </div>
+    </details>
   );
 }
 
