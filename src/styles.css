@@ -1833,6 +1833,19 @@ button.table-row:hover {
   gap: 16px;
 }
 
+.channel-card-head > div:first-child {
+  min-width: 0;
+}
+
+.channel-card-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .channel-card-head strong,
 .channel-card-head span {
   display: block;
@@ -2455,7 +2468,7 @@ button.table-row:hover {
 .account-pool-list {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   margin-top: 14px;
 }
 
@@ -4174,6 +4187,107 @@ button.table-row:hover {
 
 .modal-head strong {
   font-size: 18px;
+}
+
+.modal-head > div {
+  display: grid;
+  gap: 4px;
+}
+
+.modal-head > div > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.account-add-modal {
+  max-width: 680px;
+}
+
+.account-add-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.account-add-option {
+  position: relative;
+  display: grid;
+  justify-items: start;
+  gap: 7px;
+  min-width: 0;
+  padding: 18px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 16px;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.account-add-option:hover:not(:disabled):not(.disabled) {
+  transform: translateY(-2px);
+  background: color-mix(in srgb, var(--blue) 7%, var(--group));
+  border-color: color-mix(in srgb, var(--blue) 36%, var(--hairline));
+}
+
+.account-add-option.recommended::after {
+  content: "推荐";
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 3px 8px;
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 700;
+  background: color-mix(in srgb, var(--blue) 12%, var(--surface-solid));
+  border-radius: 999px;
+}
+
+.account-add-option small {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.account-add-option input {
+  display: none;
+}
+
+.account-add-option.disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.account-add-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 800;
+  background: color-mix(in srgb, var(--blue) 12%, var(--surface-solid));
+  border-radius: 11px;
+}
+
+.account-add-modal .modal-actions {
+  margin-top: 18px;
+}
+
+@media (max-width: 760px) {
+  .channel-card-head {
+    flex-direction: column;
+  }
+
+  .channel-card-head-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .account-add-options {
+    grid-template-columns: 1fr;
+  }
 }
 
 .oauth-steps {

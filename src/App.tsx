@@ -2487,6 +2487,7 @@ function DrawingView({
   const [accountVisibleCounts, setAccountVisibleCounts] = useState<Record<string, number>>({});
   const [oauthChannelId, setOAuthChannelId] = useState("");
   const [authSessionChannelId, setAuthSessionChannelId] = useState("");
+  const [addAccountChannelId, setAddAccountChannelId] = useState("");
   const defaultVisibleAccounts = 24;
   const accountBatchSize = 48;
 
@@ -2567,7 +2568,18 @@ function DrawingView({
                     <span>{channel.baseUrl || defaultBaseURLForProvider(channel.provider) || defaultCodexBaseURL}</span>
                     <small>账号 {accounts.length} 个，可用 {healthy}，无效 {invalid}，未验证 {unchecked}</small>
                   </div>
-                  <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
+                  <div className="channel-card-head-actions">
+                    <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
+                    <button className="primary-button compact-button" onClick={() => setAddAccountChannelId(channel.id)} disabled={busy !== ""}>
+                      添加账号
+                    </button>
+                    <button className="secondary-button compact-button" onClick={() => checkAccounts(channel.id)} disabled={busy !== "" || accounts.length === 0}>
+                      {busy === `check:${channel.id}` ? "检测中" : "批量检测"}
+                    </button>
+                    <button className="secondary-button compact-button" onClick={() => toggleChannel(channel)} disabled={busy !== ""}>
+                      {channel.status === "disabled" ? "启用渠道" : "停用渠道"}
+                    </button>
+                  </div>
                 </div>
                 <div className="metrics-grid">
                   <Metric label="账号总数" value={accounts.length} />
@@ -2579,41 +2591,6 @@ function DrawingView({
                   {arrayOf(channel.models).length ? arrayOf(channel.models).map((model) => (
                     <span key={model}>{model}</span>
                   )) : <span>未绑定绘图模型</span>}
-                </div>
-                <div className="channel-card-actions">
-                  <button className="secondary-button" onClick={() => checkAccounts(channel.id)} disabled={busy !== "" || accounts.length === 0}>
-                    {busy === `check:${channel.id}` ? "测活中" : "批量测活"}
-                  </button>
-                  <details className="manual-add">
-                    <summary className="secondary-button">添加账号</summary>
-                    <div className="manual-add-body">
-                      <span className="muted-inline">OAuth 授权得到的账号带 refresh_token，可长期自动刷新；也可导入已有 token/JSON。</span>
-                      <div className="manual-add-actions">
-                        <button className="secondary-button" onClick={() => setOAuthChannelId(channel.id)} disabled={busy !== ""}>
-                          OAuth 授权（接码）
-                        </button>
-                        <button className="secondary-button" onClick={() => setAuthSessionChannelId(channel.id)} disabled={busy !== ""}>
-                          填写 authsession
-                        </button>
-                        <label className="secondary-button">
-                          {busy === `import:${channel.id}` ? "导入中" : "导入 JSON / ZIP"}
-                          <input
-                            type="file"
-                            accept="application/json,application/zip,.json,.zip"
-                            disabled={busy !== ""}
-                            onChange={(event) => {
-                              const file = event.target.files?.[0];
-                              if (file) importFile(channel.id, file);
-                              event.target.value = "";
-                            }}
-                          />
-                        </label>
-                      </div>
-                    </div>
-                  </details>
-                  <button className="status-button" onClick={() => toggleChannel(channel)} disabled={busy !== ""}>
-                    <Badge tone={channel.status}>{channel.status === "disabled" ? "启用" : "禁用"}</Badge>
-                  </button>
                 </div>
                 {accounts.length > 0 && (
                   <div className="account-pool-list">
@@ -2700,6 +2677,24 @@ function DrawingView({
             onClose={() => setOAuthChannelId("")}
           />
         )}
+        {addAccountChannelId && (
+          <AccountAddModal
+            busy={busy !== ""}
+            onOAuth={() => {
+              setOAuthChannelId(addAccountChannelId);
+              setAddAccountChannelId("");
+            }}
+            onAuthSession={() => {
+              setAuthSessionChannelId(addAccountChannelId);
+              setAddAccountChannelId("");
+            }}
+            onImport={async (file) => {
+              await importFile(addAccountChannelId, file);
+              setAddAccountChannelId("");
+            }}
+            onClose={() => setAddAccountChannelId("")}
+          />
+        )}
         {authSessionChannelId && (
           <AuthSessionModal
             onImport={async (token) => {
@@ -2710,6 +2705,64 @@ function DrawingView({
           />
         )}
       </Panel>
+  );
+}
+
+function AccountAddModal({
+  busy,
+  onOAuth,
+  onAuthSession,
+  onImport,
+  onClose
+}: {
+  busy: boolean;
+  onOAuth: () => void;
+  onAuthSession: () => void;
+  onImport: (file: File) => Promise<void>;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-card account-add-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <strong>添加账号</strong>
+            <span>选择一种账号接入方式</span>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose}>×</button>
+        </div>
+        <div className="account-add-options">
+          <button type="button" className="account-add-option recommended" onClick={onOAuth} disabled={busy}>
+            <span className="account-add-icon">O</span>
+            <strong>OAuth 授权</strong>
+            <small>推荐，可自动刷新登录状态</small>
+          </button>
+          <button type="button" className="account-add-option" onClick={onAuthSession} disabled={busy}>
+            <span className="account-add-icon">A</span>
+            <strong>填写 authsession</strong>
+            <small>粘贴网页会话 JSON</small>
+          </button>
+          <label className={`account-add-option${busy ? " disabled" : ""}`}>
+            <span className="account-add-icon">J</span>
+            <strong>{busy ? "导入中" : "导入 JSON / ZIP"}</strong>
+            <small>批量导入已有账号文件</small>
+            <input
+              type="file"
+              accept="application/json,application/zip,.json,.zip"
+              disabled={busy}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void onImport(file);
+                event.target.value = "";
+              }}
+            />
+          </label>
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="secondary-button" onClick={onClose}>取消</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
