@@ -7502,17 +7502,19 @@ func parseOpenAIAccountImport(payload map[string]interface{}) []ImportedOpenAIAc
 	if stringFromMapAnyKeys(payload, "access_token", "accessToken") != "" ||
 		stringFromMapAnyKeys(payload, "refresh_token", "refreshToken", "chatgpt_refresh_token") != "" ||
 		stringFromMapAnyKeys(payload, "id_token", "idToken") != "" {
+		accountInfo, _ := firstMapFromAnyKeys(payload, "account", "accountInfo")
+		userInfo, _ := firstMapFromAnyKeys(payload, "user", "userInfo")
 		account := ImportedOpenAIAccount{
-			Name:          stringFromMapAnyKeys(payload, "email", "name", "username"),
-			Email:         stringFromMap(payload, "email"),
+			Name:          firstNonEmptyString(stringFromMapAnyKeys(payload, "email", "name", "username"), stringFromMapAnyKeys(userInfo, "email", "name", "username")),
+			Email:         firstNonEmptyString(stringFromMap(payload, "email"), stringFromMap(userInfo, "email")),
 			AccessToken:   stringFromMapAnyKeys(payload, "access_token", "accessToken"),
 			RefreshToken:  stringFromMapAnyKeys(payload, "refresh_token", "refreshToken", "chatgpt_refresh_token"),
 			IDToken:       stringFromMapAnyKeys(payload, "id_token", "idToken"),
-			AccountID:     stringFromMapAnyKeys(payload, "account_id", "accountId", "chatgpt_account_id"),
-			UserID:        stringFromMapAnyKeys(payload, "chatgpt_user_id", "user_id", "userId"),
-			ExpiresAt:     stringFromMapAnyKeys(payload, "expired", "expires_at", "expiresAt"),
+			AccountID:     firstNonEmptyString(stringFromMapAnyKeys(payload, "account_id", "accountId", "chatgpt_account_id"), stringFromMapAnyKeys(accountInfo, "id", "account_id", "accountId")),
+			UserID:        firstNonEmptyString(stringFromMapAnyKeys(payload, "chatgpt_user_id", "user_id", "userId"), stringFromMapAnyKeys(userInfo, "id", "user_id", "userId")),
+			ExpiresAt:     stringFromMapAnyKeys(payload, "expired", "expires", "expires_at", "expiresAt"),
 			LastRefresh:   stringFromMapAnyKeys(payload, "last_refresh", "lastRefresh"),
-			PlanType:      stringFromMapAnyKeys(payload, "plan_type", "planType"),
+			PlanType:      firstNonEmptyString(stringFromMapAnyKeys(payload, "plan_type", "planType"), stringFromMapAnyKeys(accountInfo, "plan_type", "planType")),
 			Source:        "cpa",
 			ClientProfile: stringFromMapAnyKeys(payload, "client_profile", "clientProfile", "codex_client_profile", "codexClientProfile", "originator"),
 		}

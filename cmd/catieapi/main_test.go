@@ -3134,6 +3134,27 @@ func TestParseOpenAIAccountImportSupportsCamelCaseCPAAndSub2API(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIAccountImportSupportsChatGPTAuthSessionShape(t *testing.T) {
+	accounts, _, invalid, err := parseOpenAIAccountImportJSON([]byte(`{
+		"user":{"id":"user-session","email":"session@example.com","name":"Session User"},
+		"accessToken":"session-access-token",
+		"expires":"2026-10-07T19:47:47.256Z",
+		"account":{"id":"account-session","plan_type":"free"}
+	}`))
+	if err != nil || invalid != 0 || len(accounts) != 1 {
+		t.Fatalf("auth session import accounts=%#v invalid=%d err=%v", accounts, invalid, err)
+	}
+	account := accounts[0]
+	if account.AccessToken != "session-access-token" ||
+		account.AccountID != "account-session" ||
+		account.UserID != "user-session" ||
+		account.Email != "session@example.com" ||
+		account.ExpiresAt != "2026-10-07T19:47:47.256Z" ||
+		account.PlanType != "free" {
+		t.Fatalf("auth session fields were not parsed: %#v", account)
+	}
+}
+
 func TestImportOpenAIAccountsFromZipAddsAccountsToExistingChannel(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)
