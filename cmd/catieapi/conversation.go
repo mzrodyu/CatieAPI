@@ -55,7 +55,7 @@ func (s *Server) callChatGPTWebImage(call ImageGatewayCall) (gin.H, *ProviderErr
 	}
 	var lastErr *ProviderError
 	for _, account := range accounts {
-		accessToken, err := s.resolveChatGPTWebAccessToken(account)
+		accessToken, err := s.resolveOpenAIAccountAccessToken(account)
 		if err != nil {
 			lastErr = &ProviderError{Status: http.StatusBadGateway, Code: "upstream_key_unavailable", Message: err.Error(), Type: "api_error"}
 			continue
@@ -77,7 +77,10 @@ func (s *Server) callChatGPTWebImage(call ImageGatewayCall) (gin.H, *ProviderErr
 	return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: "网页图片请求失败", Type: "api_error"}
 }
 
-func (s *Server) resolveChatGPTWebAccessToken(account OpenAIAccount) (string, error) {
+// resolveOpenAIAccountAccessToken obtains a current credential for every
+// account-pool transport. Imported OAuth JSON commonly contains a short-lived
+// access token plus a refresh token, so callers must not use AccessToken raw.
+func (s *Server) resolveOpenAIAccountAccessToken(account OpenAIAccount) (string, error) {
 	s.openAIRefreshMu.Lock()
 	defer s.openAIRefreshMu.Unlock()
 
@@ -92,7 +95,20 @@ func (s *Server) resolveChatGPTWebAccessToken(account OpenAIAccount) (string, er
 	}
 	s.mu.Unlock()
 
-	if strings.TrimSpace(account.SessionToken) != "" {
+	accessToken, err := s.revealSecret(account.AccessToken)
+	if err != nil {
+		return "", err
+	}
+	hasRefreshToken := strings.TrimSpace(account.RefreshToken) != ""
+	if !hasRefreshToken && strings.TrimSpace(accessToken) != "" && !openAIAccountAccessTokenExpiring(accessToken, account.ExpiresAt, 5*time.Minute) {
+		// Keep an exported access token independent from the browser session
+		// while it remains valid; switching browser accounts must not affect it.
+		return accessToken, nil
+	}
+
+	// An OAuth refresh token is account-specific and survives browser account
+	// switches. Prefer it over a browser session cookie when both were imported.
+	if strings.TrimSpace(account.SessionToken) != "" && !hasRefreshToken {
 		sessionToken, err := s.revealSecret(account.SessionToken)
 		if err != nil {
 			return "", err
@@ -107,12 +123,7 @@ func (s *Server) resolveChatGPTWebAccessToken(account OpenAIAccount) (string, er
 		}
 		return "", fmt.Errorf("网页会话 Cookie 已失效或不是有效的 __Secure-next-auth.session-token: %w", err)
 	}
-
-	accessToken, err := s.revealSecret(account.AccessToken)
-	if err != nil {
-		return "", err
-	}
-	if !openAIAccountAccessTokenExpiring(accessToken, account.ExpiresAt, 24*time.Hour) || strings.TrimSpace(account.RefreshToken) == "" {
+	if !openAIAccountAccessTokenExpiring(accessToken, account.ExpiresAt, 24*time.Hour) || !hasRefreshToken {
 		return accessToken, nil
 	}
 	refreshToken, err := s.revealSecret(account.RefreshToken)

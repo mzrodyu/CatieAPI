@@ -2624,6 +2624,14 @@ func TestImageGenerationsRetryNextOpenAIAccountOnInvalidatedToken(t *testing.T) 
 	}
 }
 
+func TestShouldInvalidateOpenAIAccountForImageOnPlainUnauthorized(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		if !shouldInvalidateOpenAIAccountForImage(&ProviderError{Status: status, Code: "upstream_error", Message: "request failed", Type: "api_error"}) {
+			t.Fatalf("image account was not invalidated for status %d", status)
+		}
+	}
+}
+
 func TestImageGenerationsReturnPoolUnavailableWhenAllOpenAIAccountsInvalidated(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/backend-api/codex/responses" {
@@ -3678,6 +3686,57 @@ func TestCheckOpenAIAccountRefreshesExpiredAccessTokenBeforeUsage(t *testing.T) 
 	channel = server.findChannel("chn_1002")
 	if channel.OpenAIAccounts[0].Status != "healthy" || channel.OpenAIAccounts[0].AccessToken != "fresh-token" || channel.OpenAIAccounts[0].RefreshToken != "fresh-refresh" {
 		t.Fatalf("refreshed account was not stored healthy: %#v", channel.OpenAIAccounts[0])
+	}
+}
+
+func TestResolveOpenAIAccountAccessTokenPrefersRefreshOverBrowserSession(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/oauth/token" {
+			t.Fatalf("unexpected request path = %s", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse refresh request: %v", err)
+		}
+		if r.Form.Get("refresh_token") != "refresh-token" {
+			t.Fatalf("refresh token = %q", r.Form.Get("refresh_token"))
+		}
+		_, _ = w.Write([]byte(`{"access_token":"fresh-token","refresh_token":"fresh-refresh","expires_in":3600}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{"PERSISTENCE": "memory", "OPENAI_AUTH_BASE": upstream.URL})
+	server, _ := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	channel := server.findChannel("chn_1002")
+	channel.OpenAIAccounts = []OpenAIAccount{{
+		ID: "oaiacc_refresh_session", AccessToken: "expired-token", RefreshToken: "refresh-token", SessionToken: "stale-browser-session",
+		ExpiresAt: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339), Status: "healthy",
+	}}
+	account := channel.OpenAIAccounts[0]
+	server.mu.Unlock()
+
+	accessToken, err := server.resolveOpenAIAccountAccessToken(account)
+	if err != nil {
+		t.Fatalf("resolve account access token: %v", err)
+	}
+	if accessToken != "fresh-token" {
+		t.Fatalf("access token = %q", accessToken)
+	}
+}
+
+func TestResolveOpenAIAccountAccessTokenKeepsValidExportedTokenAfterBrowserSwitch(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, _ := testServerRouter(t)
+	accessToken, err := server.resolveOpenAIAccountAccessToken(OpenAIAccount{
+		ID: "oaiacc_exported", AccessToken: "still-valid-access-token", SessionToken: "invalid-browser-session",
+		ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339), Status: "healthy",
+	})
+	if err != nil {
+		t.Fatalf("resolve exported access token: %v", err)
+	}
+	if accessToken != "still-valid-access-token" {
+		t.Fatalf("access token = %q", accessToken)
 	}
 }
 

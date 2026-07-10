@@ -4581,7 +4581,7 @@ func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *Provi
 		usageLimitedAccounts := 0
 		for _, account := range accounts {
 			attemptedAccounts++
-			upstreamKey, err := s.revealSecret(account.AccessToken)
+			upstreamKey, err := s.resolveOpenAIAccountAccessToken(account)
 			if err != nil {
 				lastErr = &ProviderError{Status: http.StatusBadGateway, Code: "upstream_key_unavailable", Message: err.Error(), Type: "api_error"}
 				continue
@@ -4681,7 +4681,7 @@ func (s *Server) callChatGPTCodex(call GatewayCall) (gin.H, *ProviderError) {
 	usageLimitedAccounts := 0
 	for _, account := range accounts {
 		attemptedAccounts++
-		accessToken, err := s.revealSecret(account.AccessToken)
+		accessToken, err := s.resolveOpenAIAccountAccessToken(account)
 		if err != nil {
 			lastErr = &ProviderError{Status: http.StatusBadGateway, Code: "upstream_key_unavailable", Message: err.Error(), Type: "api_error"}
 			continue
@@ -4761,7 +4761,7 @@ func (s *Server) streamChatGPTCodex(c *gin.Context, call GatewayCall) *ProviderE
 	usageLimitedAccounts := 0
 	for _, account := range accounts {
 		attemptedAccounts++
-		accessToken, err := s.revealSecret(account.AccessToken)
+		accessToken, err := s.resolveOpenAIAccountAccessToken(account)
 		if err != nil {
 			lastErr = &ProviderError{Status: http.StatusBadGateway, Code: "upstream_key_unavailable", Message: err.Error(), Type: "api_error"}
 			continue
@@ -8503,6 +8503,15 @@ func openAIAccountsUsageLimitedError(scope string) *ProviderError {
 }
 
 func shouldInvalidateOpenAIAccountForImage(providerErr *ProviderError) bool {
+	if providerErr == nil {
+		return false
+	}
+	// Image backends do not consistently attach a token-invalidated error code
+	// to an expired/revoked credential. A plain 401/403 must still eject this
+	// account so the pool can continue with the next one.
+	if providerErr.Status == http.StatusUnauthorized || providerErr.Status == http.StatusForbidden {
+		return true
+	}
 	return isBillingProviderError(providerErr) || isImagePermissionProviderError(providerErr) || isTokenInvalidatedProviderError(providerErr)
 }
 
