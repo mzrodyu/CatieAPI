@@ -748,13 +748,20 @@ func (s *Server) checkOpenAIAccountsInBackground() {
 	}
 	jobs := 0
 	for _, channel := range channels {
-		jobs += len(channel.OpenAIAccounts)
+		for _, account := range channel.OpenAIAccounts {
+			if accountHealthCheckDue(account.LastCheckedAt, s.accountHealthInterval) {
+				jobs++
+			}
+		}
 	}
 	results := make(chan healthCheckResult, jobs)
 	semaphore := make(chan struct{}, 3)
 	var workers sync.WaitGroup
 	for _, channel := range channels {
 		for _, account := range channel.OpenAIAccounts {
+			if !accountHealthCheckDue(account.LastCheckedAt, s.accountHealthInterval) {
+				continue
+			}
 			workers.Add(1)
 			go func(channel Channel, account OpenAIAccount) {
 				defer workers.Done()
@@ -833,6 +840,17 @@ func (s *Server) checkOpenAIAccountsInBackground() {
 		s.saveStateLocked()
 		s.mu.Unlock()
 	}
+}
+
+func accountHealthCheckDue(lastCheckedAt string, interval time.Duration) bool {
+	if interval <= 0 || strings.TrimSpace(lastCheckedAt) == "" {
+		return true
+	}
+	checkedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(lastCheckedAt))
+	if err != nil {
+		return true
+	}
+	return time.Now().UTC().Sub(checkedAt) >= interval
 }
 
 func (s *Server) registerRoutes(router *gin.Engine) {
