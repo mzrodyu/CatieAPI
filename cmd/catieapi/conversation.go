@@ -869,33 +869,43 @@ func (s *Server) doChatGPTWebConversation(call GatewayCall, account OpenAIAccoun
 		}
 	}
 
-	payload, providerErr := buildChatGPTWebConversationPayload(call, stream)
-	if providerErr != nil {
-		return nil, providerErr
-	}
-	request, err := http.NewRequest(http.MethodPost, joinURL(s.chatGPTAPIBase, chatGPTWebConversationPath), bytes.NewReader(payload))
-	if err != nil {
-		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
-	}
-	s.setChatGPTWebHeaders(request, accessToken, account, config, deviceID)
-	request.Header.Set("Accept", "text/event-stream")
-	request.Header.Set("Content-Type", "application/json")
-	setHeaderPreserveCase(request.Header, "Openai-Sentinel-Chat-Requirements-Token", requirements.Token)
-	if requirements.ProofOfWork.Required {
-		proof, _ := solveChatGPTWebProof(requirements.ProofOfWork.Seed, requirements.ProofOfWork.Difficulty, config)
-		setHeaderPreserveCase(request.Header, "Openai-Sentinel-Proof-Token", proof)
+	post := func(modelOverride string) (*http.Response, *ProviderError) {
+		payload, providerErr := buildChatGPTWebConversationPayload(call, stream, modelOverride)
+		if providerErr != nil {
+			return nil, providerErr
+		}
+		request, err := http.NewRequest(http.MethodPost, joinURL(s.chatGPTAPIBase, chatGPTWebConversationPath), bytes.NewReader(payload))
+		if err != nil {
+			return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
+		}
+		s.setChatGPTWebHeaders(request, accessToken, account, config, deviceID)
+		request.Header.Set("Accept", "text/event-stream")
+		request.Header.Set("Content-Type", "application/json")
+		setHeaderPreserveCase(request.Header, "Openai-Sentinel-Chat-Requirements-Token", requirements.Token)
+		if requirements.ProofOfWork.Required {
+			proof, _ := solveChatGPTWebProof(requirements.ProofOfWork.Seed, requirements.ProofOfWork.Difficulty, config)
+			setHeaderPreserveCase(request.Header, "Openai-Sentinel-Proof-Token", proof)
+		}
+
+		response, err := s.webHTTPClient.Do(request)
+		if err != nil {
+			return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			content, _ := io.ReadAll(response.Body)
+			_ = response.Body.Close()
+			return nil, providerErrorFromUpstream(response.StatusCode, content)
+		}
+		return response, nil
 	}
 
-	response, err := s.webHTTPClient.Do(request)
-	if err != nil {
-		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_unreachable", Message: err.Error(), Type: "api_error"}
+	response, providerErr := post("")
+	// A retired or unrecognized model slug should not fail the request outright:
+	// retry once with "auto" so the web app falls back to its current default.
+	if providerErr != nil && chatGPTWebModelUnavailableError(providerErr) && chatGPTWebModelID(call.Model.ID) != "auto" {
+		return post("auto")
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		content, _ := io.ReadAll(response.Body)
-		_ = response.Body.Close()
-		return nil, providerErrorFromUpstream(response.StatusCode, content)
-	}
-	return response, nil
+	return response, providerErr
 }
 
 // fetchChatGPTWebRequirements requests a chat-requirements token + proof seed.
@@ -955,9 +965,39 @@ func (s *Server) setChatGPTWebHeaders(request *http.Request, accessToken string,
 	}
 }
 
+// chatGPTWebModelUnavailableError reports whether an upstream error means the
+// requested model slug is unknown, unsupported, or retired, so the caller can
+// retry once with "auto" instead of failing the request.
+func chatGPTWebModelUnavailableError(providerErr *ProviderError) bool {
+	if providerErr == nil {
+		return false
+	}
+	text := strings.ToLower(strings.Join([]string{providerErr.Code, providerErr.Message, providerErr.Type}, " "))
+	if strings.Contains(text, "model_not_found") ||
+		strings.Contains(text, "model_not_available") ||
+		strings.Contains(text, "unsupported_model") ||
+		strings.Contains(text, "model not found") ||
+		strings.Contains(text, "model not available") ||
+		strings.Contains(text, "unsupported model") ||
+		strings.Contains(text, "does not exist") ||
+		strings.Contains(text, "no longer available") ||
+		strings.Contains(text, "invalid model") ||
+		strings.Contains(text, "unknown model") {
+		return true
+	}
+	// A 404 on the conversation endpoint most commonly means the model slug was
+	// rejected, so treat it as a model-availability failure worth retrying.
+	return providerErr.Status == http.StatusNotFound && strings.Contains(text, "model")
+}
+
 // buildChatGPTWebConversationPayload converts the OpenAI chat request into the
-// web conversation body.
-func buildChatGPTWebConversationPayload(call GatewayCall, stream bool) ([]byte, *ProviderError) {
+// web conversation body. When modelOverride is set it replaces the mapped model
+// slug, which lets the caller retry with "auto" after a model-unavailable error.
+func buildChatGPTWebConversationPayload(call GatewayCall, stream bool, modelOverride ...string) ([]byte, *ProviderError) {
+	model := chatGPTWebModelID(call.Model.ID)
+	if len(modelOverride) > 0 && strings.TrimSpace(modelOverride[0]) != "" {
+		model = strings.TrimSpace(modelOverride[0])
+	}
 	messages := make([]gin.H, 0, len(call.Body.Messages))
 	for _, message := range call.Body.Messages {
 		role := strings.TrimSpace(message.Role)
@@ -982,7 +1022,7 @@ func buildChatGPTWebConversationPayload(call GatewayCall, stream bool) ([]byte, 
 		"action":                        "next",
 		"messages":                      messages,
 		"parent_message_id":             randomUUID(),
-		"model":                         chatGPTWebModelID(call.Model.ID),
+		"model":                         model,
 		"timezone_offset_min":           0,
 		"suggestions":                   []string{},
 		"history_and_training_disabled": true,
@@ -996,17 +1036,24 @@ func buildChatGPTWebConversationPayload(call GatewayCall, stream bool) ([]byte, 
 	return encoded, nil
 }
 
-// chatGPTWebModelID maps a public model id to the web app's model slug.
+// chatGPTWebModelID maps a public model id to the web app's model family slug.
+// Mapping stays at the family level instead of pinning specific point releases,
+// because upstream retires minor versions frequently. Anything unrecognized
+// falls back to "auto" so the web app picks its current default model.
 func chatGPTWebModelID(modelID string) string {
 	trimmed := strings.TrimSpace(strings.ToLower(modelID))
 	switch {
 	case trimmed == "":
 		return "auto"
+	case strings.HasPrefix(trimmed, "gpt-5"):
+		return "gpt-5"
 	case strings.HasPrefix(trimmed, "gpt-4o"):
 		return "gpt-4o"
+	case strings.HasPrefix(trimmed, "gpt-4.1"):
+		return "gpt-4-1"
 	case strings.HasPrefix(trimmed, "gpt-4"):
 		return "gpt-4"
-	case strings.HasPrefix(trimmed, "o1"), strings.HasPrefix(trimmed, "o3"):
+	case strings.HasPrefix(trimmed, "o1"), strings.HasPrefix(trimmed, "o3"), strings.HasPrefix(trimmed, "o4"):
 		return trimmed
 	default:
 		return "auto"
