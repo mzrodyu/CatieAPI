@@ -2575,14 +2575,16 @@ function DrawingView({
       account.accountId || "",
       account.status || "unchecked",
       account.credentialMode || "access-token",
+      account.planType || "",
       account.expiresAt || "",
       account.lastCheckedAt || "",
       account.lastUsedAt || "",
       String(account.requestCount || 0),
+      account.lastErrorCode || "",
       account.lastError || ""
     ]);
     const quote = (value: string) => `"${value.replace(/"/g, '""')}"`;
-    const content = [["账号", "Account ID", "状态", "凭据方式", "到期时间", "最近检测", "最近调用", "调用次数", "最后错误"], ...rows]
+    const content = [["账号", "Account ID", "状态", "凭据方式", "套餐", "到期时间", "最近检测", "最近调用", "调用次数", "错误码", "最后错误"], ...rows]
       .map((row) => row.map(quote).join(","))
       .join("\r\n");
     const blob = new Blob(["\uFEFF" + content], { type: "text/csv;charset=utf-8" });
@@ -2640,6 +2642,7 @@ function DrawingView({
             const accounts = arrayOf(channel.openaiAccounts);
             const healthy = accounts.filter((account) => account.status === "healthy").length;
             const invalid = accounts.filter((account) => account.status === "invalid").length;
+            const errorCount = accounts.filter((account) => Boolean(account.lastErrorCode)).length;
             const unchecked = Math.max(0, accounts.length - healthy - invalid);
 			const refreshable = accounts.filter((account) => account.credentialMode === "refreshable").length;
 			const browserSession = accounts.filter((account) => account.credentialMode === "browser-session").length;
@@ -2700,7 +2703,7 @@ function DrawingView({
 						<option value="recent">最近使用优先</option>
 						<option value="expiry">最早到期优先</option>
 					</select>
-					{[["all", `全部 ${accounts.length}`], ["attention", "需关注"], ["invalid", `无效 ${invalid}`], ["error", "有错误"], ["refreshable", `可续期 ${refreshable}`]].map(([value, label]) => (
+					{[["all", `全部 ${accounts.length}`], ["attention", "需关注"], ["invalid", `无效 ${invalid}`], ["error", `有错误 ${errorCount}`], ["refreshable", `可续期 ${refreshable}`]].map(([value, label]) => (
 						<button key={value} type="button" className={filter === value ? "selected" : ""} onClick={() => setAccountFilters((current) => ({ ...current, [channel.id]: value as "all" | "attention" | "invalid" | "error" | "refreshable" }))}>{label}</button>
 					))}
 				</div>
