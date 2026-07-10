@@ -59,7 +59,7 @@ const (
 // clear values so the admin page can distinguish a rebuilt binary from a
 // deployed release.
 var (
-	buildVersion = "dev"
+	buildVersion = "v0.1.0"
 	buildCommit  = "local"
 	buildTime    = ""
 )

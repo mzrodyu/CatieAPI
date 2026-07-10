@@ -166,15 +166,15 @@ button {
   width: 42px;
   height: 42px;
   color: #fff;
-  background: #1d1d1f;
+  background: linear-gradient(135deg, #2a9bff, #0071e3);
   border-radius: 13px;
   font-weight: 800;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 4px 12px color-mix(in srgb, var(--blue) 28%, transparent);
 }
 
 .app-shell[data-theme="dark"] .brand-mark {
   color: #fff;
-  background: rgba(118, 118, 128, 0.2);
+  background: linear-gradient(135deg, #2a9bff, #0060c8);
   border: 0;
 }
 
@@ -817,7 +817,8 @@ h3 {
   border: 0;
 }
 
-/* Status dot: gives state badges a small living indicator instead of a flat pill. */
+/* Status dot: a small inline indicator before the label. Kept as a plain dot
+   (no glow) so it stays centered inside the pill at every badge size. */
 .badge.tone-active::before,
 .badge.tone-healthy::before,
 .badge.tone-available::before,
@@ -828,8 +829,9 @@ h3 {
 .badge.tone-overdue::before,
 .badge.tone-standby::before {
   content: "";
-  width: 6px;
-  height: 6px;
+  display: inline-block;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: currentColor;
   flex: 0 0 auto;
@@ -841,14 +843,6 @@ h3 {
 .tone-success {
   color: #118446;
   background: color-mix(in srgb, var(--green) 16%, transparent);
-}
-
-/* Healthy/online dots get a soft halo to feel alive without animation noise. */
-.badge.tone-active::before,
-.badge.tone-healthy::before,
-.badge.tone-available::before,
-.badge.tone-success::before {
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 18%, transparent);
 }
 
 .tone-disabled,
@@ -1173,12 +1167,12 @@ h3 {
   flex: 0 0 38px;
   width: 38px;
   height: 38px;
-  color: var(--text);
+  color: var(--blue);
   font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.02em;
-  background: var(--surface-solid);
-  border: 1px solid var(--hairline);
+  background: color-mix(in srgb, var(--blue) 12%, var(--surface-solid));
+  border: 1px solid color-mix(in srgb, var(--blue) 26%, var(--hairline));
   border-radius: 10px;
 }
 
