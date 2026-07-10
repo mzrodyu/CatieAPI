@@ -2533,7 +2533,7 @@ function DrawingView({
   const drawingChannels = channels.filter((channel) => channel.provider === "codex" || channel.provider === "openai" || arrayOf(channel.models).some((model) => model.includes("image")));
   const [busy, setBusy] = useState("");
   const [accountVisibleCounts, setAccountVisibleCounts] = useState<Record<string, number>>({});
-  const [accountFilters, setAccountFilters] = useState<Record<string, "all" | "attention" | "invalid" | "refreshable">>({});
+  const [accountFilters, setAccountFilters] = useState<Record<string, "all" | "attention" | "invalid" | "error" | "refreshable">>({});
   const [accountQueries, setAccountQueries] = useState<Record<string, string>>({});
   const [accountSorts, setAccountSorts] = useState<Record<string, "pool" | "oldest" | "recent" | "expiry">>({});
   const [oauthChannelId, setOAuthChannelId] = useState("");
@@ -2647,7 +2647,7 @@ function DrawingView({
 			const filter = accountFilters[channel.id] || "all";
 			const accountQuery = (accountQueries[channel.id] || "").trim().toLowerCase();
 			const filteredAccounts = accounts.filter((account) => {
-				const matchesFilter = filter === "all" || (filter === "attention" && accountNeedsAttention(account)) || (filter === "invalid" && account.status === "invalid") || (filter === "refreshable" && account.credentialMode === "refreshable");
+				const matchesFilter = filter === "all" || (filter === "attention" && accountNeedsAttention(account)) || (filter === "invalid" && account.status === "invalid") || (filter === "error" && Boolean(account.lastErrorCode)) || (filter === "refreshable" && account.credentialMode === "refreshable");
 				const searchable = `${account.email || ""} ${account.name || ""} ${account.accountId || ""} ${account.userId || ""} ${account.lastError || ""}`.toLowerCase();
 				return matchesFilter && (!accountQuery || searchable.includes(accountQuery));
 			});
@@ -2700,8 +2700,8 @@ function DrawingView({
 						<option value="recent">最近使用优先</option>
 						<option value="expiry">最早到期优先</option>
 					</select>
-					{[["all", `全部 ${accounts.length}`], ["attention", "需关注"], ["invalid", `无效 ${invalid}`], ["refreshable", `可续期 ${refreshable}`]].map(([value, label]) => (
-						<button key={value} type="button" className={filter === value ? "selected" : ""} onClick={() => setAccountFilters((current) => ({ ...current, [channel.id]: value as "all" | "attention" | "invalid" | "refreshable" }))}>{label}</button>
+					{[["all", `全部 ${accounts.length}`], ["attention", "需关注"], ["invalid", `无效 ${invalid}`], ["error", "有错误"], ["refreshable", `可续期 ${refreshable}`]].map(([value, label]) => (
+						<button key={value} type="button" className={filter === value ? "selected" : ""} onClick={() => setAccountFilters((current) => ({ ...current, [channel.id]: value as "all" | "attention" | "invalid" | "error" | "refreshable" }))}>{label}</button>
 					))}
 				</div>
                 <div className="metrics-grid">
