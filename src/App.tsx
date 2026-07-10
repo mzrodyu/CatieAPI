@@ -920,10 +920,10 @@ function App() {
     window.setTimeout(() => setToast(""), 2600);
   }
 
-  async function checkOpenAIAccounts(channelId: string, onlyInvalid = false) {
+  async function checkOpenAIAccounts(channelId: string, onlyInvalid = false, accountId = "") {
     const result = await fetchJson<OpenAIAccountCheckResult>(`/api/channels/${encodeURIComponent(channelId)}/openai-accounts/check`, {
       method: "POST",
-      body: JSON.stringify({ onlyInvalid })
+      body: JSON.stringify({ onlyInvalid, accountId })
     });
     setChannels((current) => current.map((channel) => (channel.id === result.channel.id ? normalizeChannel(result.channel) : channel)));
     setToast(`${onlyInvalid ? "无效账号复检" : "账号测活"}完成：${result.healthy}/${result.checked} 可用${result.failed ? `，无效 ${result.failed}` : ""}`);
@@ -2523,7 +2523,7 @@ function DrawingView({
   channels: Channel[];
   onCreate: (channel?: ChannelCreate) => Promise<void>;
   onImport: (channelId: string, file: File) => Promise<void>;
-  onCheckAccounts: (channelId: string, onlyInvalid?: boolean) => Promise<void>;
+  onCheckAccounts: (channelId: string, onlyInvalid?: boolean, accountId?: string) => Promise<void>;
   onDeduplicateAccounts: (channelId: string) => Promise<void>;
   onDeleteAccount: (channelId: string, accountId: string) => Promise<void>;
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
@@ -2551,10 +2551,10 @@ function DrawingView({
     }
   }
 
-  async function checkAccounts(channelId: string, onlyInvalid = false) {
-	setBusy(`${onlyInvalid ? "retry" : "check"}:${channelId}`);
+  async function checkAccounts(channelId: string, onlyInvalid = false, accountId = "") {
+	setBusy(accountId ? `check-account:${accountId}` : `${onlyInvalid ? "retry" : "check"}:${channelId}`);
     try {
-	  await onCheckAccounts(channelId, onlyInvalid);
+	  await onCheckAccounts(channelId, onlyInvalid, accountId);
     } finally {
       setBusy("");
     }
@@ -2740,6 +2740,14 @@ function DrawingView({
                           <Badge tone={account.status === "healthy" ? "healthy" : account.status === "invalid" ? "disabled" : "standby"}>
                             {account.status === "healthy" ? "可用" : account.status === "invalid" ? "无效" : "未验证"}
                           </Badge>
+                          <button
+                            type="button"
+                            className="secondary-button compact-button"
+                            disabled={busy !== ""}
+                            onClick={() => checkAccounts(channel.id, false, account.id)}
+                          >
+                            {busy === `check-account:${account.id}` ? "检测中" : "检测"}
+                          </button>
                           <button
                             type="button"
                             className="danger-button compact-button"

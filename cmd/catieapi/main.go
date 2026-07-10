@@ -2980,7 +2980,8 @@ func openAIClaimsAccountInfo(idToken string) (accountID string, planType string)
 
 func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 	var body struct {
-		OnlyInvalid bool `json:"onlyInvalid"`
+		OnlyInvalid bool   `json:"onlyInvalid"`
+		AccountID   string `json:"accountId"`
 	}
 	_ = c.ShouldBindJSON(&body)
 	s.mu.Lock()
@@ -2999,6 +3000,9 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 	failed := 0
 	results := []PublicOpenAIAccount{}
 	for _, account := range channelCopy.OpenAIAccounts {
+		if strings.TrimSpace(body.AccountID) != "" && account.ID != strings.TrimSpace(body.AccountID) {
+			continue
+		}
 		if body.OnlyInvalid && account.Status != "invalid" {
 			continue
 		}
