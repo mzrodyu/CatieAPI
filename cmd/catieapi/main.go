@@ -7789,6 +7789,19 @@ func parseOpenAIAccountImport(payload map[string]interface{}) []ImportedOpenAIAc
 	if payload == nil {
 		return nil
 	}
+	// Codex CLI auth exports keep OAuth credentials under a top-level `tokens`
+	// object, unlike CPA exports which store the same fields at the root.
+	if tokens, ok := payload["tokens"].(map[string]interface{}); ok {
+		accountPayload := make(map[string]interface{}, len(payload)+len(tokens))
+		for key, value := range payload {
+			accountPayload[key] = value
+		}
+		for key, value := range tokens {
+			accountPayload[key] = value
+		}
+		delete(accountPayload, "tokens")
+		return parseOpenAIAccountImport(accountPayload)
+	}
 	if rawAccounts, ok := payload["accounts"].([]interface{}); ok {
 		accounts := []ImportedOpenAIAccount{}
 		for _, raw := range rawAccounts {

@@ -3169,6 +3169,29 @@ func TestParseOpenAIAccountImportSupportsChatGPTAuthSessionShape(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIAccountImportSupportsCodexAuthTokensShape(t *testing.T) {
+	accounts, _, invalid, err := parseOpenAIAccountImportJSON([]byte(`{
+		"auth_mode":"chatgpt",
+		"tokens":{
+			"id_token":"codex-id-token",
+			"access_token":"codex-access-token",
+			"refresh_token":"",
+			"account_id":"account-codex"
+		},
+		"last_refresh":"2026-07-09T15:05:05.447376Z"
+	}`))
+	if err != nil || invalid != 0 || len(accounts) != 1 {
+		t.Fatalf("Codex auth import accounts=%#v invalid=%d err=%v", accounts, invalid, err)
+	}
+	account := accounts[0]
+	if account.AccessToken != "codex-access-token" ||
+		account.IDToken != "codex-id-token" ||
+		account.AccountID != "account-codex" ||
+		account.LastRefresh != "2026-07-09T15:05:05.447376Z" {
+		t.Fatalf("Codex auth fields were not parsed: %#v", account)
+	}
+}
+
 func TestParseOpenAIAccountImportTextSupportsJSONLinesAndRawTokens(t *testing.T) {
 	accounts, invalid, err := parseOpenAIAccountImportFile("accounts.txt", []byte("# exported accounts\n{\"accessToken\":\"web-access\",\"sessionToken\":\"web-session\",\"expires\":\"2026-10-07T19:47:47Z\"}\nraw.header.signature\nnot-an-account\n"))
 	if err != nil || invalid != 1 || len(accounts) != 2 {

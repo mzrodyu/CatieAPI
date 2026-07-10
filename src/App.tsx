@@ -2868,9 +2868,13 @@ function authSessionImportPayload(value: string) {
   if (cookieMatch) return { sessionToken: cookieMatch[2], source: "web-login" };
   try {
     const session = JSON.parse(raw) as Record<string, unknown>;
-    const accessToken = typeof session.accessToken === "string" ? session.accessToken : typeof session.access_token === "string" ? session.access_token : "";
-    const refreshToken = typeof session.refreshToken === "string" ? session.refreshToken : typeof session.refresh_token === "string" ? session.refresh_token : "";
-    const sessionToken = typeof session.sessionToken === "string" ? session.sessionToken : typeof session.session_token === "string" ? session.session_token : "";
+    // Codex auth exports wrap the OAuth credentials in a top-level `tokens` object.
+    const tokens = session.tokens && typeof session.tokens === "object" ? session.tokens as Record<string, unknown> : {};
+    const value = (key: "accessToken" | "access_token" | "refreshToken" | "refresh_token" | "sessionToken" | "session_token") =>
+      typeof session[key] === "string" ? session[key] : typeof tokens[key] === "string" ? tokens[key] : "";
+    const accessToken = value("accessToken") || value("access_token");
+    const refreshToken = value("refreshToken") || value("refresh_token");
+    const sessionToken = value("sessionToken") || value("session_token");
     const user = session.user && typeof session.user === "object" ? session.user as Record<string, unknown> : {};
     if (accessToken || refreshToken || sessionToken) {
       return {
