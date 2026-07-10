@@ -295,6 +295,7 @@ type OpenAIAccountCheckResult struct {
 	Status       string
 	Message      string
 	QuotaLimits  []OpenAIQuotaLimit
+	PlanType     string
 	AccessToken  string
 	RefreshToken string
 	IDToken      string
@@ -796,6 +797,9 @@ func (s *Server) checkOpenAIAccountsInBackground() {
 				}
 				if checked.result.LastRefresh != "" {
 					live.OpenAIAccounts[index].LastRefresh = checked.result.LastRefresh
+				}
+				if checked.result.PlanType != "" {
+					live.OpenAIAccounts[index].PlanType = checked.result.PlanType
 				}
 				if checked.result.QuotaLimits != nil {
 					live.OpenAIAccounts[index].QuotaLimits = checked.result.QuotaLimits
@@ -3029,6 +3033,9 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 				}
 				if result.LastRefresh != "" {
 					liveChannel.OpenAIAccounts[index].LastRefresh = result.LastRefresh
+				}
+				if result.PlanType != "" {
+					liveChannel.OpenAIAccounts[index].PlanType = result.PlanType
 				}
 				if result.QuotaLimits != nil {
 					liveChannel.OpenAIAccounts[index].QuotaLimits = result.QuotaLimits
@@ -5483,7 +5490,7 @@ func codexClientProfileForImport(source string, explicit string) string {
 
 func isCodexProxyImportSource(source string) bool {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "cpa", "sub2api", "sub2":
+	case "cpa", "sub2api", "sub2", "sub":
 		return true
 	default:
 		return false
@@ -6331,11 +6338,12 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 		result.LastRefresh = now()
 		hasRefreshToken = strings.TrimSpace(refreshToken) != ""
 	}
+	_, result.PlanType = openAIClaimsAccountInfo(accessToken)
+	result.PlanType = firstNonEmptyString(result.PlanType, account.PlanType)
 	quotaLimits, providerErr := s.checkOpenAIAccountUsage(accessToken, account)
 	if providerErr != nil {
 		result.Message = fmt.Sprintf("HTTP %d: %s", providerErr.Status, truncateString(providerErr.Message, 300))
-		if providerErr.Status == http.StatusUnauthorized || providerErr.Status == http.StatusForbidden ||
-			(providerErr.Status == http.StatusPaymentRequired && !hasRefreshToken) {
+		if shouldInvalidateOpenAIAccountForUsage(account, providerErr, hasRefreshToken) {
 			result.Status = "invalid"
 		}
 		return result
@@ -6352,6 +6360,37 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 	}
 	result.Message = ""
 	return result
+}
+
+// Sub2API may surface account-level or subscription errors as HTTP 401/403
+// from its usage endpoint. Only eject those accounts when the response
+// explicitly identifies an invalid credential; CPA keeps the stricter legacy
+// behavior because its gateway uses 401/403 for authentication failures.
+func shouldInvalidateOpenAIAccountForUsage(account OpenAIAccount, providerErr *ProviderError, hasRefreshToken bool) bool {
+	if providerErr == nil {
+		return false
+	}
+	if providerErr.Status == http.StatusPaymentRequired && !hasRefreshToken {
+		return true
+	}
+	if !isCodexProxyImportSource(account.Source) || strings.EqualFold(strings.TrimSpace(account.Source), "cpa") {
+		return providerErr.Status == http.StatusUnauthorized || providerErr.Status == http.StatusForbidden
+	}
+	return isExplicitTokenInvalidProviderError(providerErr)
+}
+
+func isExplicitTokenInvalidProviderError(providerErr *ProviderError) bool {
+	if providerErr == nil {
+		return false
+	}
+	if isTokenInvalidatedProviderError(providerErr) {
+		return true
+	}
+	text := strings.ToLower(strings.Join([]string{providerErr.Code, providerErr.Message, providerErr.Type}, " "))
+	return strings.Contains(text, "invalid token") ||
+		strings.Contains(text, "token rejected") ||
+		strings.Contains(text, "invalid_api_key") ||
+		strings.Contains(text, "authentication failed")
 }
 
 func (s *Server) checkOpenAIAccountUsage(accessToken string, account OpenAIAccount) ([]OpenAIQuotaLimit, *ProviderError) {

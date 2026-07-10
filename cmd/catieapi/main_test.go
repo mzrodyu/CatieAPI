@@ -2632,6 +2632,19 @@ func TestShouldInvalidateOpenAIAccountForImageOnPlainUnauthorized(t *testing.T) 
 	}
 }
 
+func TestSub2APIUsageDoesNotTreatGenericUnauthorizedAsInvalid(t *testing.T) {
+	account := OpenAIAccount{Source: "sub2api"}
+	if shouldInvalidateOpenAIAccountForUsage(account, &ProviderError{Status: http.StatusUnauthorized, Code: "upstream_account_error", Message: "account unavailable", Type: "account_error"}, false) {
+		t.Fatal("generic Sub2API unauthorized response should remain unchecked")
+	}
+	if !shouldInvalidateOpenAIAccountForUsage(account, &ProviderError{Status: http.StatusUnauthorized, Code: "upstream_token_invalidated", Message: "token invalidated", Type: "auth_error"}, false) {
+		t.Fatal("explicit Sub2API token invalidation should mark account invalid")
+	}
+	if !shouldInvalidateOpenAIAccountForUsage(OpenAIAccount{Source: "cpa"}, &ProviderError{Status: http.StatusUnauthorized, Code: "upstream_error"}, false) {
+		t.Fatal("CPA unauthorized response should retain strict invalidation")
+	}
+}
+
 func TestImageGenerationsReturnPoolUnavailableWhenAllOpenAIAccountsInvalidated(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/backend-api/codex/responses" {

@@ -459,6 +459,13 @@ function channelCreateFromTemplate(provider: string): ChannelCreate {
   };
 }
 
+function planTypeLabel(value?: string) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return "套餐未知";
+  const labels: Record<string, string> = { free: "Free", plus: "Plus", pro: "Pro", team: "Team", enterprise: "Enterprise" };
+  return labels[normalized] || value || "套餐未知";
+}
+
 function defaultBaseURLForProvider(provider: string) {
   if (provider === "openai") return defaultOpenAIBaseURL;
   if (provider === "codex") return defaultCodexBaseURL;
@@ -2711,6 +2718,7 @@ function DrawingView({
                             </div>
                             <span>{account.lastError || (account.lastCheckedAt ? `上次检测 ${formatDate(account.lastCheckedAt)}` : "未检测")}</span>
                             <span>{account.credentialMode === "refreshable" ? "可自动续期" : account.credentialMode === "browser-session" ? "依赖网页会话" : "仅 access token"}{account.expiresAt ? ` · 到期 ${formatDate(account.expiresAt)}` : ""}</span>
+	                            <span>套餐 {planTypeLabel(account.planType)}</span>
 	                            {account.lastUsedAt && <span>最近调用 {formatDate(account.lastUsedAt)} · {account.requestCount || 0} 次</span>}
                           </div>
                           <QuotaBars limits={account.quotaLimits} />
