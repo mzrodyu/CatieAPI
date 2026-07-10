@@ -55,6 +55,15 @@ const (
 	openAIOAuthScope              = "openid profile email offline_access"
 )
 
+// These are injected by a release build with -ldflags. Local builds retain
+// clear values so the admin page can distinguish a rebuilt binary from a
+// deployed release.
+var (
+	buildVersion = "dev"
+	buildCommit  = "local"
+	buildTime    = ""
+)
+
 var imageJSONKeepaliveInterval = 8 * time.Second
 
 type AppState struct {
@@ -227,25 +236,32 @@ type OpenAIAccount struct {
 	Status        string             `json:"status,omitempty"`
 	LastCheckedAt string             `json:"lastCheckedAt,omitempty"`
 	LastError     string             `json:"lastError,omitempty"`
+	LastUsedAt    string             `json:"lastUsedAt,omitempty"`
+	RequestCount  int                `json:"requestCount,omitempty"`
 	QuotaLimits   []OpenAIQuotaLimit `json:"quotaLimits,omitempty"`
 }
 
 type PublicOpenAIAccount struct {
-	ID            string             `json:"id"`
-	Name          string             `json:"name,omitempty"`
-	Email         string             `json:"email,omitempty"`
-	AccountID     string             `json:"accountId,omitempty"`
-	UserID        string             `json:"userId,omitempty"`
-	ExpiresAt     string             `json:"expiresAt,omitempty"`
-	LastRefresh   string             `json:"lastRefresh,omitempty"`
-	PlanType      string             `json:"planType,omitempty"`
-	Source        string             `json:"source,omitempty"`
-	ClientProfile string             `json:"clientProfile,omitempty"`
-	ImportedAt    string             `json:"importedAt,omitempty"`
-	Status        string             `json:"status,omitempty"`
-	LastCheckedAt string             `json:"lastCheckedAt,omitempty"`
-	LastError     string             `json:"lastError,omitempty"`
-	QuotaLimits   []OpenAIQuotaLimit `json:"quotaLimits,omitempty"`
+	ID              string             `json:"id"`
+	Name            string             `json:"name,omitempty"`
+	Email           string             `json:"email,omitempty"`
+	AccountID       string             `json:"accountId,omitempty"`
+	UserID          string             `json:"userId,omitempty"`
+	ExpiresAt       string             `json:"expiresAt,omitempty"`
+	LastRefresh     string             `json:"lastRefresh,omitempty"`
+	PlanType        string             `json:"planType,omitempty"`
+	Source          string             `json:"source,omitempty"`
+	ClientProfile   string             `json:"clientProfile,omitempty"`
+	ImportedAt      string             `json:"importedAt,omitempty"`
+	Status          string             `json:"status,omitempty"`
+	LastCheckedAt   string             `json:"lastCheckedAt,omitempty"`
+	LastError       string             `json:"lastError,omitempty"`
+	LastUsedAt      string             `json:"lastUsedAt,omitempty"`
+	RequestCount    int                `json:"requestCount,omitempty"`
+	QuotaLimits     []OpenAIQuotaLimit `json:"quotaLimits,omitempty"`
+	HasRefreshToken bool               `json:"hasRefreshToken"`
+	HasSessionToken bool               `json:"hasSessionToken"`
+	CredentialMode  string             `json:"credentialMode"`
 }
 
 type OpenAIQuotaLimit struct {
@@ -357,6 +373,7 @@ type Server struct {
 	discordAPIBase        string
 	authSuccessURL        string
 	sessionTTL            time.Duration
+	accountHealthInterval time.Duration
 	rateLimitBuckets      map[string]int
 	idempotencyCache      map[string]CachedResponse
 	authStates            map[string]time.Time
@@ -675,6 +692,7 @@ func NewServer() *Server {
 		discordAPIBase:        env("DISCORD_API_BASE", "https://discord.com/api/v10"),
 		authSuccessURL:        env("AUTH_SUCCESS_URL", ""),
 		sessionTTL:            time.Duration(envInt("SESSION_TTL_HOURS", 168)) * time.Hour,
+		accountHealthInterval: 15 * time.Minute,
 		rateLimitBuckets:      map[string]int{},
 		idempotencyCache:      map[string]CachedResponse{},
 		authStates:            map[string]time.Time{},
@@ -690,7 +708,96 @@ func NewServer() *Server {
 	}
 	s.mu.Unlock()
 	s.applyPersistedDiscordSettings()
+	if s.accountHealthInterval > 0 {
+		go s.runAccountHealthChecks()
+	}
 	return s
+}
+
+func (s *Server) runAccountHealthChecks() {
+	s.checkOpenAIAccountsInBackground()
+	ticker := time.NewTicker(s.accountHealthInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.checkOpenAIAccountsInBackground()
+	}
+}
+
+// checkOpenAIAccountsInBackground intentionally reuses the same credential
+// validation path as the UI batch check, but never changes an enabled channel
+// to disabled merely because every account is temporarily unavailable.
+func (s *Server) checkOpenAIAccountsInBackground() {
+	s.mu.Lock()
+	channels := append([]Channel{}, s.state.Channels...)
+	for i := range channels {
+		channels[i].OpenAIAccounts = append([]OpenAIAccount{}, channels[i].OpenAIAccounts...)
+	}
+	s.mu.Unlock()
+
+	changed := false
+	for _, channel := range channels {
+		healthyAccounts := 0
+		for _, account := range channel.OpenAIAccounts {
+			result := s.checkOpenAIAccount(account, channel)
+			if result.Status == "healthy" {
+				healthyAccounts++
+			}
+			s.mu.Lock()
+			live := s.findChannel(channel.ID)
+			if live != nil {
+				for index := range live.OpenAIAccounts {
+					if live.OpenAIAccounts[index].ID != account.ID {
+						continue
+					}
+					live.OpenAIAccounts[index].Status = result.Status
+					live.OpenAIAccounts[index].LastCheckedAt = now()
+					live.OpenAIAccounts[index].LastError = truncateString(result.Message, 500)
+					if result.AccessToken != "" {
+						live.OpenAIAccounts[index].AccessToken = result.AccessToken
+					}
+					if result.RefreshToken != "" {
+						live.OpenAIAccounts[index].RefreshToken = result.RefreshToken
+					}
+					if result.IDToken != "" {
+						live.OpenAIAccounts[index].IDToken = result.IDToken
+					}
+					if result.ExpiresAt != "" {
+						live.OpenAIAccounts[index].ExpiresAt = result.ExpiresAt
+					}
+					if result.LastRefresh != "" {
+						live.OpenAIAccounts[index].LastRefresh = result.LastRefresh
+					}
+					if result.QuotaLimits != nil {
+						live.OpenAIAccounts[index].QuotaLimits = result.QuotaLimits
+					}
+					changed = true
+					break
+				}
+			}
+			s.mu.Unlock()
+		}
+		s.mu.Lock()
+		live := s.findChannel(channel.ID)
+		if live != nil {
+			live.LastCheckedAt = now()
+			if live.Status != "disabled" {
+				if healthyAccounts > 0 {
+					live.Status = "healthy"
+					live.LastError = ""
+				} else if len(channel.OpenAIAccounts) > 0 {
+					live.Status = "standby"
+					live.LastError = "账号池暂时没有可用账号"
+				}
+			}
+			changed = true
+		}
+		s.mu.Unlock()
+	}
+	if changed {
+		s.mu.Lock()
+		s.saveStateLocked()
+		s.mu.Unlock()
+	}
 }
 
 func (s *Server) registerRoutes(router *gin.Engine) {
@@ -905,6 +1012,9 @@ func (s *Server) health(c *gin.Context) {
 		"name":         "CatieAPI",
 		"mode":         s.persistence,
 		"providerMode": s.providerMode,
+		"version":      buildVersion,
+		"commit":       buildCommit,
+		"buildTime":    buildTime,
 		"time":         now(),
 	})
 }
@@ -2789,6 +2899,10 @@ func openAIClaimsAccountInfo(idToken string) (accountID string, planType string)
 }
 
 func (s *Server) checkOpenAIAccounts(c *gin.Context) {
+	var body struct {
+		OnlyInvalid bool `json:"onlyInvalid"`
+	}
+	_ = c.ShouldBindJSON(&body)
 	s.mu.Lock()
 	channel := s.findChannel(c.Param("id"))
 	if channel == nil {
@@ -2805,6 +2919,9 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 	failed := 0
 	results := []PublicOpenAIAccount{}
 	for _, account := range channelCopy.OpenAIAccounts {
+		if body.OnlyInvalid && account.Status != "invalid" {
+			continue
+		}
 		checked++
 		result := s.checkOpenAIAccount(account, channelCopy)
 		status := result.Status
@@ -4588,6 +4705,7 @@ func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *Provi
 			}
 			body, providerErr := s.callChatGPTCodexImageWithAccount(call, account, upstreamKey)
 			if providerErr == nil {
+				s.markOpenAIAccountUsed(call.Channel.ID, account.ID)
 				return body, nil
 			}
 			lastErr = providerErr
@@ -4688,6 +4806,7 @@ func (s *Server) callChatGPTCodex(call GatewayCall) (gin.H, *ProviderError) {
 		}
 		body, providerErr := s.callChatGPTCodexWithAccount(call, account, accessToken)
 		if providerErr == nil {
+			s.markOpenAIAccountUsed(call.Channel.ID, account.ID)
 			return body, nil
 		}
 		lastErr = providerErr
@@ -4768,6 +4887,7 @@ func (s *Server) streamChatGPTCodex(c *gin.Context, call GatewayCall) *ProviderE
 		}
 		providerErr := s.streamChatGPTCodexWithAccount(c, call, account, accessToken)
 		if providerErr == nil {
+			s.markOpenAIAccountUsed(call.Channel.ID, account.ID)
 			return nil
 		}
 		lastErr = providerErr
@@ -6053,7 +6173,8 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 	quotaLimits, providerErr := s.checkOpenAIAccountUsage(accessToken, account)
 	if providerErr != nil {
 		result.Message = fmt.Sprintf("HTTP %d: %s", providerErr.Status, truncateString(providerErr.Message, 300))
-		if providerErr.Status == http.StatusPaymentRequired && !hasRefreshToken {
+		if providerErr.Status == http.StatusUnauthorized || providerErr.Status == http.StatusForbidden ||
+			(providerErr.Status == http.StatusPaymentRequired && !hasRefreshToken) {
 			result.Status = "invalid"
 		}
 		return result
@@ -6956,6 +7077,24 @@ func (s *Server) markOpenAIAccountInvalid(channelID string, accountID string, me
 	}
 }
 
+func (s *Server) markOpenAIAccountUsed(channelID string, accountID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	channel := s.findChannel(channelID)
+	if channel == nil {
+		return
+	}
+	for index := range channel.OpenAIAccounts {
+		if channel.OpenAIAccounts[index].ID != accountID {
+			continue
+		}
+		channel.OpenAIAccounts[index].LastUsedAt = now()
+		channel.OpenAIAccounts[index].RequestCount++
+		s.saveStateLocked()
+		return
+	}
+}
+
 func (s *Server) markOpenAIAccountUsageLimited(channelID string, accountID string, message string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -7618,11 +7757,50 @@ func parseOpenAIAccountImportFile(filename string, content []byte) ([]ImportedOp
 	if strings.HasSuffix(lowerName, ".zip") || isZipContent(content) {
 		return parseOpenAIAccountImportZip(content)
 	}
+	if strings.HasSuffix(lowerName, ".txt") {
+		return parseOpenAIAccountImportText(content)
+	}
 	if lowerName != "" && !strings.HasSuffix(lowerName, ".json") {
-		return nil, 1, fmt.Errorf("import file must be .json or .zip")
+		return nil, 1, fmt.Errorf("import file must be .json, .txt or .zip")
 	}
 	accounts, _, invalid, err := parseOpenAIAccountImportJSON(content)
 	return accounts, invalid, err
+}
+
+// parseOpenAIAccountImportText accepts JSON Lines exports and one raw access
+// token per line. It intentionally ignores empty/comment lines so account
+// manager exports can include separators without breaking the batch.
+func parseOpenAIAccountImportText(content []byte) ([]ImportedOpenAIAccount, int, error) {
+	accounts := []ImportedOpenAIAccount{}
+	invalid := 0
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		if strings.HasPrefix(line, "{") {
+			parsed, _, lineInvalid, err := parseOpenAIAccountImportJSON([]byte(line))
+			if err != nil || len(parsed) == 0 {
+				if lineInvalid > 0 {
+					invalid += lineInvalid
+				} else {
+					invalid++
+				}
+				continue
+			}
+			accounts = append(accounts, parsed...)
+			continue
+		}
+		if strings.Count(line, ".") >= 2 && !strings.ContainsAny(line, " \t") {
+			accounts = append(accounts, ImportedOpenAIAccount{AccessToken: line, Source: "web-login"})
+			continue
+		}
+		invalid++
+	}
+	if len(accounts) == 0 {
+		return nil, invalid, fmt.Errorf("TXT does not contain importable account credentials")
+	}
+	return accounts, invalid, nil
 }
 
 func parseOpenAIAccountImportJSON(content []byte) ([]ImportedOpenAIAccount, []string, int, error) {
@@ -9751,22 +9929,33 @@ func publicChannel(channel Channel) PublicChannel {
 }
 
 func publicOpenAIAccount(account OpenAIAccount) PublicOpenAIAccount {
+	credentialMode := "access-token"
+	if strings.TrimSpace(account.RefreshToken) != "" {
+		credentialMode = "refreshable"
+	} else if strings.TrimSpace(account.SessionToken) != "" {
+		credentialMode = "browser-session"
+	}
 	return PublicOpenAIAccount{
-		ID:            account.ID,
-		Name:          account.Name,
-		Email:         account.Email,
-		AccountID:     account.AccountID,
-		UserID:        account.UserID,
-		ExpiresAt:     account.ExpiresAt,
-		LastRefresh:   account.LastRefresh,
-		PlanType:      account.PlanType,
-		Source:        account.Source,
-		ClientProfile: codexClientProfileForImport(account.Source, account.ClientProfile),
-		ImportedAt:    account.ImportedAt,
-		Status:        firstNonEmptyString(account.Status, "unchecked"),
-		LastCheckedAt: account.LastCheckedAt,
-		LastError:     account.LastError,
-		QuotaLimits:   append([]OpenAIQuotaLimit{}, account.QuotaLimits...),
+		ID:              account.ID,
+		Name:            account.Name,
+		Email:           account.Email,
+		AccountID:       account.AccountID,
+		UserID:          account.UserID,
+		ExpiresAt:       account.ExpiresAt,
+		LastRefresh:     account.LastRefresh,
+		PlanType:        account.PlanType,
+		Source:          account.Source,
+		ClientProfile:   codexClientProfileForImport(account.Source, account.ClientProfile),
+		ImportedAt:      account.ImportedAt,
+		Status:          firstNonEmptyString(account.Status, "unchecked"),
+		LastCheckedAt:   account.LastCheckedAt,
+		LastError:       account.LastError,
+		LastUsedAt:      account.LastUsedAt,
+		RequestCount:    account.RequestCount,
+		QuotaLimits:     append([]OpenAIQuotaLimit{}, account.QuotaLimits...),
+		HasRefreshToken: strings.TrimSpace(account.RefreshToken) != "",
+		HasSessionToken: strings.TrimSpace(account.SessionToken) != "",
+		CredentialMode:  credentialMode,
 	}
 }
 

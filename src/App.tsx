@@ -106,7 +106,12 @@ type OpenAIAccount = {
   status?: string;
   lastCheckedAt?: string;
   lastError?: string;
+  lastUsedAt?: string;
+  requestCount?: number;
   quotaLimits?: OpenAIQuotaLimit[];
+  hasRefreshToken?: boolean;
+  hasSessionToken?: boolean;
+  credentialMode?: "refreshable" | "browser-session" | "access-token";
 };
 
 type OpenAIQuotaLimit = {
@@ -162,6 +167,14 @@ type RequestLog = {
   latencyMs: number;
   errorCode?: string;
   createdAt: string;
+};
+
+type BuildHealth = {
+  ok: boolean;
+  version?: string;
+  commit?: string;
+  buildTime?: string;
+  providerMode?: string;
 };
 
 type UserDetail = {
@@ -884,13 +897,13 @@ function App() {
     window.setTimeout(() => setToast(""), 2600);
   }
 
-  async function checkOpenAIAccounts(channelId: string) {
+  async function checkOpenAIAccounts(channelId: string, onlyInvalid = false) {
     const result = await fetchJson<OpenAIAccountCheckResult>(`/api/channels/${encodeURIComponent(channelId)}/openai-accounts/check`, {
       method: "POST",
-      body: JSON.stringify({})
+      body: JSON.stringify({ onlyInvalid })
     });
     setChannels((current) => current.map((channel) => (channel.id === result.channel.id ? normalizeChannel(result.channel) : channel)));
-    setToast(`账号测活完成：${result.healthy}/${result.checked} 可用${result.failed ? `，无效 ${result.failed}` : ""}`);
+    setToast(`${onlyInvalid ? "无效账号复检" : "账号测活"}完成：${result.healthy}/${result.checked} 可用${result.failed ? `，无效 ${result.failed}` : ""}`);
     window.setTimeout(() => setToast(""), 3000);
   }
 
@@ -2476,7 +2489,7 @@ function DrawingView({
   channels: Channel[];
   onCreate: (channel?: ChannelCreate) => Promise<void>;
   onImport: (channelId: string, file: File) => Promise<void>;
-  onCheckAccounts: (channelId: string) => Promise<void>;
+  onCheckAccounts: (channelId: string, onlyInvalid?: boolean) => Promise<void>;
   onDeleteAccount: (channelId: string, accountId: string) => Promise<void>;
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
   onStartOAuth: (channelId: string) => Promise<{ authorizeUrl: string; state: string; redirectUri: string }>;
@@ -2485,6 +2498,7 @@ function DrawingView({
   const drawingChannels = channels.filter((channel) => channel.provider === "codex" || channel.provider === "openai" || arrayOf(channel.models).some((model) => model.includes("image")));
   const [busy, setBusy] = useState("");
   const [accountVisibleCounts, setAccountVisibleCounts] = useState<Record<string, number>>({});
+  const [accountFilters, setAccountFilters] = useState<Record<string, "all" | "attention" | "invalid" | "refreshable">>({});
   const [oauthChannelId, setOAuthChannelId] = useState("");
   const [authSessionChannelId, setAuthSessionChannelId] = useState("");
   const [addAccountChannelId, setAddAccountChannelId] = useState("");
@@ -2500,10 +2514,10 @@ function DrawingView({
     }
   }
 
-  async function checkAccounts(channelId: string) {
-    setBusy(`check:${channelId}`);
+  async function checkAccounts(channelId: string, onlyInvalid = false) {
+	setBusy(`${onlyInvalid ? "retry" : "check"}:${channelId}`);
     try {
-      await onCheckAccounts(channelId);
+	  await onCheckAccounts(channelId, onlyInvalid);
     } finally {
       setBusy("");
     }
@@ -2546,8 +2560,8 @@ function DrawingView({
             <span>支持完整 auth/session JSON 或浏览器 Session Cookie，并在调用前重新获取 accessToken。</span>
           </div>
           <div className="source-guide-item">
-            <strong>导入 JSON</strong>
-            <span>已有 access_token / refresh_token / session token 的账号，用「导入 JSON」批量导入。</span>
+            <strong>批量导入</strong>
+            <span>支持 JSON、ZIP、TXT；TXT 可使用 JSONL 或每行一个 access token。</span>
           </div>
         </div>
         <div className="channels-stack">
@@ -2556,9 +2570,14 @@ function DrawingView({
             const healthy = accounts.filter((account) => account.status === "healthy").length;
             const invalid = accounts.filter((account) => account.status === "invalid").length;
             const unchecked = Math.max(0, accounts.length - healthy - invalid);
-            const visibleAccountCount = Math.min(accounts.length, accountVisibleCounts[channel.id] || defaultVisibleAccounts);
-            const visibleAccounts = accounts.slice(0, visibleAccountCount);
-            const hiddenAccountCount = Math.max(0, accounts.length - visibleAccounts.length);
+			const refreshable = accounts.filter((account) => account.credentialMode === "refreshable").length;
+			const browserSession = accounts.filter((account) => account.credentialMode === "browser-session").length;
+			const accessOnly = Math.max(0, accounts.length - refreshable - browserSession);
+			const filter = accountFilters[channel.id] || "all";
+			const filteredAccounts = accounts.filter((account) => filter === "all" || (filter === "attention" && accountNeedsAttention(account)) || (filter === "invalid" && account.status === "invalid") || (filter === "refreshable" && account.credentialMode === "refreshable"));
+			const visibleAccountCount = Math.min(filteredAccounts.length, accountVisibleCounts[channel.id] || defaultVisibleAccounts);
+			const visibleAccounts = filteredAccounts.slice(0, visibleAccountCount);
+			const hiddenAccountCount = Math.max(0, filteredAccounts.length - visibleAccounts.length);
             const allAccountsVisible = hiddenAccountCount === 0;
             return (
               <div className="channel-card" key={channel.id}>
@@ -2567,6 +2586,8 @@ function DrawingView({
                     <strong>{channel.name}</strong>
                     <span>{channel.baseUrl || defaultBaseURLForProvider(channel.provider) || defaultCodexBaseURL}</span>
                     <small>账号 {accounts.length} 个，可用 {healthy}，无效 {invalid}，未验证 {unchecked}</small>
+					<small>可续期 {refreshable} · 网页会话 {browserSession} · 仅 Token {accessOnly}</small>
+					<small>自动检测 {channel.lastCheckedAt ? formatDate(channel.lastCheckedAt) : "等待首次检测"}</small>
                   </div>
                   <div className="channel-card-head-actions">
                     <Badge tone={channel.status}>{statusLabel(channel.status)}</Badge>
@@ -2576,11 +2597,19 @@ function DrawingView({
                     <button className="secondary-button compact-button" onClick={() => checkAccounts(channel.id)} disabled={busy !== "" || accounts.length === 0}>
                       {busy === `check:${channel.id}` ? "检测中" : "批量检测"}
                     </button>
+	                  {invalid > 0 && <button className="secondary-button compact-button" onClick={() => checkAccounts(channel.id, true)} disabled={busy !== ""}>
+	                    {busy === `retry:${channel.id}` ? "复检中" : `复检无效 ${invalid}`}
+	                  </button>}
                     <button className="secondary-button compact-button" onClick={() => toggleChannel(channel)} disabled={busy !== ""}>
                       {channel.status === "disabled" ? "启用渠道" : "停用渠道"}
                     </button>
                   </div>
                 </div>
+				<div className="account-filter-bar" role="group" aria-label="账号筛选">
+					{[["all", `全部 ${accounts.length}`], ["attention", "需关注"], ["invalid", `无效 ${invalid}`], ["refreshable", `可续期 ${refreshable}`]].map(([value, label]) => (
+						<button key={value} type="button" className={filter === value ? "selected" : ""} onClick={() => setAccountFilters((current) => ({ ...current, [channel.id]: value as "all" | "attention" | "invalid" | "refreshable" }))}>{label}</button>
+					))}
+				</div>
                 <div className="metrics-grid">
                   <Metric label="账号总数" value={accounts.length} />
                   <Metric label="可用账号" value={healthy} />
@@ -2607,6 +2636,8 @@ function DrawingView({
                               </span>
                             </div>
                             <span>{account.lastError || (account.lastCheckedAt ? `上次检测 ${formatDate(account.lastCheckedAt)}` : "未检测")}</span>
+                            <span>{account.credentialMode === "refreshable" ? "可自动续期" : account.credentialMode === "browser-session" ? "依赖网页会话" : "仅 access token"}{account.expiresAt ? ` · 到期 ${formatDate(account.expiresAt)}` : ""}</span>
+	                            {account.lastUsedAt && <span>最近调用 {formatDate(account.lastUsedAt)} · {account.requestCount || 0} 次</span>}
                           </div>
                           <QuotaBars limits={account.quotaLimits} />
                         </div>
@@ -2625,10 +2656,10 @@ function DrawingView({
                         </div>
                       </div>
                     ))}
-                    {accounts.length > defaultVisibleAccounts && (
+					{filteredAccounts.length > defaultVisibleAccounts && (
                       <div className="account-pool-more">
                         <span className="muted-inline">
-                          {allAccountsVisible ? `已显示全部 ${accounts.length} 个账号` : `已显示 ${visibleAccounts.length} 个，还有 ${hiddenAccountCount} 个`}
+							{allAccountsVisible ? `已显示全部 ${filteredAccounts.length} 个账号` : `已显示 ${visibleAccounts.length} 个，还有 ${hiddenAccountCount} 个`}
                         </span>
                         <div className="account-pool-more-actions">
                           {!allAccountsVisible && (
@@ -2637,7 +2668,7 @@ function DrawingView({
                               className="secondary-button compact-button"
                               onClick={() => setAccountVisibleCounts((current) => ({
                                 ...current,
-                                [channel.id]: Math.min(accounts.length, visibleAccountCount + accountBatchSize)
+								[channel.id]: Math.min(filteredAccounts.length, visibleAccountCount + accountBatchSize)
                               }))}
                             >
                               再显示 {Math.min(accountBatchSize, hiddenAccountCount)} 个
@@ -2647,7 +2678,7 @@ function DrawingView({
                             <button
                               type="button"
                               className="secondary-button compact-button"
-                              onClick={() => setAccountVisibleCounts((current) => ({ ...current, [channel.id]: accounts.length }))}
+								onClick={() => setAccountVisibleCounts((current) => ({ ...current, [channel.id]: filteredAccounts.length }))}
                             >
                               全部显示
                             </button>
@@ -2697,7 +2728,6 @@ function DrawingView({
           <AuthSessionModal
             onImport={async (token) => {
               await importFile(authSessionChannelId, new File([JSON.stringify(authSessionImportPayload(token))], "authsession.json", { type: "application/json" }));
-              setAuthSessionChannelId("");
             }}
             onClose={() => setAuthSessionChannelId("")}
           />
@@ -2735,11 +2765,11 @@ function AccountAddModal({
           </button>
           <label className={`account-add-option${busy ? " disabled" : ""}`}>
             <span className="account-add-icon">J</span>
-            <strong>{busy ? "导入中" : "导入 JSON / ZIP"}</strong>
+            <strong>{busy ? "导入中" : "导入 JSON / ZIP / TXT"}</strong>
             <small>批量导入已有账号文件</small>
             <input
               type="file"
-              accept="application/json,application/zip,.json,.zip"
+              accept="application/json,application/zip,text/plain,.json,.zip,.txt"
               disabled={busy}
               onChange={(event) => {
                 const file = event.target.files?.[0];
@@ -2787,16 +2817,22 @@ function AuthSessionModal({ onImport, onClose }: { onImport: (token: string) => 
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
   async function submit() {
     if (!token.trim()) { setError("请粘贴 authsession"); return; }
-    setBusy(true); setError("");
-    try { await onImport(token.trim()); } catch (err) { setError(err instanceof Error ? err.message : "导入失败"); } finally { setBusy(false); }
+    setBusy(true); setError(""); setSuccess("");
+    try {
+      await onImport(token.trim());
+      setToken("");
+      setSuccess("已导入，继续粘贴下一条即可");
+    } catch (err) { setError(err instanceof Error ? err.message : "导入失败"); } finally { setBusy(false); }
   }
   return <div className="modal-backdrop" onClick={onClose}><div className="modal-card" onClick={(event) => event.stopPropagation()}>
     <div className="modal-head"><strong>添加网页会话</strong><button type="button" className="icon-button" onClick={onClose}>×</button></div>
     <p className="muted-inline">可直接粘贴 chatgpt.com/api/auth/session 的完整 JSON；也支持浏览器 <code>__Secure-next-auth.session-token</code> 的值或完整 Cookie 字符串。</p>
     <label className="authsession-field"><span>authsession</span><textarea autoFocus value={token} onChange={(event) => setToken(event.target.value)} placeholder="eyJhbGci..." /></label>
     {error && <div className="form-error">{error}</div>}
+	{success && <div className="form-success">{success}</div>}
     <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={busy} onClick={submit}>{busy ? "导入中" : "导入账号"}</button></div>
   </div></div>;
 }
@@ -2934,6 +2970,22 @@ function quotaText(limit: OpenAIQuotaLimit, percent: number) {
     return `${Math.round(percent)}% 剩余${reset}`;
   }
   return `${Math.round(percent)}%${reset}`;
+}
+
+function channelCapabilities(channel: Channel) {
+  const modelText = arrayOf(channel.models).join(" ").toLowerCase();
+  const capabilities = ["对话"];
+  if (channel.streamMode !== "disabled") capabilities.push("流式");
+  if (/(image|dall-e|gpt-image)/.test(modelText)) capabilities.push("图片");
+  if ((channel.openaiAccountCount ?? channel.openaiAccounts?.length ?? 0) > 0) capabilities.push("账号池");
+  return capabilities;
+}
+
+function accountNeedsAttention(account: OpenAIAccount) {
+  if (account.status === "invalid" || account.credentialMode === "browser-session") return true;
+  if (!account.expiresAt) return false;
+  const expiresAt = new Date(account.expiresAt).getTime();
+  return Number.isFinite(expiresAt) && expiresAt - Date.now() <= 24 * 60 * 60 * 1000;
 }
 
 function ChannelsView({
@@ -3099,6 +3151,7 @@ function ChannelEditor({
   const [busy, setBusy] = useState("");
   const accountCount = channel.openaiAccountCount ?? channel.openaiAccounts?.length ?? 0;
   const modelCount = arrayOf(channel.models).length;
+  const capabilities = channelCapabilities(channel);
   const isDisabled = channel.status === "disabled";
   const modelSourceLabel = {
     saved: "已保存",
@@ -3219,6 +3272,7 @@ function ChannelEditor({
           <strong>{channel.name}</strong>
           <span>{providerDisplayName(provider)}</span>
           <small>{channel.baseUrl || "尚未配置上游地址"}</small>
+	          <div className="channel-capability-tags">{capabilities.map((capability) => <span key={capability}>{capability}</span>)}</div>
         </div>
         <div className="channel-list-meta">
           <span><b>{modelCount}</b> 个模型</span>
@@ -3361,7 +3415,7 @@ function ChannelEditor({
           <div>
             <label className="secondary-button">
               {busy === "import" ? "导入中" : "导入账号 JSON"}
-              <input type="file" accept="application/json,application/zip,.json,.zip" disabled={busy !== ""} onChange={(event) => {
+              <input type="file" accept="application/json,application/zip,text/plain,.json,.zip,.txt" disabled={busy !== ""} onChange={(event) => {
                 const file = event.target.files?.[0];
                 if (file) importFile(file);
                 event.target.value = "";
@@ -3578,6 +3632,7 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
     maxLogs: 10000,
     maxQuotaEntries: 20000
   });
+  const [buildHealth, setBuildHealth] = useState<BuildHealth | null>(null);
   const [account, setAccount] = useState<AccountProfile | null>(null);
   const [accountUsername, setAccountUsername] = useState("");
   const [accountDisplayName, setAccountDisplayName] = useState("");
@@ -3606,9 +3661,10 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
       fetchJson<{ discord: DiscordSettings }>("/api/settings/discord"),
       fetchJson<{ auth: AuthSettings }>("/api/settings/auth"),
       fetchJson<{ account: AccountProfile; user: User }>("/api/account/me"),
-      fetchJson<{ maintenance: MaintenanceSettings }>("/api/settings/maintenance")
+      fetchJson<{ maintenance: MaintenanceSettings }>("/api/settings/maintenance"),
+      fetchJson<BuildHealth>("/api/health")
     ])
-      .then(([discordData, authData, accountData, maintenanceData]) => {
+      .then(([discordData, authData, accountData, maintenanceData, healthData]) => {
         setDiscord(withBrowserDiscordDefaults(discordData.discord));
         setRegistrationEnabled(authData.auth.registrationEnabled);
         setRegistrationMode(normalizeRegistrationMode(authData.auth.registrationMode));
@@ -3619,6 +3675,7 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
         setAccountEmail(accountData.account?.email || "");
         setDiscordUserId(accountData.account?.discordUserId || "");
         setMaintenance(maintenanceData.maintenance);
+        setBuildHealth(healthData);
       })
       .catch(() => setMessage("设置加载失败"));
   }, []);
@@ -3774,6 +3831,9 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
           <Setting label="当前默认模型" value={defaultModel} />
           <Setting label="已配置渠道" value={`${channels.length} 个，${activeChannels} 个启用`} />
           <Setting label="可选供应商" value={`${providerOptions.length} 种`} />
+	          <Setting label="运行版本" value={`${buildHealth?.version || "未知"} · ${buildHealth?.commit || "未知"}`} />
+	          <Setting label="构建时间" value={buildHealth?.buildTime ? formatDate(buildHealth.buildTime) : "本地构建"} />
+	          <Setting label="账号自动检测" value="每 15 分钟自动检测一次" />
         </div>
       </Panel>
       )}

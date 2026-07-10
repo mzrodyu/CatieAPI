@@ -2472,6 +2472,44 @@ button.table-row:hover {
   margin-top: 14px;
 }
 
+.account-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 10px 0 2px;
+}
+
+.account-filter-bar button {
+  padding: 5px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--control);
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.account-filter-bar button.selected {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.channel-capability-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.channel-capability-tags span {
+  padding: 2px 7px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .account-pool-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -4466,6 +4504,11 @@ button.table-row:hover {
   .account-pool-list {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+.form-success {
+  color: var(--success);
+  font-size: 13px;
 }
 
 .authsession-field { display: grid; gap: 8px; margin-top: 18px; color: var(--muted); font-size: 13px; font-weight: 700; }

@@ -3169,6 +3169,16 @@ func TestParseOpenAIAccountImportSupportsChatGPTAuthSessionShape(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIAccountImportTextSupportsJSONLinesAndRawTokens(t *testing.T) {
+	accounts, invalid, err := parseOpenAIAccountImportFile("accounts.txt", []byte("# exported accounts\n{\"accessToken\":\"web-access\",\"sessionToken\":\"web-session\",\"expires\":\"2026-10-07T19:47:47Z\"}\nraw.header.signature\nnot-an-account\n"))
+	if err != nil || invalid != 1 || len(accounts) != 2 {
+		t.Fatalf("TXT import accounts=%#v invalid=%d err=%v", accounts, invalid, err)
+	}
+	if accounts[0].AccessToken != "web-access" || accounts[0].SessionToken != "web-session" || accounts[1].AccessToken != "raw.header.signature" {
+		t.Fatalf("TXT accounts were not parsed: %#v", accounts)
+	}
+}
+
 func TestChatGPTSessionCookieCandidatesParsesCookieHeader(t *testing.T) {
 	cookies := chatGPTSessionCookieCandidates("foo=bar; __Secure-next-auth.session-token=web-session; theme=dark")
 	if len(cookies) != 1 || cookies[0].Name != "__Secure-next-auth.session-token" || cookies[0].Value != "web-session" {
@@ -3418,7 +3428,7 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("check accounts status = %d body = %s", response.Code, response.Body.String())
 	}
-	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":7`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":3`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":1`)) {
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"checked":7`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"healthy":3`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"failed":2`)) {
 		t.Fatalf("check response missing summary: %s", response.Body.String())
 	}
 	if len(usageAuthHeaders) != 5 {
@@ -3433,7 +3443,7 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 	if channel.OpenAIAccounts[0].Status != "healthy" ||
 		channel.OpenAIAccounts[1].Status != "healthy" ||
 		channel.OpenAIAccounts[2].Status != "healthy" ||
-		channel.OpenAIAccounts[3].Status != "unchecked" ||
+		channel.OpenAIAccounts[3].Status != "invalid" ||
 		channel.OpenAIAccounts[4].Status != "invalid" ||
 		channel.OpenAIAccounts[5].Status != "unchecked" ||
 		channel.OpenAIAccounts[6].Status != "unchecked" {
@@ -3449,7 +3459,7 @@ func TestCheckOpenAIAccountsUpdatesAccountHealth(t *testing.T) {
 		t.Fatalf("exhausted usage should keep reset hint: %#v", channel.OpenAIAccounts[2])
 	}
 	if !strings.Contains(channel.OpenAIAccounts[3].LastError, "HTTP 401") {
-		t.Fatalf("401 usage failure should be left unchecked: %#v", channel.OpenAIAccounts[3])
+		t.Fatalf("401 usage failure should be marked invalid: %#v", channel.OpenAIAccounts[3])
 	}
 	if !strings.Contains(channel.OpenAIAccounts[4].LastError, "billing inactive") {
 		t.Fatalf("402 without refresh should be invalid: %#v", channel.OpenAIAccounts[4])
