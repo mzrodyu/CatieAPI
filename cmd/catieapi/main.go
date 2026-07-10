@@ -240,6 +240,10 @@ type OpenAIAccount struct {
 	LastUsedAt    string             `json:"lastUsedAt,omitempty"`
 	RequestCount  int                `json:"requestCount,omitempty"`
 	QuotaLimits   []OpenAIQuotaLimit `json:"quotaLimits,omitempty"`
+	// UsageLimitResetAt is the upstream-provided reset time for a usage-limited
+	// account (RFC3339). When set it drives the cooldown instead of a fixed
+	// fallback window.
+	UsageLimitResetAt string `json:"usageLimitResetAt,omitempty"`
 }
 
 type PublicOpenAIAccount struct {
@@ -4657,6 +4661,9 @@ type ProviderError struct {
 	Code    string
 	Message string
 	Type    string
+	// RetryAt carries the upstream-provided reset time for usage-limit errors,
+	// parsed from error.resets_at / error.resets_in_seconds. Zero when absent.
+	RetryAt time.Time
 }
 
 func (s *Server) callProvider(call GatewayCall) (gin.H, *ProviderError) {
@@ -4900,7 +4907,7 @@ func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *Provi
 			lastErr = providerErr
 			if isUsageLimitProviderError(providerErr) {
 				usageLimitedAccounts++
-				s.markOpenAIAccountUsageLimited(call.Channel.ID, account.ID, providerErr.Message)
+				s.markOpenAIAccountUsageLimited(call.Channel.ID, account.ID, providerErr)
 				continue
 			}
 			if shouldInvalidateOpenAIAccountForImage(providerErr, account) {
@@ -5001,7 +5008,7 @@ func (s *Server) callChatGPTCodex(call GatewayCall) (gin.H, *ProviderError) {
 		lastErr = providerErr
 		if isUsageLimitProviderError(providerErr) {
 			usageLimitedAccounts++
-			s.markOpenAIAccountUsageLimited(call.Channel.ID, account.ID, providerErr.Message)
+			s.markOpenAIAccountUsageLimited(call.Channel.ID, account.ID, providerErr)
 			continue
 		}
 		if shouldInvalidateOpenAIAccountForChat(providerErr, account) {
@@ -5082,7 +5089,7 @@ func (s *Server) streamChatGPTCodex(c *gin.Context, call GatewayCall) *ProviderE
 		lastErr = providerErr
 		if isUsageLimitProviderError(providerErr) {
 			usageLimitedAccounts++
-			s.markOpenAIAccountUsageLimited(call.Channel.ID, account.ID, providerErr.Message)
+			s.markOpenAIAccountUsageLimited(call.Channel.ID, account.ID, providerErr)
 			continue
 		}
 		if shouldInvalidateOpenAIAccountForChat(providerErr, account) {
@@ -7284,6 +7291,15 @@ func activeOpenAIAccounts(accounts []OpenAIAccount) []OpenAIAccount {
 }
 
 func openAIAccountUsageLimited(account OpenAIAccount) bool {
+	// Prefer the upstream-provided reset time when the account was cooled down
+	// by a usage-limit error that carried resets_at / resets_in_seconds.
+	if resetAt := strings.TrimSpace(account.UsageLimitResetAt); resetAt != "" {
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+			if parsed, err := time.Parse(layout, resetAt); err == nil {
+				return time.Now().UTC().Before(parsed)
+			}
+		}
+	}
 	if len(account.QuotaLimits) > 0 {
 		if openAIQuotaLimitsHaveRemaining(account.QuotaLimits) {
 			return false
@@ -7374,6 +7390,8 @@ func (s *Server) markOpenAIAccountUsed(channelID string, accountID string, reque
 		}
 		channel.OpenAIAccounts[index].LastUsedAt = now()
 		channel.OpenAIAccounts[index].RequestCount++
+		// A successful call means the account is no longer usage-limited.
+		channel.OpenAIAccounts[index].UsageLimitResetAt = ""
 		if requestID != "" {
 			s.requestAccounts[requestID] = firstNonEmptyString(channel.OpenAIAccounts[index].Email, channel.OpenAIAccounts[index].Name, channel.OpenAIAccounts[index].AccountID, accountID)
 		}
@@ -7382,12 +7400,20 @@ func (s *Server) markOpenAIAccountUsed(channelID string, accountID string, reque
 	}
 }
 
-func (s *Server) markOpenAIAccountUsageLimited(channelID string, accountID string, message string) {
+func (s *Server) markOpenAIAccountUsageLimited(channelID string, accountID string, providerErr *ProviderError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	channel := s.findChannel(channelID)
 	if channel == nil {
 		return
+	}
+	message := ""
+	resetAt := ""
+	if providerErr != nil {
+		message = providerErr.Message
+		if !providerErr.RetryAt.IsZero() {
+			resetAt = providerErr.RetryAt.UTC().Format(time.RFC3339)
+		}
 	}
 	for index := range channel.OpenAIAccounts {
 		if channel.OpenAIAccounts[index].ID != accountID {
@@ -7396,6 +7422,7 @@ func (s *Server) markOpenAIAccountUsageLimited(channelID string, accountID strin
 		channel.OpenAIAccounts[index].Status = "unchecked"
 		channel.OpenAIAccounts[index].LastCheckedAt = now()
 		channel.OpenAIAccounts[index].LastError = truncateString(firstNonEmptyString(message, "usage limit reached"), 500)
+		channel.OpenAIAccounts[index].UsageLimitResetAt = resetAt
 		s.saveStateLocked()
 		return
 	}
@@ -9910,11 +9937,14 @@ func providerErrorFromUpstream(status int, content []byte) *ProviderError {
 	}
 	var payload struct {
 		Error struct {
-			Code    interface{} `json:"code"`
-			Message string      `json:"message"`
-			Type    string      `json:"type"`
+			Code            interface{} `json:"code"`
+			Message         string      `json:"message"`
+			Type            string      `json:"type"`
+			ResetsAt        int64       `json:"resets_at"`
+			ResetsInSeconds float64     `json:"resets_in_seconds"`
 		} `json:"error"`
 	}
+	var retryAt time.Time
 	if err := json.Unmarshal(content, &payload); err == nil {
 		if payload.Error.Message != "" {
 			message = payload.Error.Message
@@ -9928,6 +9958,7 @@ func providerErrorFromUpstream(status int, content []byte) *ProviderError {
 				code = "upstream_" + code
 			}
 		}
+		retryAt = usageLimitResetTime(payload.Error.ResetsAt, payload.Error.ResetsInSeconds, time.Now())
 	}
 	if message == "" {
 		message = http.StatusText(status)
@@ -9938,7 +9969,22 @@ func providerErrorFromUpstream(status int, content []byte) *ProviderError {
 	if imagePermissionErrorText(code, message, errorType) {
 		code = "upstream_missing_image_scope"
 	}
-	return &ProviderError{Status: status, Code: code, Message: message, Type: errorType}
+	return &ProviderError{Status: status, Code: code, Message: message, Type: errorType, RetryAt: retryAt}
+}
+
+// usageLimitResetTime derives an absolute reset time from the upstream
+// usage-limit fields. resets_at is a Unix-second timestamp; resets_in_seconds
+// is a relative duration. Returns the zero time when neither is usable.
+func usageLimitResetTime(resetsAt int64, resetsInSeconds float64, now time.Time) time.Time {
+	if resetsAt > 0 {
+		if resetTime := time.Unix(resetsAt, 0).UTC(); resetTime.After(now) {
+			return resetTime
+		}
+	}
+	if resetsInSeconds > 0 {
+		return now.Add(time.Duration(resetsInSeconds * float64(time.Second))).UTC()
+	}
+	return time.Time{}
 }
 
 func sanitizeErrorCode(value string) string {

@@ -4170,3 +4170,60 @@ func TestOpenAICompatibleRoutesNormalizeRepeatedSlashes(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageLimitResetTimeParsesUpstreamFields(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+
+	// resets_at (Unix seconds) in the future wins.
+	future := now.Add(30 * time.Minute)
+	if got := usageLimitResetTime(future.Unix(), 0, now); !got.Equal(future.UTC().Truncate(time.Second)) {
+		t.Fatalf("resets_at parse = %v, want %v", got, future.UTC())
+	}
+	// resets_in_seconds (relative) is honored when resets_at is absent.
+	if got := usageLimitResetTime(0, 1800, now); !got.Equal(now.Add(30*time.Minute)) {
+		t.Fatalf("resets_in_seconds parse = %v, want %v", got, now.Add(30*time.Minute))
+	}
+	// A past resets_at is ignored.
+	if got := usageLimitResetTime(now.Add(-time.Hour).Unix(), 0, now); !got.IsZero() {
+		t.Fatalf("past resets_at should be ignored, got %v", got)
+	}
+	// Neither field present -> zero time.
+	if got := usageLimitResetTime(0, 0, now); !got.IsZero() {
+		t.Fatalf("absent reset fields should yield zero time, got %v", got)
+	}
+}
+
+func TestProviderErrorFromUpstreamParsesResetTime(t *testing.T) {
+	body := []byte(`{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":1800}}`)
+	providerErr := providerErrorFromUpstream(http.StatusTooManyRequests, body)
+	if providerErr.RetryAt.IsZero() {
+		t.Fatalf("expected RetryAt to be populated from resets_in_seconds")
+	}
+	remaining := time.Until(providerErr.RetryAt)
+	if remaining < 25*time.Minute || remaining > 31*time.Minute {
+		t.Fatalf("RetryAt window unexpected: %v remaining", remaining)
+	}
+}
+
+func TestOpenAIAccountUsageLimitedHonorsUpstreamResetTime(t *testing.T) {
+	// Future reset time -> still limited.
+	future := OpenAIAccount{
+		AccessToken:       "token",
+		Status:            "unchecked",
+		LastError:         "usage limit reached",
+		UsageLimitResetAt: time.Now().Add(20 * time.Minute).UTC().Format(time.RFC3339),
+	}
+	if !openAIAccountUsageLimited(future) {
+		t.Fatal("account with future reset time should still be usage-limited")
+	}
+	// Past reset time -> no longer limited even though LastError still says so.
+	past := OpenAIAccount{
+		AccessToken:       "token",
+		Status:            "unchecked",
+		LastError:         "usage limit reached",
+		UsageLimitResetAt: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+	}
+	if openAIAccountUsageLimited(past) {
+		t.Fatal("account past its reset time should no longer be usage-limited")
+	}
+}

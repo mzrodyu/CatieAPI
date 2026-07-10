@@ -1590,9 +1590,6 @@ function PublicHome({
             <button className="primary-button" onClick={enterConsole}>
               进入控制台
             </button>
-            <a className="secondary-button" href="#features">
-              了解功能
-            </a>
           </div>
           <div className="integration-row" aria-label="网关能力概览">
             <span>网关能力</span>
@@ -1649,24 +1646,7 @@ function PublicHome({
           </div>
         </div>
       </section>
-
-      <section className="home-grid" id="features">
-        <HomeFeature icon="key" title="Key 管理" text="创建、禁用、查看调用统计。" />
-        <HomeFeature icon="models" title="模型目录" text="用户只看用途、价格、代称和调用 ID。" />
-        <HomeFeature icon="users" title="用户额度" text="面向运营的余额、封禁和备注。" />
-        <HomeFeature icon="logs" title="日志排障" text="请求、渠道、错误码集中查看。" />
-      </section>
     </main>
-  );
-}
-
-function HomeFeature({ icon, title, text }: { icon: IconName; title: string; text: string }) {
-  return (
-    <article className="home-feature">
-      <Icon name={icon} />
-      <strong>{title}</strong>
-      <span>{text}</span>
-    </article>
   );
 }
 

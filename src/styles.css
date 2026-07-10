@@ -4802,7 +4802,7 @@ button.table-row:hover {
   top: calc(100% + 7px);
   right: 0;
   left: 0;
-  z-index: 8;
+  z-index: 20;
   display: grid;
   gap: 2px;
   padding: 6px;
@@ -4810,6 +4810,12 @@ button.table-row:hover {
   border: 1px solid var(--hairline);
   border-radius: 14px;
   box-shadow: var(--shadow);
+  backdrop-filter: blur(22px) saturate(180%);
+}
+
+.app-shell[data-theme="dark"] .channel-choice-menu > div {
+  background: #2c2c2e;
+  border-color: rgba(255, 255, 255, 0.12);
 }
 
 .channel-choice-menu button {
