@@ -2630,6 +2630,15 @@ func TestShouldInvalidateOpenAIAccountForImageOnPlainUnauthorized(t *testing.T) 
 			t.Fatalf("image account was not invalidated for status %d", status)
 		}
 	}
+	// Sub2API accounts should not be invalidated on a generic 401/403 from the image endpoint.
+	sub2Account := OpenAIAccount{Source: "sub2api"}
+	if shouldInvalidateOpenAIAccountForImage(&ProviderError{Status: http.StatusUnauthorized, Code: "upstream_error", Message: "account unavailable", Type: "api_error"}, sub2Account) {
+		t.Fatal("Sub2API image account should not be invalidated for generic 401")
+	}
+	// But explicit token invalidation should still eject Sub2API accounts.
+	if !shouldInvalidateOpenAIAccountForImage(&ProviderError{Status: http.StatusUnauthorized, Code: "upstream_token_invalidated", Message: "token invalidated", Type: "auth_error"}, sub2Account) {
+		t.Fatal("Sub2API image account should be invalidated for explicit token invalidation")
+	}
 }
 
 func TestSub2APIUsageDoesNotTreatGenericUnauthorizedAsInvalid(t *testing.T) {
@@ -2648,6 +2657,32 @@ func TestSub2APIUsageDoesNotTreatGenericUnauthorizedAsInvalid(t *testing.T) {
 func TestSub2APIUsageUnauthorizedCanFallBackToCodexProbe(t *testing.T) {
 	if !isSub2APIAccount(OpenAIAccount{Source: "sub2api"}) || isSub2APIAccount(OpenAIAccount{Source: "cpa"}) {
 		t.Fatal("unexpected Sub2API source classification")
+	}
+}
+
+func TestSub2APIChatDoesNotTreatGenericUnauthorizedAsInvalid(t *testing.T) {
+	sub2Account := OpenAIAccount{Source: "sub2api"}
+	cpaAccount := OpenAIAccount{Source: "cpa"}
+
+	// Sub2API: generic 401 should NOT invalidate
+	if shouldInvalidateOpenAIAccountForChat(&ProviderError{Status: http.StatusUnauthorized, Code: "upstream_account_error", Message: "subscription expired", Type: "account_error"}, sub2Account) {
+		t.Fatal("Sub2API generic 401 in chat path should not invalidate account")
+	}
+	// Sub2API: explicit token invalidation SHOULD invalidate
+	if !shouldInvalidateOpenAIAccountForChat(&ProviderError{Status: http.StatusUnauthorized, Code: "upstream_token_invalidated", Message: "token invalidated", Type: "auth_error"}, sub2Account) {
+		t.Fatal("Sub2API explicit token invalidation in chat path should invalidate account")
+	}
+	// Sub2API: authentication_error code SHOULD invalidate
+	if !shouldInvalidateOpenAIAccountForChat(&ProviderError{Status: http.StatusUnauthorized, Code: "upstream_authentication_error", Message: "auth failed", Type: "auth_error"}, sub2Account) {
+		t.Fatal("Sub2API upstream_authentication_error should still invalidate")
+	}
+	// CPA: generic 401 SHOULD invalidate (strict behavior)
+	if !shouldInvalidateOpenAIAccountForChat(&ProviderError{Status: http.StatusUnauthorized, Code: "upstream_account_error", Message: "account unavailable", Type: "account_error"}, cpaAccount) {
+		t.Fatal("CPA 401 in chat path should invalidate account")
+	}
+	// No account provided: plain 401 SHOULD invalidate (legacy behavior)
+	if !shouldInvalidateOpenAIAccountForChat(&ProviderError{Status: http.StatusUnauthorized, Code: "upstream_error", Message: "unauthorized", Type: "api_error"}) {
+		t.Fatal("plain 401 without account context should invalidate")
 	}
 }
 
@@ -3221,6 +3256,28 @@ func TestParseOpenAIAccountImportSupportsCodexAuthTokensShape(t *testing.T) {
 		account.AccountID != "account-codex" ||
 		account.LastRefresh != "2026-07-09T15:05:05.447376Z" {
 		t.Fatalf("Codex auth fields were not parsed: %#v", account)
+	}
+}
+
+func TestParseOpenAIAccountImportSupportsCamelCaseTopLevelTokens(t *testing.T) {
+	accounts, _, invalid, err := parseOpenAIAccountImportJSON([]byte(`{
+		"auth_mode":"chatgpt",
+		"tokens":{
+			"idToken":"codex-camel-id-token",
+			"accessToken":"codex-camel-access-token",
+			"refreshToken":"codex-camel-refresh-token",
+			"accountId":"account-codex-camel"
+		}
+	}`))
+	if err != nil || invalid != 0 || len(accounts) != 1 {
+		t.Fatalf("camel Codex tokens import accounts=%#v invalid=%d err=%v", accounts, invalid, err)
+	}
+	account := accounts[0]
+	if account.AccessToken != "codex-camel-access-token" ||
+		account.RefreshToken != "codex-camel-refresh-token" ||
+		account.IDToken != "codex-camel-id-token" ||
+		account.AccountID != "account-codex-camel" {
+		t.Fatalf("camel Codex tokens fields were not parsed: %#v", account)
 	}
 }
 

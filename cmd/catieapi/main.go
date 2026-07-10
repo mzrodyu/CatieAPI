@@ -4903,7 +4903,7 @@ func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *Provi
 				s.markOpenAIAccountUsageLimited(call.Channel.ID, account.ID, providerErr.Message)
 				continue
 			}
-			if shouldInvalidateOpenAIAccountForImage(providerErr) {
+			if shouldInvalidateOpenAIAccountForImage(providerErr, account) {
 				invalidatedAccounts++
 				s.markOpenAIAccountInvalid(call.Channel.ID, account.ID, providerErr.Message)
 				continue
@@ -5004,7 +5004,7 @@ func (s *Server) callChatGPTCodex(call GatewayCall) (gin.H, *ProviderError) {
 			s.markOpenAIAccountUsageLimited(call.Channel.ID, account.ID, providerErr.Message)
 			continue
 		}
-		if shouldInvalidateOpenAIAccountForChat(providerErr) {
+		if shouldInvalidateOpenAIAccountForChat(providerErr, account) {
 			invalidatedAccounts++
 			s.markOpenAIAccountInvalid(call.Channel.ID, account.ID, providerErr.Message)
 			continue
@@ -5085,7 +5085,7 @@ func (s *Server) streamChatGPTCodex(c *gin.Context, call GatewayCall) *ProviderE
 			s.markOpenAIAccountUsageLimited(call.Channel.ID, account.ID, providerErr.Message)
 			continue
 		}
-		if shouldInvalidateOpenAIAccountForChat(providerErr) {
+		if shouldInvalidateOpenAIAccountForChat(providerErr, account) {
 			invalidatedAccounts++
 			s.markOpenAIAccountInvalid(call.Channel.ID, account.ID, providerErr.Message)
 			continue
@@ -8980,9 +8980,18 @@ func openAIAccountsUsageLimitedError(scope string) *ProviderError {
 	}
 }
 
-func shouldInvalidateOpenAIAccountForImage(providerErr *ProviderError) bool {
+func shouldInvalidateOpenAIAccountForImage(providerErr *ProviderError, accounts ...OpenAIAccount) bool {
 	if providerErr == nil {
 		return false
+	}
+	// Sub2API accounts may return 401/403 from the image endpoint for
+	// subscription or billing reasons without the token actually being invalid.
+	// Only eject when the error explicitly identifies a credential failure.
+	if len(accounts) > 0 && isSub2APIAccount(accounts[0]) {
+		if isBillingProviderError(providerErr) || isImagePermissionProviderError(providerErr) {
+			return true
+		}
+		return isExplicitTokenInvalidProviderError(providerErr)
 	}
 	// Image backends do not consistently attach a token-invalidated error code
 	// to an expired/revoked credential. A plain 401/403 must still eject this
@@ -8993,14 +9002,23 @@ func shouldInvalidateOpenAIAccountForImage(providerErr *ProviderError) bool {
 	return isBillingProviderError(providerErr) || isImagePermissionProviderError(providerErr) || isTokenInvalidatedProviderError(providerErr)
 }
 
-func shouldInvalidateOpenAIAccountForChat(providerErr *ProviderError) bool {
+func shouldInvalidateOpenAIAccountForChat(providerErr *ProviderError, accounts ...OpenAIAccount) bool {
 	if providerErr == nil {
 		return false
 	}
-	if isTokenInvalidatedProviderError(providerErr) || providerErr.Status == http.StatusUnauthorized {
+	if isTokenInvalidatedProviderError(providerErr) {
 		return true
 	}
-	return allowedString(providerErr.Code, "upstream_authentication_error", "upstream_invalid_api_key")
+	if allowedString(providerErr.Code, "upstream_authentication_error", "upstream_invalid_api_key") {
+		return true
+	}
+	// Sub2API accounts may surface subscription/billing errors as HTTP 401
+	// without the token being truly invalid. Only mark them invalid when the
+	// error explicitly indicates a credential failure.
+	if len(accounts) > 0 && isSub2APIAccount(accounts[0]) {
+		return isExplicitTokenInvalidProviderError(providerErr)
+	}
+	return providerErr.Status == http.StatusUnauthorized
 }
 
 func isImagePermissionProviderError(providerErr *ProviderError) bool {

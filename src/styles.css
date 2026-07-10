@@ -2522,6 +2522,18 @@ button.table-row:hover {
   font-size: 12px;
 }
 
+.app-shell[data-theme="dark"] .account-filter-bar select {
+  background: rgba(118, 118, 128, 0.18);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #f5f5f7;
+}
+
+.app-shell[data-theme="dark"] .account-filter-bar input {
+  background: rgba(118, 118, 128, 0.18);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #f5f5f7;
+}
+
 .account-filter-bar button.selected {
   border-color: var(--accent);
   color: var(--accent);
