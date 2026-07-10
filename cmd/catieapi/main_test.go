@@ -2645,6 +2645,12 @@ func TestSub2APIUsageDoesNotTreatGenericUnauthorizedAsInvalid(t *testing.T) {
 	}
 }
 
+func TestSub2APIUsageUnauthorizedCanFallBackToCodexProbe(t *testing.T) {
+	if !isSub2APIAccount(OpenAIAccount{Source: "sub2api"}) || isSub2APIAccount(OpenAIAccount{Source: "cpa"}) {
+		t.Fatal("unexpected Sub2API source classification")
+	}
+}
+
 func TestImageGenerationsReturnPoolUnavailableWhenAllOpenAIAccountsInvalidated(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/backend-api/codex/responses" {

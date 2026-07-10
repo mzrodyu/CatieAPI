@@ -6342,6 +6342,17 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 	result.PlanType = firstNonEmptyString(result.PlanType, account.PlanType)
 	quotaLimits, providerErr := s.checkOpenAIAccountUsage(accessToken, account)
 	if providerErr != nil {
+		if isSub2APIAccount(account) && (providerErr.Status == http.StatusUnauthorized || providerErr.Status == http.StatusForbidden) {
+			if probeErr := s.probeOpenAIAccountViaCodex(account, channel, accessToken); probeErr == nil {
+				// Sub2API can reject the quota endpoint while the account remains
+				// usable for the actual Codex request path.
+				result.Status = "healthy"
+				result.Message = ""
+				return result
+			} else {
+				providerErr = probeErr
+			}
+		}
 		result.Message = fmt.Sprintf("HTTP %d: %s", providerErr.Status, truncateString(providerErr.Message, 300))
 		if shouldInvalidateOpenAIAccountForUsage(account, providerErr, hasRefreshToken) {
 			result.Status = "invalid"
@@ -6360,6 +6371,32 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 	}
 	result.Message = ""
 	return result
+}
+
+func isSub2APIAccount(account OpenAIAccount) bool {
+	switch strings.ToLower(strings.TrimSpace(account.Source)) {
+	case "sub", "sub2", "sub2api":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) probeOpenAIAccountViaCodex(account OpenAIAccount, channel Channel, accessToken string) *ProviderError {
+	modelID := "gpt-5.4"
+	if len(channel.Models) > 0 && strings.TrimSpace(channel.Models[0]) != "" {
+		modelID = strings.TrimSpace(channel.Models[0])
+	}
+	call := GatewayCall{
+		RequestID: newID("health"),
+		Model:     Model{ID: modelID},
+		Channel:   channel,
+		Body: ChatRequest{Model: modelID, Messages: []ChatMessage{
+			{Role: "user", Content: "ping"},
+		}},
+	}
+	_, providerErr := s.callChatGPTCodexWithAccount(call, account, accessToken)
+	return providerErr
 }
 
 // Sub2API may surface account-level or subscription errors as HTTP 401/403
