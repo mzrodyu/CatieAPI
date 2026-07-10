@@ -4227,3 +4227,35 @@ func TestOpenAIAccountUsageLimitedHonorsUpstreamResetTime(t *testing.T) {
 		t.Fatal("account past its reset time should no longer be usage-limited")
 	}
 }
+
+func TestParseWhamUsageQuotaLimitsFreePlanUsesMonthlyWindow(t *testing.T) {
+	// A free Codex account exposes its quota through the primary_window, but the
+	// window is a monthly cycle rather than the paid 5h rolling window.
+	body := []byte(`{
+		"rate_limit":{
+			"primary_window":{"used_percent":5,"reset_after_seconds":2592000},
+			"secondary_window":{"used_percent":40,"reset_after_seconds":604800}
+		}
+	}`)
+	limits := parseWhamUsageQuotaLimits(body, "free")
+	if len(limits) == 0 {
+		t.Fatalf("free plan produced no quota limits")
+	}
+	for _, limit := range limits {
+		if strings.EqualFold(limit.Label, "5h") || strings.EqualFold(limit.Window, "5h") {
+			t.Fatalf("free plan must not report a 5h window: %#v", limit)
+		}
+		if strings.EqualFold(limit.Label, "Weekly") {
+			t.Fatalf("free plan must not report a weekly window: %#v", limit)
+		}
+	}
+	if !strings.EqualFold(limits[0].Label, "Monthly") {
+		t.Fatalf("free plan primary window label = %q, want Monthly", limits[0].Label)
+	}
+
+	// A paid plan keeps the 5h primary window.
+	paid := parseWhamUsageQuotaLimits(body, "plus")
+	if len(paid) == 0 || !strings.EqualFold(paid[0].Label, "5h") {
+		t.Fatalf("paid plan primary window label = %#v, want 5h first", paid)
+	}
+}

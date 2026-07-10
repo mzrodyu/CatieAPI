@@ -6485,7 +6485,7 @@ func (s *Server) checkOpenAIAccountUsage(accessToken string, account OpenAIAccou
 	defer response.Body.Close()
 	content, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
-		return parseWhamUsageQuotaLimits(content), nil
+		return parseWhamUsageQuotaLimits(content, account.PlanType), nil
 	}
 	return nil, providerErrorFromUpstream(response.StatusCode, content)
 }
@@ -6543,14 +6543,18 @@ func upstreamBillingError(content []byte) bool {
 	return strings.Contains(code, "billing") || strings.Contains(errorType, "billing")
 }
 
-func parseWhamUsageQuotaLimits(content []byte) []OpenAIQuotaLimit {
+func parseWhamUsageQuotaLimits(content []byte, planType ...string) []OpenAIQuotaLimit {
+	plan := ""
+	if len(planType) > 0 {
+		plan = planType[0]
+	}
 	var payload interface{}
 	if err := json.Unmarshal(content, &payload); err != nil {
 		return nil
 	}
 	limits := []OpenAIQuotaLimit{}
 	if root, ok := payload.(map[string]interface{}); ok {
-		limits = append(limits, whamRateLimitWindows(root)...)
+		limits = append(limits, whamRateLimitWindows(root, plan)...)
 	}
 	collectQuotaLimits(payload, nil, &limits)
 	if len(limits) == 0 {
@@ -6579,7 +6583,7 @@ func parseWhamUsageQuotaLimits(content []byte) []OpenAIQuotaLimit {
 	return result
 }
 
-func whamRateLimitWindows(payload map[string]interface{}) []OpenAIQuotaLimit {
+func whamRateLimitWindows(payload map[string]interface{}, planType string) []OpenAIQuotaLimit {
 	rateLimit, _ := payload["rate_limit"].(map[string]interface{})
 	if rateLimit == nil {
 		rateLimit = payload
@@ -6592,6 +6596,18 @@ func whamRateLimitWindows(payload map[string]interface{}) []OpenAIQuotaLimit {
 		{Key: "secondary_window", Label: "Weekly"},
 		{Key: "monthly_window", Label: "Monthly"},
 	}
+	// Free Codex accounts do not have the 5h/weekly rolling windows that paid
+	// plans use; their quota refreshes on a monthly cycle. Label the primary
+	// window accordingly and skip the weekly window that never applies.
+	if isFreeCodexPlan(planType) {
+		windows = []struct {
+			Key   string
+			Label string
+		}{
+			{Key: "primary_window", Label: "Monthly"},
+			{Key: "monthly_window", Label: "Monthly"},
+		}
+	}
 	limits := []OpenAIQuotaLimit{}
 	for _, window := range windows {
 		values, _ := rateLimit[window.Key].(map[string]interface{})
@@ -6603,6 +6619,11 @@ func whamRateLimitWindows(payload map[string]interface{}) []OpenAIQuotaLimit {
 		}
 	}
 	return limits
+}
+
+// isFreeCodexPlan reports whether a plan type is the Codex free tier.
+func isFreeCodexPlan(planType string) bool {
+	return strings.EqualFold(strings.TrimSpace(planType), "free")
 }
 
 func whamQuotaLimitFromWindow(name string, label string, values map[string]interface{}) (OpenAIQuotaLimit, bool) {
@@ -6901,6 +6922,8 @@ func quotaLabelLooksUseful(label string) bool {
 		strings.Contains(label, "hour") ||
 		strings.Contains(label, "weekly") ||
 		strings.Contains(label, "week") ||
+		strings.Contains(label, "monthly") ||
+		strings.Contains(label, "month") ||
 		strings.Contains(label, "gpt") ||
 		strings.Contains(label, "message") ||
 		strings.Contains(label, "codex")
@@ -6913,6 +6936,8 @@ func quotaDisplayLabel(label string) string {
 		return "5h"
 	case strings.Contains(normalized, "weekly") || strings.Contains(normalized, "week"):
 		return "Weekly"
+	case strings.Contains(normalized, "monthly") || strings.Contains(normalized, "month"):
+		return "Monthly"
 	case strings.Contains(normalized, "gpt"):
 		return "GPT"
 	case strings.Contains(normalized, "codex"):
@@ -6931,6 +6956,8 @@ func quotaWindowFromLabel(label string) string {
 		return "5h"
 	case strings.Contains(normalized, "weekly") || strings.Contains(normalized, "week"):
 		return "weekly"
+	case strings.Contains(normalized, "monthly") || strings.Contains(normalized, "month"):
+		return "monthly"
 	default:
 		return ""
 	}
@@ -6969,8 +6996,10 @@ func quotaPriority(limit OpenAIQuotaLimit) int {
 		return 0
 	case strings.Contains(label, "weekly") || strings.Contains(label, "week"):
 		return 1
-	case strings.Contains(label, "gpt"):
+	case strings.Contains(label, "monthly") || strings.Contains(label, "month"):
 		return 2
+	case strings.Contains(label, "gpt"):
+		return 3
 	default:
 		return 10
 	}

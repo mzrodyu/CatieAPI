@@ -246,7 +246,15 @@ nav {
 }
 
 .sidebar-footer strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   color: var(--green);
+}
+
+.sidebar-footer .pulse-dot {
+  width: 7px;
+  height: 7px;
 }
 
 .icon {
@@ -791,14 +799,16 @@ h3 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   min-width: 54px;
   height: 27px;
-  padding: 0 10px;
+  padding: 0 11px;
   color: var(--muted);
   background: var(--group);
   border-radius: 999px;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 650;
+  letter-spacing: 0.01em;
   white-space: nowrap;
 }
 
@@ -807,25 +817,51 @@ h3 {
   border: 0;
 }
 
+/* Status dot: gives state badges a small living indicator instead of a flat pill. */
+.badge.tone-active::before,
+.badge.tone-healthy::before,
+.badge.tone-available::before,
+.badge.tone-success::before,
+.badge.tone-disabled::before,
+.badge.tone-failed::before,
+.badge.tone-limited::before,
+.badge.tone-overdue::before,
+.badge.tone-standby::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+
 .tone-active,
 .tone-healthy,
 .tone-available,
 .tone-success {
   color: #118446;
-  background: color-mix(in srgb, var(--green) 18%, transparent);
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+}
+
+/* Healthy/online dots get a soft halo to feel alive without animation noise. */
+.badge.tone-active::before,
+.badge.tone-healthy::before,
+.badge.tone-available::before,
+.badge.tone-success::before {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 18%, transparent);
 }
 
 .tone-disabled,
 .tone-failed {
   color: #d70015;
-  background: color-mix(in srgb, var(--red) 16%, transparent);
+  background: color-mix(in srgb, var(--red) 14%, transparent);
 }
 
 .tone-limited,
 .tone-overdue,
 .tone-standby {
   color: #a05a00;
-  background: color-mix(in srgb, var(--orange) 17%, transparent);
+  background: color-mix(in srgb, var(--orange) 15%, transparent);
 }
 
 .users-layout {
@@ -1134,11 +1170,13 @@ h3 {
 .provider-icon-all {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
   color: var(--text);
-  font-size: 11px;
-  font-weight: 900;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
   background: var(--surface-solid);
   border: 1px solid var(--hairline);
   border-radius: 10px;
@@ -1215,7 +1253,6 @@ h3 {
 
 .provider-icon-google svg text { fill: #4285f4; }
 .provider-icon-openai { color: var(--text); }
-.provider-icon-openai .openai-knot { stroke-linecap: round; stroke-linejoin: round; }
 .provider-icon-deepseek,
 .provider-icon-deepseek svg,
 .provider-icon-deepseek svg path {
@@ -4942,4 +4979,96 @@ button.table-row:hover {
   .channel-check-result { order: 4; }
   .channel-list-status { grid-column: 2; grid-row: 1; }
   .channel-editor-controls { grid-template-columns: 1fr; }
+}
+
+/* Home terminal: quiet entrance motion that reads like a request flowing to a
+   response. Nothing loops except the caret; respects reduced-motion. */
+.gateway-terminal .terminal-block {
+  opacity: 0;
+  animation: terminal-rise 0.5s ease-out forwards;
+}
+
+.gateway-terminal .terminal-block.response {
+  animation-delay: 0.45s;
+}
+
+.gateway-terminal .terminal-route div {
+  opacity: 0;
+  animation: terminal-rise 0.4s ease-out forwards;
+}
+
+.gateway-terminal .terminal-route div:nth-child(1) { animation-delay: 0.18s; }
+.gateway-terminal .terminal-route div:nth-child(2) { animation-delay: 0.28s; }
+.gateway-terminal .terminal-route div:nth-child(3) { animation-delay: 0.38s; }
+.gateway-terminal .terminal-route div:nth-child(4) { animation-delay: 0.48s; }
+
+.terminal-caret {
+  display: inline-block;
+  width: 7px;
+  height: 15px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: #76e4a6;
+  border-radius: 1px;
+  animation: terminal-caret-blink 1.1s step-end infinite;
+}
+
+@keyframes terminal-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes terminal-caret-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gateway-terminal .terminal-block,
+  .gateway-terminal .terminal-route div {
+    opacity: 1;
+    animation: none;
+  }
+  .terminal-caret {
+    animation: none;
+  }
+}
+
+/* Soften the console: give surfaces and interactive rows a gentle transition so
+   hover/selection state eases in instead of snapping. Kept subtle to preserve
+   the quiet, tool-like feel. */
+.panel,
+.metric,
+.hero-strip,
+.flow-panel,
+.model-hero,
+.channel-card,
+.model-card,
+.settings-group,
+.account-pool-row,
+.model-provider-group,
+.model-provider-filter button,
+.table-row,
+.list-row,
+.channel-choice-menu button,
+.provider-picker-menu button,
+.model-row-menu button {
+  transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+/* Table rows lift very slightly on hover for a less rigid scan. */
+button.table-row:hover,
+.log-entry .table-row:hover {
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+
+/* Metric tiles react gently on hover to feel alive without motion noise. */
+.metric:hover {
+  border-color: var(--hairline-strong);
 }
