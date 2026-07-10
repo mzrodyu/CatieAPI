@@ -756,7 +756,7 @@ func (s *Server) checkOpenAIAccountsInBackground() {
 			go func(channel Channel, account OpenAIAccount) {
 				defer workers.Done()
 				semaphore <- struct{}{}
-				result := s.checkOpenAIAccount(account, channel)
+				result := s.checkOpenAIAccount(account, channel, false)
 				<-semaphore
 				results <- healthCheckResult{channelID: channel.ID, accountID: account.ID, result: result}
 			}(channel, account)
@@ -2999,7 +2999,7 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 			continue
 		}
 		checked++
-		result := s.checkOpenAIAccount(account, channelCopy)
+		result := s.checkOpenAIAccount(account, channelCopy, true)
 		status := result.Status
 		errorMessage := result.Message
 		if status == "healthy" {
@@ -6214,7 +6214,7 @@ func (s *Server) fetchUpstreamModelIDs(channel Channel, upstreamKey string) ([]s
 	return mergeStrings(nil, ids), nil
 }
 
-func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) OpenAIAccountCheckResult {
+func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel, allowProbe bool) OpenAIAccountCheckResult {
 	result := OpenAIAccountCheckResult{Status: "unchecked"}
 	accessToken, err := s.revealSecret(account.AccessToken)
 	if err != nil {
@@ -6342,7 +6342,7 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 	result.PlanType = firstNonEmptyString(result.PlanType, account.PlanType)
 	quotaLimits, providerErr := s.checkOpenAIAccountUsage(accessToken, account)
 	if providerErr != nil {
-		if isSub2APIAccount(account) && (providerErr.Status == http.StatusUnauthorized || providerErr.Status == http.StatusForbidden) {
+		if allowProbe && isSub2APIAccount(account) && (providerErr.Status == http.StatusUnauthorized || providerErr.Status == http.StatusForbidden) {
 			if probeErr := s.probeOpenAIAccountViaCodex(account, channel, accessToken); probeErr == nil {
 				// Sub2API can reject the quota endpoint while the account remains
 				// usable for the actual Codex request path.
