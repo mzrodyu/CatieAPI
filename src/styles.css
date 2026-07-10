@@ -39,6 +39,16 @@ button {
   cursor: pointer;
 }
 
+/* Keep native option popups aligned with the active color scheme on Windows. */
+.app-shell[data-theme="dark"] select {
+  color-scheme: dark;
+}
+
+.app-shell[data-theme="dark"] select option {
+  color: #f5f5f7;
+  background: #2c2c2e;
+}
+
 .app-shell input[type="datetime-local"],
 .app-shell input[type="date"],
 .app-shell input[type="time"] {
@@ -2483,7 +2493,7 @@ button.table-row:hover {
   padding: 5px 9px;
   border: 1px solid var(--hairline);
   border-radius: 999px;
-  background: var(--control);
+  background: var(--control, var(--group));
   color: var(--muted);
   cursor: pointer;
   font: inherit;
@@ -2496,7 +2506,7 @@ button.table-row:hover {
   padding: 5px 9px;
   border: 1px solid var(--hairline);
   border-radius: 999px;
-  background: var(--control);
+  background: var(--control, var(--group));
   color: var(--text);
   font: inherit;
   font-size: 12px;
@@ -2506,7 +2516,7 @@ button.table-row:hover {
   padding: 5px 9px;
   border: 1px solid var(--hairline);
   border-radius: 999px;
-  background: var(--control);
+  background: var(--control, var(--group));
   color: var(--text);
   font: inherit;
   font-size: 12px;
