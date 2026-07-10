@@ -2651,6 +2651,19 @@ func TestSub2APIUsageUnauthorizedCanFallBackToCodexProbe(t *testing.T) {
 	}
 }
 
+func TestAccountHealthCheckDueSkipsFreshChecks(t *testing.T) {
+	nowValue := time.Now().UTC()
+	if accountHealthCheckDue(nowValue.Add(-time.Minute).Format(time.RFC3339Nano), time.Hour) {
+		t.Fatal("fresh account check should be skipped")
+	}
+	if !accountHealthCheckDue(nowValue.Add(-2 * time.Hour).Format(time.RFC3339Nano), time.Hour) {
+		t.Fatal("stale account check should run")
+	}
+	if !accountHealthCheckDue("", time.Hour) {
+		t.Fatal("unchecked account should run")
+	}
+}
+
 func TestImageGenerationsReturnPoolUnavailableWhenAllOpenAIAccountsInvalidated(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/backend-api/codex/responses" {

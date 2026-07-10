@@ -779,7 +779,9 @@ func (s *Server) checkOpenAIAccountsInBackground() {
 
 	changed := false
 	healthyByChannel := map[string]int{}
+	checkedByChannel := map[string]int{}
 	for checked := range results {
+		checkedByChannel[checked.channelID]++
 		if checked.result.Status == "healthy" {
 			healthyByChannel[checked.channelID]++
 		}
@@ -824,7 +826,7 @@ func (s *Server) checkOpenAIAccountsInBackground() {
 	for _, channel := range channels {
 		s.mu.Lock()
 		live := s.findChannel(channel.ID)
-		if live != nil && len(channel.OpenAIAccounts) > 0 {
+		if live != nil && len(channel.OpenAIAccounts) > 0 && checkedByChannel[channel.ID] > 0 {
 			live.LastCheckedAt = now()
 			if live.Status != "disabled" && healthyByChannel[channel.ID] == 0 {
 				live.Status, live.LastError = "standby", "账号池暂时没有可用账号"
