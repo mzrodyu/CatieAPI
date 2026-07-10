@@ -236,6 +236,7 @@ type OpenAIAccount struct {
 	Status        string             `json:"status,omitempty"`
 	LastCheckedAt string             `json:"lastCheckedAt,omitempty"`
 	LastError     string             `json:"lastError,omitempty"`
+	LastErrorCode string             `json:"lastErrorCode,omitempty"`
 	LastUsedAt    string             `json:"lastUsedAt,omitempty"`
 	RequestCount  int                `json:"requestCount,omitempty"`
 	QuotaLimits   []OpenAIQuotaLimit `json:"quotaLimits,omitempty"`
@@ -256,6 +257,7 @@ type PublicOpenAIAccount struct {
 	Status          string             `json:"status,omitempty"`
 	LastCheckedAt   string             `json:"lastCheckedAt,omitempty"`
 	LastError       string             `json:"lastError,omitempty"`
+	LastErrorCode   string             `json:"lastErrorCode,omitempty"`
 	LastUsedAt      string             `json:"lastUsedAt,omitempty"`
 	RequestCount    int                `json:"requestCount,omitempty"`
 	QuotaLimits     []OpenAIQuotaLimit `json:"quotaLimits,omitempty"`
@@ -294,6 +296,7 @@ type ImportedOpenAIAccount struct {
 type OpenAIAccountCheckResult struct {
 	Status       string
 	Message      string
+	ErrorCode    string
 	QuotaLimits  []OpenAIQuotaLimit
 	PlanType     string
 	AccessToken  string
@@ -783,6 +786,7 @@ func (s *Server) checkOpenAIAccountsInBackground() {
 				live.OpenAIAccounts[index].Status = checked.result.Status
 				live.OpenAIAccounts[index].LastCheckedAt = now()
 				live.OpenAIAccounts[index].LastError = truncateString(checked.result.Message, 500)
+				live.OpenAIAccounts[index].LastErrorCode = checked.result.ErrorCode
 				if checked.result.AccessToken != "" {
 					live.OpenAIAccounts[index].AccessToken = checked.result.AccessToken
 				}
@@ -3019,6 +3023,7 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 				liveChannel.OpenAIAccounts[index].Status = status
 				liveChannel.OpenAIAccounts[index].LastCheckedAt = nowValue
 				liveChannel.OpenAIAccounts[index].LastError = truncateString(errorMessage, 500)
+				liveChannel.OpenAIAccounts[index].LastErrorCode = result.ErrorCode
 				if result.AccessToken != "" {
 					liveChannel.OpenAIAccounts[index].AccessToken = result.AccessToken
 				}
@@ -6353,6 +6358,7 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel, allo
 				providerErr = probeErr
 			}
 		}
+		result.ErrorCode = providerErr.Code
 		result.Message = fmt.Sprintf("HTTP %d: %s", providerErr.Status, truncateString(providerErr.Message, 300))
 		if shouldInvalidateOpenAIAccountForUsage(account, providerErr, hasRefreshToken) {
 			result.Status = "invalid"
@@ -10220,6 +10226,7 @@ func publicOpenAIAccount(account OpenAIAccount) PublicOpenAIAccount {
 		Status:          firstNonEmptyString(account.Status, "unchecked"),
 		LastCheckedAt:   account.LastCheckedAt,
 		LastError:       account.LastError,
+		LastErrorCode:   account.LastErrorCode,
 		LastUsedAt:      account.LastUsedAt,
 		RequestCount:    account.RequestCount,
 		QuotaLimits:     append([]OpenAIQuotaLimit{}, account.QuotaLimits...),

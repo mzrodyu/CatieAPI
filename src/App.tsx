@@ -106,6 +106,7 @@ type OpenAIAccount = {
   status?: string;
   lastCheckedAt?: string;
   lastError?: string;
+  lastErrorCode?: string;
   lastUsedAt?: string;
   requestCount?: number;
   quotaLimits?: OpenAIQuotaLimit[];
@@ -464,6 +465,18 @@ function planTypeLabel(value?: string) {
   if (!normalized) return "套餐未知";
   const labels: Record<string, string> = { free: "Free", plus: "Plus", pro: "Pro", team: "Team", enterprise: "Enterprise" };
   return labels[normalized] || value || "套餐未知";
+}
+
+function accountErrorLabel(code?: string) {
+  if (!code) return "";
+  const labels: Record<string, string> = {
+    upstream_token_invalidated: "Token 已失效",
+    upstream_invalid_api_key: "API Key 无效",
+    upstream_account_error: "账号错误",
+    upstream_accounts_unavailable: "账号池不可用",
+    upstream_error: "上游错误"
+  };
+  return labels[code] || code;
 }
 
 function defaultBaseURLForProvider(provider: string) {
@@ -2716,7 +2729,7 @@ function DrawingView({
                                 {account.source === "web-login" ? "网页登录" : account.source === "web-oauth" ? "网页 OAuth" : account.source === "oauth" ? "Codex OAuth" : "导入"}
                               </span>
                             </div>
-                            <span>{account.lastError || (account.lastCheckedAt ? `上次检测 ${formatDate(account.lastCheckedAt)}` : "未检测")}</span>
+                            <span>{account.lastError ? `${accountErrorLabel(account.lastErrorCode)}${accountErrorLabel(account.lastErrorCode) ? " · " : ""}${account.lastError}` : (account.lastCheckedAt ? `上次检测 ${formatDate(account.lastCheckedAt)}` : "未检测")}</span>
                             <span>{account.credentialMode === "refreshable" ? "可自动续期" : account.credentialMode === "browser-session" ? "依赖网页会话" : "仅 access token"}{account.expiresAt ? ` · 到期 ${formatDate(account.expiresAt)}` : ""}</span>
 	                            <span>套餐 {planTypeLabel(account.planType)}</span>
 	                            {account.lastUsedAt && <span>最近调用 {formatDate(account.lastUsedAt)} · {account.requestCount || 0} 次</span>}
