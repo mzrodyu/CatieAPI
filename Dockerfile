@@ -10,10 +10,15 @@ RUN npm run build
 FROM golang:1.26-alpine AS api-builder
 WORKDIR /app
 RUN apk add --no-cache ca-certificates
+ARG BUILD_VERSION=dev
+ARG BUILD_COMMIT=local
+ARG BUILD_TIME=
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/catieapi ./cmd/catieapi
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags "-s -w -X main.buildVersion=${BUILD_VERSION} -X main.buildCommit=${BUILD_COMMIT} -X main.buildTime=${BUILD_TIME}" \
+    -o /out/catieapi ./cmd/catieapi
 
 FROM alpine:3.22
 WORKDIR /app
