@@ -2490,6 +2490,28 @@ button.table-row:hover {
   font-size: 12px;
 }
 
+.account-filter-bar input {
+  min-width: 180px;
+  flex: 1 1 220px;
+  padding: 5px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--control);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.account-filter-bar select {
+  padding: 5px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--control);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
 .account-filter-bar button.selected {
   border-color: var(--accent);
   color: var(--accent);

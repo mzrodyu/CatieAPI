@@ -62,7 +62,7 @@ func (s *Server) callChatGPTWebImage(call ImageGatewayCall) (gin.H, *ProviderErr
 		}
 		body, providerErr := s.callChatGPTWebImageWithAccount(call, account, accessToken)
 		if providerErr == nil {
-			s.markOpenAIAccountUsed(call.Channel.ID, account.ID)
+			s.markOpenAIAccountUsed(call.Channel.ID, account.ID, call.RequestID)
 			return body, nil
 		}
 		lastErr = providerErr

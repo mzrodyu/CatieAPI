@@ -3179,6 +3179,45 @@ func TestParseOpenAIAccountImportTextSupportsJSONLinesAndRawTokens(t *testing.T)
 	}
 }
 
+func TestImportedOpenAIAccountIndexMatchesStableIdentity(t *testing.T) {
+	accounts := []OpenAIAccount{
+		{ID: "one", AccountID: "account-one", UserID: "user-one", Email: "one@example.com"},
+		{ID: "two", AccountID: "account-two", UserID: "user-two", Email: "two@example.com"},
+	}
+	if index := importedOpenAIAccountIndex(accounts, ImportedOpenAIAccount{AccountID: "ACCOUNT-TWO"}); index != 1 {
+		t.Fatalf("account ID match index = %d", index)
+	}
+	if index := importedOpenAIAccountIndex(accounts, ImportedOpenAIAccount{UserID: "user-one"}); index != 0 {
+		t.Fatalf("user ID match index = %d", index)
+	}
+	if index := importedOpenAIAccountIndex(accounts, ImportedOpenAIAccount{Email: "TWO@example.com"}); index != 1 {
+		t.Fatalf("email match index = %d", index)
+	}
+	if index := importedOpenAIAccountIndex(accounts, ImportedOpenAIAccount{Email: "new@example.com"}); index != -1 {
+		t.Fatalf("unexpected match index = %d", index)
+	}
+}
+
+func TestMergeOpenAIAccountDuplicatesKeepsStableIDAndUsage(t *testing.T) {
+	primary := OpenAIAccount{ID: "stable", ImportedAt: "2026-07-10T00:00:00Z", LastUsedAt: "2026-07-10T01:00:00Z", RequestCount: 3}
+	replacement := OpenAIAccount{ID: "new", ImportedAt: "2026-07-11T00:00:00Z", LastUsedAt: "2026-07-10T00:30:00Z", RequestCount: 2}
+	merged := mergeOpenAIAccountDuplicates(primary, replacement)
+	if merged.ID != "stable" || merged.RequestCount != 5 || merged.LastUsedAt != "2026-07-10T01:00:00Z" {
+		t.Fatalf("merged duplicate = %#v", merged)
+	}
+}
+
+func TestActiveOpenAIAccountsRotatesLeastRecentlyUsedFirst(t *testing.T) {
+	accounts := activeOpenAIAccounts([]OpenAIAccount{
+		{ID: "recent", AccessToken: "one", Status: "healthy", LastUsedAt: "2026-07-10T12:00:00Z"},
+		{ID: "unused", AccessToken: "two", Status: "healthy"},
+		{ID: "older", AccessToken: "three", Status: "healthy", LastUsedAt: "2026-07-10T10:00:00Z"},
+	})
+	if len(accounts) != 3 || accounts[0].ID != "unused" || accounts[1].ID != "older" || accounts[2].ID != "recent" {
+		t.Fatalf("account rotation order = %#v", accounts)
+	}
+}
+
 func TestChatGPTSessionCookieCandidatesParsesCookieHeader(t *testing.T) {
 	cookies := chatGPTSessionCookieCandidates("foo=bar; __Secure-next-auth.session-token=web-session; theme=dark")
 	if len(cookies) != 1 || cookies[0].Name != "__Secure-next-auth.session-token" || cookies[0].Value != "web-session" {

@@ -324,6 +324,7 @@ type RequestLog struct {
 	APIKeyPrefix *string `json:"apiKeyPrefix"`
 	Model        *string `json:"model"`
 	Channel      *string `json:"channel"`
+	Account      *string `json:"account,omitempty"`
 	Status       string  `json:"status"`
 	Cost         float64 `json:"cost"`
 	InputTokens  int     `json:"inputTokens"`
@@ -379,6 +380,7 @@ type Server struct {
 	authStates            map[string]time.Time
 	sessions              map[string]Session
 	openAIOAuthFlows      map[string]openAIOAuthFlow
+	requestAccounts       map[string]string
 }
 
 // openAIOAuthFlow tracks one in-progress ChatGPT OAuth (PKCE) authorization so
@@ -698,6 +700,7 @@ func NewServer() *Server {
 		authStates:            map[string]time.Time{},
 		sessions:              map[string]Session{},
 		openAIOAuthFlows:      map[string]openAIOAuthFlow{},
+		requestAccounts:       map[string]string{},
 	}
 	s.webHTTPClient = newChatGPTWebHTTPClient(s.upstreamTimeout)
 	s.initStorage()
@@ -734,60 +737,84 @@ func (s *Server) checkOpenAIAccountsInBackground() {
 	}
 	s.mu.Unlock()
 
-	changed := false
+	type healthCheckResult struct {
+		channelID string
+		accountID string
+		result    OpenAIAccountCheckResult
+	}
+	jobs := 0
 	for _, channel := range channels {
-		healthyAccounts := 0
+		jobs += len(channel.OpenAIAccounts)
+	}
+	results := make(chan healthCheckResult, jobs)
+	semaphore := make(chan struct{}, 3)
+	var workers sync.WaitGroup
+	for _, channel := range channels {
 		for _, account := range channel.OpenAIAccounts {
-			result := s.checkOpenAIAccount(account, channel)
-			if result.Status == "healthy" {
-				healthyAccounts++
-			}
-			s.mu.Lock()
-			live := s.findChannel(channel.ID)
-			if live != nil {
-				for index := range live.OpenAIAccounts {
-					if live.OpenAIAccounts[index].ID != account.ID {
-						continue
-					}
-					live.OpenAIAccounts[index].Status = result.Status
-					live.OpenAIAccounts[index].LastCheckedAt = now()
-					live.OpenAIAccounts[index].LastError = truncateString(result.Message, 500)
-					if result.AccessToken != "" {
-						live.OpenAIAccounts[index].AccessToken = result.AccessToken
-					}
-					if result.RefreshToken != "" {
-						live.OpenAIAccounts[index].RefreshToken = result.RefreshToken
-					}
-					if result.IDToken != "" {
-						live.OpenAIAccounts[index].IDToken = result.IDToken
-					}
-					if result.ExpiresAt != "" {
-						live.OpenAIAccounts[index].ExpiresAt = result.ExpiresAt
-					}
-					if result.LastRefresh != "" {
-						live.OpenAIAccounts[index].LastRefresh = result.LastRefresh
-					}
-					if result.QuotaLimits != nil {
-						live.OpenAIAccounts[index].QuotaLimits = result.QuotaLimits
-					}
-					changed = true
-					break
-				}
-			}
-			s.mu.Unlock()
+			workers.Add(1)
+			go func(channel Channel, account OpenAIAccount) {
+				defer workers.Done()
+				semaphore <- struct{}{}
+				result := s.checkOpenAIAccount(account, channel)
+				<-semaphore
+				results <- healthCheckResult{channelID: channel.ID, accountID: account.ID, result: result}
+			}(channel, account)
+		}
+	}
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+
+	changed := false
+	healthyByChannel := map[string]int{}
+	for checked := range results {
+		if checked.result.Status == "healthy" {
+			healthyByChannel[checked.channelID]++
 		}
 		s.mu.Lock()
-		live := s.findChannel(channel.ID)
+		live := s.findChannel(checked.channelID)
 		if live != nil {
-			live.LastCheckedAt = now()
-			if live.Status != "disabled" {
-				if healthyAccounts > 0 {
-					live.Status = "healthy"
-					live.LastError = ""
-				} else if len(channel.OpenAIAccounts) > 0 {
-					live.Status = "standby"
-					live.LastError = "账号池暂时没有可用账号"
+			for index := range live.OpenAIAccounts {
+				if live.OpenAIAccounts[index].ID != checked.accountID {
+					continue
 				}
+				live.OpenAIAccounts[index].Status = checked.result.Status
+				live.OpenAIAccounts[index].LastCheckedAt = now()
+				live.OpenAIAccounts[index].LastError = truncateString(checked.result.Message, 500)
+				if checked.result.AccessToken != "" {
+					live.OpenAIAccounts[index].AccessToken = checked.result.AccessToken
+				}
+				if checked.result.RefreshToken != "" {
+					live.OpenAIAccounts[index].RefreshToken = checked.result.RefreshToken
+				}
+				if checked.result.IDToken != "" {
+					live.OpenAIAccounts[index].IDToken = checked.result.IDToken
+				}
+				if checked.result.ExpiresAt != "" {
+					live.OpenAIAccounts[index].ExpiresAt = checked.result.ExpiresAt
+				}
+				if checked.result.LastRefresh != "" {
+					live.OpenAIAccounts[index].LastRefresh = checked.result.LastRefresh
+				}
+				if checked.result.QuotaLimits != nil {
+					live.OpenAIAccounts[index].QuotaLimits = checked.result.QuotaLimits
+				}
+				changed = true
+				break
+			}
+		}
+		s.mu.Unlock()
+	}
+	for _, channel := range channels {
+		s.mu.Lock()
+		live := s.findChannel(channel.ID)
+		if live != nil && len(channel.OpenAIAccounts) > 0 {
+			live.LastCheckedAt = now()
+			if live.Status != "disabled" && healthyByChannel[channel.ID] == 0 {
+				live.Status, live.LastError = "standby", "账号池暂时没有可用账号"
+			} else if live.Status != "disabled" {
+				live.Status, live.LastError = "healthy", ""
 			}
 			changed = true
 		}
@@ -836,6 +863,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	admin.POST("/channels/:id/openai-oauth/start", s.startOpenAIOAuth)
 	admin.POST("/channels/:id/openai-oauth/complete", s.completeOpenAIOAuth)
 	admin.POST("/channels/:id/openai-accounts/check", s.checkOpenAIAccounts)
+	admin.POST("/channels/:id/openai-accounts/deduplicate", s.deduplicateOpenAIAccounts)
 	admin.DELETE("/channels/:id/openai-accounts/:accountId", s.deleteOpenAIAccount)
 	admin.PATCH("/channels/:id", s.updateChannel)
 	admin.DELETE("/channels/:id", s.deleteChannel)
@@ -2529,6 +2557,7 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 	}
 
 	importedAccounts := []PublicOpenAIAccount{}
+	updated := 0
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	channel := s.findChannel(c.Param("id"))
@@ -2550,6 +2579,19 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 		if strings.TrimSpace(account.AccessToken) == "" {
 			invalid++
 			continue
+		}
+		// Plain access-token exports often omit user metadata. Recover the
+		// stable account identity from JWT claims so a later re-import updates
+		// that account instead of creating a duplicate pool entry.
+		if account.Email == "" || account.Name == "" {
+			email, name := jwtEmailName(account.AccessToken)
+			account.Email = firstNonEmptyString(account.Email, email)
+			account.Name = firstNonEmptyString(account.Name, name)
+		}
+		if account.AccountID == "" || account.PlanType == "" {
+			accountID, planType := openAIClaimsAccountInfo(account.AccessToken)
+			account.AccountID = firstNonEmptyString(account.AccountID, accountID)
+			account.PlanType = firstNonEmptyString(account.PlanType, planType)
 		}
 		protectedKey, err := s.protectSecret(strings.TrimSpace(account.AccessToken))
 		if err != nil {
@@ -2601,7 +2643,17 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 			ImportedAt:    time.Now().UTC().Format(time.RFC3339),
 			Status:        "unchecked",
 		}
-		channel.OpenAIAccounts = append(channel.OpenAIAccounts, stored)
+		if existingIndex := importedOpenAIAccountIndex(channel.OpenAIAccounts, account); existingIndex >= 0 {
+			// A fresh export for the same account replaces credentials but keeps
+			// the account's usage history and stable ID intact.
+			stored.ID = channel.OpenAIAccounts[existingIndex].ID
+			stored.LastUsedAt = channel.OpenAIAccounts[existingIndex].LastUsedAt
+			stored.RequestCount = channel.OpenAIAccounts[existingIndex].RequestCount
+			channel.OpenAIAccounts[existingIndex] = stored
+			updated++
+		} else {
+			channel.OpenAIAccounts = append(channel.OpenAIAccounts, stored)
+		}
 		importedAccounts = append(importedAccounts, publicOpenAIAccount(stored))
 	}
 	if len(importedAccounts) == 0 {
@@ -2611,10 +2663,30 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 	s.saveStateLocked()
 	c.JSON(http.StatusCreated, gin.H{
 		"imported": len(importedAccounts),
+		"created":  len(importedAccounts) - updated,
+		"updated":  updated,
 		"skipped":  invalid,
 		"accounts": importedAccounts,
 		"channel":  publicChannel(*channel),
 	})
+}
+
+func importedOpenAIAccountIndex(accounts []OpenAIAccount, incoming ImportedOpenAIAccount) int {
+	accountID := strings.TrimSpace(incoming.AccountID)
+	userID := strings.TrimSpace(incoming.UserID)
+	email := strings.ToLower(strings.TrimSpace(incoming.Email))
+	for index, account := range accounts {
+		if accountID != "" && strings.EqualFold(strings.TrimSpace(account.AccountID), accountID) {
+			return index
+		}
+		if userID != "" && strings.EqualFold(strings.TrimSpace(account.UserID), userID) {
+			return index
+		}
+		if email != "" && strings.EqualFold(strings.TrimSpace(account.Email), email) {
+			return index
+		}
+	}
+	return -1
 }
 
 // startOpenAIOAuth begins a ChatGPT OAuth (PKCE) authorization for a channel. It
@@ -2995,6 +3067,69 @@ func (s *Server) checkOpenAIAccounts(c *gin.Context) {
 		"accounts": results,
 		"channel":  public,
 	})
+}
+
+func (s *Server) deduplicateOpenAIAccounts(c *gin.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	channel := s.findChannel(c.Param("id"))
+	if channel == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Channel not found"}})
+		return
+	}
+	unique := make([]OpenAIAccount, 0, len(channel.OpenAIAccounts))
+	seen := map[string]int{}
+	removed := 0
+	for _, account := range channel.OpenAIAccounts {
+		key := openAIAccountIdentityKey(account)
+		if key == "" {
+			unique = append(unique, account)
+			continue
+		}
+		if index, exists := seen[key]; exists {
+			unique[index] = mergeOpenAIAccountDuplicates(unique[index], account)
+			removed++
+			continue
+		}
+		seen[key] = len(unique)
+		unique = append(unique, account)
+	}
+	if removed > 0 {
+		channel.OpenAIAccounts = unique
+		s.saveStateLocked()
+	}
+	c.JSON(http.StatusOK, gin.H{"removed": removed, "channel": publicChannel(*channel)})
+}
+
+func openAIAccountIdentityKey(account OpenAIAccount) string {
+	if value := strings.ToLower(strings.TrimSpace(account.AccountID)); value != "" {
+		return "account:" + value
+	}
+	if value := strings.ToLower(strings.TrimSpace(account.UserID)); value != "" {
+		return "user:" + value
+	}
+	if value := strings.ToLower(strings.TrimSpace(account.Email)); value != "" {
+		return "email:" + value
+	}
+	return ""
+}
+
+func mergeOpenAIAccountDuplicates(primary OpenAIAccount, replacement OpenAIAccount) OpenAIAccount {
+	// Keep the oldest stable ID so UI references remain valid, but prefer the
+	// newest imported credential set and retain accumulated request history.
+	if replacement.ImportedAt >= primary.ImportedAt {
+		replacement.ID = primary.ID
+		replacement.RequestCount += primary.RequestCount
+		if replacement.LastUsedAt < primary.LastUsedAt {
+			replacement.LastUsedAt = primary.LastUsedAt
+		}
+		return replacement
+	}
+	primary.RequestCount += replacement.RequestCount
+	if primary.LastUsedAt < replacement.LastUsedAt {
+		primary.LastUsedAt = replacement.LastUsedAt
+	}
+	return primary
 }
 
 func (s *Server) deleteOpenAIAccount(c *gin.Context) {
@@ -4385,7 +4520,9 @@ func (s *Server) recordSuccessfulCallLocked(userID string, keyID string, keyPref
 		CreatedAt: now(),
 	})
 
-	s.state.Logs = append(s.state.Logs, RequestLog{
+	account := s.requestAccounts[requestID]
+	delete(s.requestAccounts, requestID)
+	log := RequestLog{
 		ID:           requestID,
 		UserID:       &userID,
 		APIKeyPrefix: &keyPrefix,
@@ -4398,7 +4535,11 @@ func (s *Server) recordSuccessfulCallLocked(userID string, keyID string, keyPref
 		Attempts:     attempts,
 		LatencyMS:    time.Since(startedAt).Milliseconds(),
 		CreatedAt:    now(),
-	})
+	}
+	if account != "" {
+		log.Account = &account
+	}
+	s.state.Logs = append(s.state.Logs, log)
 	s.saveStateLocked()
 }
 
@@ -4427,7 +4568,9 @@ func (s *Server) recordSuccessfulImageCallLocked(userID string, keyID string, ke
 		CreatedAt: now(),
 	})
 
-	s.state.Logs = append(s.state.Logs, RequestLog{
+	account := s.requestAccounts[requestID]
+	delete(s.requestAccounts, requestID)
+	log := RequestLog{
 		ID:           requestID,
 		UserID:       &userID,
 		APIKeyPrefix: &keyPrefix,
@@ -4440,14 +4583,20 @@ func (s *Server) recordSuccessfulImageCallLocked(userID string, keyID string, ke
 		Attempts:     attempts,
 		LatencyMS:    time.Since(startedAt).Milliseconds(),
 		CreatedAt:    now(),
-	})
+	}
+	if account != "" {
+		log.Account = &account
+	}
+	s.state.Logs = append(s.state.Logs, log)
 	s.saveStateLocked()
 }
 
 func (s *Server) recordFailedCall(userID string, keyPrefix string, modelID string, channelName string, requestID string, errorCode string, attempts int, startedAt time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.state.Logs = append(s.state.Logs, RequestLog{
+	account := s.requestAccounts[requestID]
+	delete(s.requestAccounts, requestID)
+	log := RequestLog{
 		ID:           requestID,
 		UserID:       &userID,
 		APIKeyPrefix: &keyPrefix,
@@ -4459,7 +4608,11 @@ func (s *Server) recordFailedCall(userID string, keyPrefix string, modelID strin
 		LatencyMS:    time.Since(startedAt).Milliseconds(),
 		ErrorCode:    errorCode,
 		CreatedAt:    now(),
-	})
+	}
+	if account != "" {
+		log.Account = &account
+	}
+	s.state.Logs = append(s.state.Logs, log)
 	s.saveStateLocked()
 }
 
@@ -4705,7 +4858,7 @@ func (s *Server) callOpenAICompatibleImage(call ImageGatewayCall) (gin.H, *Provi
 			}
 			body, providerErr := s.callChatGPTCodexImageWithAccount(call, account, upstreamKey)
 			if providerErr == nil {
-				s.markOpenAIAccountUsed(call.Channel.ID, account.ID)
+				s.markOpenAIAccountUsed(call.Channel.ID, account.ID, call.RequestID)
 				return body, nil
 			}
 			lastErr = providerErr
@@ -4806,7 +4959,7 @@ func (s *Server) callChatGPTCodex(call GatewayCall) (gin.H, *ProviderError) {
 		}
 		body, providerErr := s.callChatGPTCodexWithAccount(call, account, accessToken)
 		if providerErr == nil {
-			s.markOpenAIAccountUsed(call.Channel.ID, account.ID)
+			s.markOpenAIAccountUsed(call.Channel.ID, account.ID, call.RequestID)
 			return body, nil
 		}
 		lastErr = providerErr
@@ -4887,7 +5040,7 @@ func (s *Server) streamChatGPTCodex(c *gin.Context, call GatewayCall) *ProviderE
 		}
 		providerErr := s.streamChatGPTCodexWithAccount(c, call, account, accessToken)
 		if providerErr == nil {
-			s.markOpenAIAccountUsed(call.Channel.ID, account.ID)
+			s.markOpenAIAccountUsed(call.Channel.ID, account.ID, call.RequestID)
 			return nil
 		}
 		lastErr = providerErr
@@ -6070,6 +6223,14 @@ func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel) Open
 			return result
 		}
 	}
+	if !hasRefreshToken && strings.TrimSpace(account.SessionToken) != "" && openAIAccountAccessTokenExpiring(accessToken, account.ExpiresAt, 5*time.Minute) {
+		refreshedAccessToken, resolveErr := s.resolveOpenAIAccountAccessToken(account)
+		if resolveErr != nil {
+			result.Message = resolveErr.Error()
+			return result
+		}
+		accessToken = refreshedAccessToken
+	}
 	if openAIAccountAccessExpired(account.ExpiresAt) && strings.TrimSpace(refreshToken) != "" {
 		refreshed, err := s.refreshOpenAIAccount(refreshToken)
 		if err == nil && strings.TrimSpace(refreshed.AccessToken) != "" {
@@ -6995,6 +7156,23 @@ func activeOpenAIAccounts(accounts []OpenAIAccount) []OpenAIAccount {
 		}
 		standby = append(standby, account)
 	}
+	// Spread requests across healthy accounts. Empty LastUsedAt sorts first so
+	// newly imported accounts receive a turn before repeatedly using one old
+	// account; equal timestamps preserve the configured order.
+	sort.SliceStable(healthy, func(i, j int) bool {
+		left := strings.TrimSpace(healthy[i].LastUsedAt)
+		right := strings.TrimSpace(healthy[j].LastUsedAt)
+		if left == right {
+			return false
+		}
+		if left == "" {
+			return true
+		}
+		if right == "" {
+			return false
+		}
+		return left < right
+	})
 	ordered := append(healthy, standby...)
 	return append(ordered, limited...)
 }
@@ -7077,7 +7255,7 @@ func (s *Server) markOpenAIAccountInvalid(channelID string, accountID string, me
 	}
 }
 
-func (s *Server) markOpenAIAccountUsed(channelID string, accountID string) {
+func (s *Server) markOpenAIAccountUsed(channelID string, accountID string, requestID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	channel := s.findChannel(channelID)
@@ -7090,6 +7268,9 @@ func (s *Server) markOpenAIAccountUsed(channelID string, accountID string) {
 		}
 		channel.OpenAIAccounts[index].LastUsedAt = now()
 		channel.OpenAIAccounts[index].RequestCount++
+		if requestID != "" {
+			s.requestAccounts[requestID] = firstNonEmptyString(channel.OpenAIAccounts[index].Email, channel.OpenAIAccounts[index].Name, channel.OpenAIAccounts[index].AccountID, accountID)
+		}
 		s.saveStateLocked()
 		return
 	}

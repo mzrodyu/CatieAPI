@@ -127,6 +127,8 @@ type OpenAIQuotaLimit = {
 
 type OpenAIAccountImportResult = {
   imported: number;
+  created?: number;
+  updated?: number;
   skipped: number;
   accounts: OpenAIAccount[];
   channel: Channel;
@@ -159,6 +161,7 @@ type RequestLog = {
   apiKeyPrefix: string | null;
   model: string | null;
   channel: string | null;
+  account?: string | null;
   status: "success" | "failed";
   cost: number;
   inputTokens?: number;
@@ -893,7 +896,7 @@ function App() {
     formData.append("file", file);
     const result = await fetchFormJson<OpenAIAccountImportResult>(`/api/channels/${encodeURIComponent(channelId)}/import-openai-accounts`, formData);
     setChannels((current) => current.map((channel) => (channel.id === result.channel.id ? normalizeChannel(result.channel) : channel)));
-    setToast(`已导入 ${result.imported} 个账号${result.skipped ? `，跳过 ${result.skipped} 个` : ""}`);
+	setToast(`新增 ${result.created ?? result.imported} 个账号${result.updated ? `，更新 ${result.updated} 个已有账号` : ""}${result.skipped ? `，跳过 ${result.skipped} 个` : ""}`);
     window.setTimeout(() => setToast(""), 2600);
   }
 
@@ -905,6 +908,16 @@ function App() {
     setChannels((current) => current.map((channel) => (channel.id === result.channel.id ? normalizeChannel(result.channel) : channel)));
     setToast(`${onlyInvalid ? "无效账号复检" : "账号测活"}完成：${result.healthy}/${result.checked} 可用${result.failed ? `，无效 ${result.failed}` : ""}`);
     window.setTimeout(() => setToast(""), 3000);
+  }
+
+  async function deduplicateOpenAIAccounts(channelId: string) {
+    const result = await fetchJson<{ removed: number; channel: Channel }>(`/api/channels/${encodeURIComponent(channelId)}/openai-accounts/deduplicate`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    setChannels((current) => current.map((channel) => (channel.id === result.channel.id ? normalizeChannel(result.channel) : channel)));
+    setToast(result.removed ? `已合并 ${result.removed} 个重复账号` : "未发现可识别的重复账号");
+    window.setTimeout(() => setToast(""), 2600);
   }
 
   async function deleteOpenAIAccount(channelId: string, accountId: string) {
@@ -1147,7 +1160,7 @@ function App() {
         )}
         {active === "keys" && <KeysView selectedUser={selectedUser} onCreateKey={createAPIKeyForUser} onUpdateKey={updateAPIKey} onDeleteKey={deleteAPIKey} />}
         {active === "models" && <ModelsView models={models} onCopy={copyAndToast} onCreate={createModel} onUpdate={updateModel} onDelete={deleteModel} />}
-        {active === "drawing" && <DrawingView channels={channels} onCreate={createChannel} onImport={importOpenAIAccounts} onCheckAccounts={checkOpenAIAccounts} onDeleteAccount={deleteOpenAIAccount} onUpdate={updateChannel} onStartOAuth={startOpenAIOAuth} onCompleteOAuth={completeOpenAIOAuth} />}
+        {active === "drawing" && <DrawingView channels={channels} onCreate={createChannel} onImport={importOpenAIAccounts} onCheckAccounts={checkOpenAIAccounts} onDeduplicateAccounts={deduplicateOpenAIAccounts} onDeleteAccount={deleteOpenAIAccount} onUpdate={updateChannel} onStartOAuth={startOpenAIOAuth} onCompleteOAuth={completeOpenAIOAuth} />}
         {active === "channels" && <ChannelsView channels={channels} onUpdate={updateChannel} onCreate={createChannel} onImport={importOpenAIAccounts} onDelete={deleteChannel} onSyncModels={syncChannelModels} onCheck={checkChannel} />}
         {active === "logs" && <LogsView logs={logs} onCopy={copyAndToast} />}
         {active === "settings" && <SettingsView models={models} channels={channels} />}
@@ -2481,6 +2494,7 @@ function DrawingView({
   onCreate,
   onImport,
   onCheckAccounts,
+  onDeduplicateAccounts,
   onDeleteAccount,
   onUpdate,
   onStartOAuth,
@@ -2490,6 +2504,7 @@ function DrawingView({
   onCreate: (channel?: ChannelCreate) => Promise<void>;
   onImport: (channelId: string, file: File) => Promise<void>;
   onCheckAccounts: (channelId: string, onlyInvalid?: boolean) => Promise<void>;
+  onDeduplicateAccounts: (channelId: string) => Promise<void>;
   onDeleteAccount: (channelId: string, accountId: string) => Promise<void>;
   onUpdate: (id: string, patch: ChannelPatch) => Promise<void>;
   onStartOAuth: (channelId: string) => Promise<{ authorizeUrl: string; state: string; redirectUri: string }>;
@@ -2499,6 +2514,8 @@ function DrawingView({
   const [busy, setBusy] = useState("");
   const [accountVisibleCounts, setAccountVisibleCounts] = useState<Record<string, number>>({});
   const [accountFilters, setAccountFilters] = useState<Record<string, "all" | "attention" | "invalid" | "refreshable">>({});
+  const [accountQueries, setAccountQueries] = useState<Record<string, string>>({});
+  const [accountSorts, setAccountSorts] = useState<Record<string, "pool" | "oldest" | "recent" | "expiry">>({});
   const [oauthChannelId, setOAuthChannelId] = useState("");
   const [authSessionChannelId, setAuthSessionChannelId] = useState("");
   const [addAccountChannelId, setAddAccountChannelId] = useState("");
@@ -2521,6 +2538,40 @@ function DrawingView({
     } finally {
       setBusy("");
     }
+  }
+
+  async function deduplicateAccounts(channelId: string) {
+    setBusy(`dedupe:${channelId}`);
+    try {
+      await onDeduplicateAccounts(channelId);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function exportAccountReport(channel: Channel) {
+    const rows = arrayOf(channel.openaiAccounts).map((account) => [
+      account.email || account.name || account.accountId || account.id,
+      account.accountId || "",
+      account.status || "unchecked",
+      account.credentialMode || "access-token",
+      account.expiresAt || "",
+      account.lastCheckedAt || "",
+      account.lastUsedAt || "",
+      String(account.requestCount || 0),
+      account.lastError || ""
+    ]);
+    const quote = (value: string) => `"${value.replace(/"/g, '""')}"`;
+    const content = [["账号", "Account ID", "状态", "凭据方式", "到期时间", "最近检测", "最近调用", "调用次数", "最后错误"], ...rows]
+      .map((row) => row.map(quote).join(","))
+      .join("\r\n");
+    const blob = new Blob(["\uFEFF" + content], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${channel.name || "account-pool"}-health-report.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
   }
 
   async function toggleChannel(channel: Channel) {
@@ -2574,10 +2625,22 @@ function DrawingView({
 			const browserSession = accounts.filter((account) => account.credentialMode === "browser-session").length;
 			const accessOnly = Math.max(0, accounts.length - refreshable - browserSession);
 			const filter = accountFilters[channel.id] || "all";
-			const filteredAccounts = accounts.filter((account) => filter === "all" || (filter === "attention" && accountNeedsAttention(account)) || (filter === "invalid" && account.status === "invalid") || (filter === "refreshable" && account.credentialMode === "refreshable"));
-			const visibleAccountCount = Math.min(filteredAccounts.length, accountVisibleCounts[channel.id] || defaultVisibleAccounts);
-			const visibleAccounts = filteredAccounts.slice(0, visibleAccountCount);
-			const hiddenAccountCount = Math.max(0, filteredAccounts.length - visibleAccounts.length);
+			const accountQuery = (accountQueries[channel.id] || "").trim().toLowerCase();
+			const filteredAccounts = accounts.filter((account) => {
+				const matchesFilter = filter === "all" || (filter === "attention" && accountNeedsAttention(account)) || (filter === "invalid" && account.status === "invalid") || (filter === "refreshable" && account.credentialMode === "refreshable");
+				const searchable = `${account.email || ""} ${account.name || ""} ${account.accountId || ""} ${account.userId || ""} ${account.lastError || ""}`.toLowerCase();
+				return matchesFilter && (!accountQuery || searchable.includes(accountQuery));
+			});
+			const sort = accountSorts[channel.id] || "pool";
+			const sortedAccounts = [...filteredAccounts].sort((left, right) => {
+				if (sort === "pool") return 0;
+				const leftValue = sort === "expiry" ? left.expiresAt || "9999-12-31" : left.lastUsedAt || "";
+				const rightValue = sort === "expiry" ? right.expiresAt || "9999-12-31" : right.lastUsedAt || "";
+				return sort === "recent" ? rightValue.localeCompare(leftValue) : leftValue.localeCompare(rightValue);
+			});
+			const visibleAccountCount = Math.min(sortedAccounts.length, accountVisibleCounts[channel.id] || defaultVisibleAccounts);
+			const visibleAccounts = sortedAccounts.slice(0, visibleAccountCount);
+			const hiddenAccountCount = Math.max(0, sortedAccounts.length - visibleAccounts.length);
             const allAccountsVisible = hiddenAccountCount === 0;
             return (
               <div className="channel-card" key={channel.id}>
@@ -2600,12 +2663,23 @@ function DrawingView({
 	                  {invalid > 0 && <button className="secondary-button compact-button" onClick={() => checkAccounts(channel.id, true)} disabled={busy !== ""}>
 	                    {busy === `retry:${channel.id}` ? "复检中" : `复检无效 ${invalid}`}
 	                  </button>}
+                  {accounts.length > 1 && <button className="secondary-button compact-button" onClick={() => deduplicateAccounts(channel.id)} disabled={busy !== ""}>
+                    {busy === `dedupe:${channel.id}` ? "去重中" : "账号去重"}
+                  </button>}
+					{accounts.length > 0 && <button className="secondary-button compact-button" onClick={() => exportAccountReport(channel)} disabled={busy !== ""}>导出报告</button>}
                     <button className="secondary-button compact-button" onClick={() => toggleChannel(channel)} disabled={busy !== ""}>
                       {channel.status === "disabled" ? "启用渠道" : "停用渠道"}
                     </button>
                   </div>
                 </div>
 				<div className="account-filter-bar" role="group" aria-label="账号筛选">
+					<input value={accountQueries[channel.id] || ""} onChange={(event) => setAccountQueries((current) => ({ ...current, [channel.id]: event.target.value }))} placeholder="搜索账号或错误" aria-label="搜索账号" />
+					<select value={sort} onChange={(event) => setAccountSorts((current) => ({ ...current, [channel.id]: event.target.value as "pool" | "oldest" | "recent" | "expiry" }))} aria-label="账号排序">
+						<option value="pool">账号池顺序</option>
+						<option value="oldest">最久未用优先</option>
+						<option value="recent">最近使用优先</option>
+						<option value="expiry">最早到期优先</option>
+					</select>
 					{[["all", `全部 ${accounts.length}`], ["attention", "需关注"], ["invalid", `无效 ${invalid}`], ["refreshable", `可续期 ${refreshable}`]].map(([value, label]) => (
 						<button key={value} type="button" className={filter === value ? "selected" : ""} onClick={() => setAccountFilters((current) => ({ ...current, [channel.id]: value as "all" | "attention" | "invalid" | "refreshable" }))}>{label}</button>
 					))}
@@ -2656,10 +2730,11 @@ function DrawingView({
                         </div>
                       </div>
                     ))}
-					{filteredAccounts.length > defaultVisibleAccounts && (
+					{filteredAccounts.length === 0 && <Empty text="没有匹配的账号" />}
+					{sortedAccounts.length > defaultVisibleAccounts && (
                       <div className="account-pool-more">
                         <span className="muted-inline">
-							{allAccountsVisible ? `已显示全部 ${filteredAccounts.length} 个账号` : `已显示 ${visibleAccounts.length} 个，还有 ${hiddenAccountCount} 个`}
+							{allAccountsVisible ? `已显示全部 ${sortedAccounts.length} 个账号` : `已显示 ${visibleAccounts.length} 个，还有 ${hiddenAccountCount} 个`}
                         </span>
                         <div className="account-pool-more-actions">
                           {!allAccountsVisible && (
@@ -2668,7 +2743,7 @@ function DrawingView({
                               className="secondary-button compact-button"
                               onClick={() => setAccountVisibleCounts((current) => ({
                                 ...current,
-								[channel.id]: Math.min(filteredAccounts.length, visibleAccountCount + accountBatchSize)
+								[channel.id]: Math.min(sortedAccounts.length, visibleAccountCount + accountBatchSize)
                               }))}
                             >
                               再显示 {Math.min(accountBatchSize, hiddenAccountCount)} 个
@@ -2678,7 +2753,7 @@ function DrawingView({
                             <button
                               type="button"
                               className="secondary-button compact-button"
-								onClick={() => setAccountVisibleCounts((current) => ({ ...current, [channel.id]: filteredAccounts.length }))}
+								onClick={() => setAccountVisibleCounts((current) => ({ ...current, [channel.id]: sortedAccounts.length }))}
                             >
                               全部显示
                             </button>
@@ -2810,6 +2885,7 @@ function authSessionImportPayload(value: string) {
   } catch {
     // A standalone token is valid input and does not need to be JSON.
   }
+
   return { sessionToken: raw, source: "web-login" };
 }
 
@@ -3588,6 +3664,7 @@ function LogDetail({ log, loading, onCopy }: { log: RequestLog | null; loading: 
     ["API Key", log.apiKeyPrefix ? `${log.apiKeyPrefix}***` : "未识别"],
     ["模型", log.model || "未提供"],
     ["渠道", log.channel || "未选择"],
+    ["实际账号", log.account || "未记录"],
     ["响应耗时", `${log.latencyMs} ms`],
     ["尝试次数", attempts === null ? "未记录" : String(attempts)],
     ["是否重试", attempts === null ? "未记录" : attempts > 1 ? "是" : "否"],
