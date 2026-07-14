@@ -2704,21 +2704,38 @@ func (s *Server) importOpenAIAccounts(c *gin.Context) {
 }
 
 func importedOpenAIAccountIndex(accounts []OpenAIAccount, incoming ImportedOpenAIAccount) int {
-	accountID := strings.TrimSpace(incoming.AccountID)
-	userID := strings.TrimSpace(incoming.UserID)
-	email := strings.ToLower(strings.TrimSpace(incoming.Email))
 	for index, account := range accounts {
-		if accountID != "" && strings.EqualFold(strings.TrimSpace(account.AccountID), accountID) {
-			return index
-		}
-		if userID != "" && strings.EqualFold(strings.TrimSpace(account.UserID), userID) {
-			return index
-		}
-		if email != "" && strings.EqualFold(strings.TrimSpace(account.Email), email) {
+		if openAIAccountIdentitiesMatch(
+			account.AccountID, account.UserID, account.Email,
+			incoming.AccountID, incoming.UserID, incoming.Email,
+		) {
 			return index
 		}
 	}
 	return -1
+}
+
+func openAIAccountIdentitiesMatch(accountID, userID, email, otherAccountID, otherUserID, otherEmail string) bool {
+	matched := false
+	for _, pair := range [][2]string{
+		{accountID, otherAccountID},
+		{userID, otherUserID},
+		{email, otherEmail},
+	} {
+		left := strings.TrimSpace(pair[0])
+		right := strings.TrimSpace(pair[1])
+		if left == "" || right == "" {
+			continue
+		}
+		if !strings.EqualFold(left, right) {
+			// account_id can identify a shared workspace rather than a unique
+			// login. Never merge when another available identity field proves
+			// these are different accounts.
+			return false
+		}
+		matched = true
+	}
+	return matched
 }
 
 // startOpenAIOAuth begins a ChatGPT OAuth (PKCE) authorization for a channel. It
@@ -3118,20 +3135,23 @@ func (s *Server) deduplicateOpenAIAccounts(c *gin.Context) {
 		return
 	}
 	unique := make([]OpenAIAccount, 0, len(channel.OpenAIAccounts))
-	seen := map[string]int{}
 	removed := 0
 	for _, account := range channel.OpenAIAccounts {
-		key := openAIAccountIdentityKey(account)
-		if key == "" {
-			unique = append(unique, account)
-			continue
+		duplicateIndex := -1
+		for index, existing := range unique {
+			if openAIAccountIdentitiesMatch(
+				existing.AccountID, existing.UserID, existing.Email,
+				account.AccountID, account.UserID, account.Email,
+			) {
+				duplicateIndex = index
+				break
+			}
 		}
-		if index, exists := seen[key]; exists {
-			unique[index] = mergeOpenAIAccountDuplicates(unique[index], account)
+		if duplicateIndex >= 0 {
+			unique[duplicateIndex] = mergeOpenAIAccountDuplicates(unique[duplicateIndex], account)
 			removed++
 			continue
 		}
-		seen[key] = len(unique)
 		unique = append(unique, account)
 	}
 	if removed > 0 {
@@ -3139,19 +3159,6 @@ func (s *Server) deduplicateOpenAIAccounts(c *gin.Context) {
 		s.saveStateLocked()
 	}
 	c.JSON(http.StatusOK, gin.H{"removed": removed, "channel": publicChannel(*channel)})
-}
-
-func openAIAccountIdentityKey(account OpenAIAccount) string {
-	if value := strings.ToLower(strings.TrimSpace(account.AccountID)); value != "" {
-		return "account:" + value
-	}
-	if value := strings.ToLower(strings.TrimSpace(account.UserID)); value != "" {
-		return "user:" + value
-	}
-	if value := strings.ToLower(strings.TrimSpace(account.Email)); value != "" {
-		return "email:" + value
-	}
-	return ""
 }
 
 func mergeOpenAIAccountDuplicates(primary OpenAIAccount, replacement OpenAIAccount) OpenAIAccount {

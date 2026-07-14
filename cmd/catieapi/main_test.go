@@ -3310,6 +3310,56 @@ func TestImportedOpenAIAccountIndexMatchesStableIdentity(t *testing.T) {
 	}
 }
 
+func TestImportedOpenAIAccountIndexRejectsConflictingIdentity(t *testing.T) {
+	accounts := []OpenAIAccount{
+		{ID: "one", AccountID: "shared-workspace", UserID: "user-one", Email: "one@example.com"},
+	}
+
+	tests := []ImportedOpenAIAccount{
+		{AccountID: "shared-workspace", UserID: "user-two", Email: "two@example.com"},
+		{AccountID: "shared-workspace", Email: "two@example.com"},
+		{UserID: "user-one", Email: "two@example.com"},
+		{AccountID: "another-workspace", Email: "one@example.com"},
+	}
+	for _, incoming := range tests {
+		if index := importedOpenAIAccountIndex(accounts, incoming); index != -1 {
+			t.Fatalf("conflicting account %#v matched index %d", incoming, index)
+		}
+	}
+}
+
+func TestImportOpenAIAccountsKeepsDistinctUsersInSharedWorkspace(t *testing.T) {
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+
+	response := perform(router, http.MethodPost, "/api/channels/chn_1002/import-openai-accounts", `{
+		"accounts":[
+			{"email":"one@example.com","credentials":{"access_token":"token-one","chatgpt_account_id":"shared-workspace"}},
+			{"email":"two@example.com","credentials":{"access_token":"token-two","chatgpt_account_id":"shared-workspace"}}
+		]
+	}`, nil)
+	if response.Code != http.StatusCreated || !bytes.Contains(response.Body.Bytes(), []byte(`"created":2`)) {
+		t.Fatalf("shared workspace import status = %d body = %s", response.Code, response.Body.String())
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	channel := server.findChannel("chn_1002")
+	if channel == nil || len(channel.OpenAIAccounts) != 2 {
+		t.Fatalf("shared workspace account count = %#v", channel)
+	}
+}
+
+func TestOpenAIAccountIdentitiesMatchAllowsPartialStableIdentity(t *testing.T) {
+	if !openAIAccountIdentitiesMatch("workspace", "", "", "WORKSPACE", "user", "person@example.com") {
+		t.Fatal("matching account ID with no conflicting fields should match")
+	}
+	if !openAIAccountIdentitiesMatch("", "user", "person@example.com", "workspace", "USER", "PERSON@example.com") {
+		t.Fatal("matching user and email should match")
+	}
+}
+
 func TestMergeOpenAIAccountDuplicatesKeepsStableIDAndUsage(t *testing.T) {
 	primary := OpenAIAccount{ID: "stable", ImportedAt: "2026-07-10T00:00:00Z", LastUsedAt: "2026-07-10T01:00:00Z", RequestCount: 3}
 	replacement := OpenAIAccount{ID: "new", ImportedAt: "2026-07-11T00:00:00Z", LastUsedAt: "2026-07-10T00:30:00Z", RequestCount: 2}
