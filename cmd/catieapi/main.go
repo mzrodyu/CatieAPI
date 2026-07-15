@@ -6210,26 +6210,38 @@ func (s *Server) fetchUpstreamModelIDs(channel Channel, upstreamKey string) ([]s
 	if strings.TrimSpace(channel.BaseURL) == "" {
 		return nil, fmt.Errorf("请先填写渠道 Base URL")
 	}
-	request, err := http.NewRequest(http.MethodGet, joinURL(channel.BaseURL, "models"), nil)
+	endpoint := joinURL(channel.BaseURL, "models")
+	key := strings.TrimSpace(upstreamKey)
+	request, err := newUpstreamModelsRequest(endpoint, key, false)
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(upstreamKey) != "" {
-		key := strings.TrimSpace(upstreamKey)
-		request.Header.Set("Authorization", "Bearer "+key)
-		// Some OpenAI-compatible gateways accept API keys only through
-		// x-api-key even though their inference endpoints also support Bearer.
-		request.Header.Set("X-API-Key", key)
-	}
-	request.Header.Set("Accept", "application/json")
 	response, err := s.httpClient.Do(request)
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
 	content, err := io.ReadAll(response.Body)
+	response.Body.Close()
 	if err != nil {
 		return nil, err
+	}
+	// Some Claude-compatible gateways expose an OpenAI-shaped /models response,
+	// but authenticate that endpoint strictly with Anthropic headers. Retry only
+	// authentication/request-shape failures so ordinary upstream errors stay clear.
+	if key != "" && (response.StatusCode == http.StatusBadRequest || response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
+		request, err = newUpstreamModelsRequest(endpoint, key, true)
+		if err != nil {
+			return nil, err
+		}
+		response, err = s.httpClient.Do(request)
+		if err != nil {
+			return nil, err
+		}
+		content, err = io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil {
+			return nil, err
+		}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		message := strings.TrimSpace(string(content))
@@ -6260,6 +6272,26 @@ func (s *Server) fetchUpstreamModelIDs(channel Channel, upstreamKey string) ([]s
 		}
 	}
 	return mergeStrings(nil, ids), nil
+}
+
+func newUpstreamModelsRequest(endpoint, key string, anthropicAuth bool) (*http.Request, error) {
+	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept", "application/json")
+	if key == "" {
+		return request, nil
+	}
+	if anthropicAuth {
+		request.Header.Set("X-API-Key", key)
+		request.Header.Set("Anthropic-Version", "2023-06-01")
+		return request, nil
+	}
+	request.Header.Set("Authorization", "Bearer "+key)
+	// Keep x-api-key on the first attempt for gateways that accept either form.
+	request.Header.Set("X-API-Key", key)
+	return request, nil
 }
 
 func (s *Server) checkOpenAIAccount(account OpenAIAccount, channel Channel, allowProbe bool) OpenAIAccountCheckResult {

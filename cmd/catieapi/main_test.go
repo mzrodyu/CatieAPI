@@ -1428,6 +1428,56 @@ func TestSyncChannelModelsPullsFromUpstream(t *testing.T) {
 	}
 }
 
+func TestSyncChannelModelsRetriesWithAnthropicAuth(t *testing.T) {
+	requests := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		if requests == 1 {
+			if r.Header.Get("Authorization") != "Bearer anthropic-secret" {
+				t.Fatalf("first request authorization = %q", r.Header.Get("Authorization"))
+			}
+			http.Error(w, `{"type":"error","error":{"type":"authentication_error"}}`, http.StatusUnauthorized)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("Anthropic retry authorization = %q", got)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "anthropic-secret" {
+			t.Fatalf("Anthropic retry x-api-key = %q", got)
+		}
+		if got := r.Header.Get("Anthropic-Version"); got != "2023-06-01" {
+			t.Fatalf("Anthropic retry version = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"claude-sonnet-4-5"}]}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
+	_, router := testServerRouter(t)
+	created := perform(router, http.MethodPost, "/api/channels", `{"name":"Anthropic-compatible","provider":"compatible","baseUrl":"`+upstream.URL+`/v1","upstreamApiKey":"anthropic-secret"}`, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create channel status = %d body = %s", created.Code, created.Body.String())
+	}
+	var payload struct {
+		Channel PublicChannel `json:"channel"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode channel: %v", err)
+	}
+
+	synced := perform(router, http.MethodPost, "/api/channels/"+payload.Channel.ID+"/sync-models", `{}`, nil)
+	if synced.Code != http.StatusOK || !bytes.Contains(synced.Body.Bytes(), []byte(`claude-sonnet-4-5`)) {
+		t.Fatalf("sync models status = %d body = %s", synced.Code, synced.Body.String())
+	}
+	if requests != 2 {
+		t.Fatalf("upstream request count = %d", requests)
+	}
+}
+
 func TestDeleteChannelPrunesImportedModels(t *testing.T) {
 	withEnv(t, map[string]string{"PERSISTENCE": "memory"})
 	server, router := testServerRouter(t)
