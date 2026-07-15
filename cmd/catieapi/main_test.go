@@ -1373,8 +1373,10 @@ func TestProviderLabelSupportsCPA(t *testing.T) {
 
 func TestSyncChannelModelsPullsFromUpstream(t *testing.T) {
 	var upstreamAuth string
+	var upstreamAPIKey string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamAuth = r.Header.Get("Authorization")
+		upstreamAPIKey = r.Header.Get("X-API-Key")
 		if r.URL.Path != "/v1/models" {
 			t.Fatalf("upstream path = %s", r.URL.Path)
 		}
@@ -1403,6 +1405,9 @@ func TestSyncChannelModelsPullsFromUpstream(t *testing.T) {
 	}
 	if upstreamAuth != "Bearer sync-secret" {
 		t.Fatalf("upstream auth = %s", upstreamAuth)
+	}
+	if upstreamAPIKey != "sync-secret" {
+		t.Fatalf("upstream x-api-key = %s", upstreamAPIKey)
 	}
 	if !bytes.Contains(synced.Body.Bytes(), []byte(`provider-model-a`)) || !bytes.Contains(synced.Body.Bytes(), []byte(`provider-model-b`)) {
 		t.Fatalf("sync models response missing upstream ids: %s", synced.Body.String())

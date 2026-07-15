@@ -6215,8 +6215,13 @@ func (s *Server) fetchUpstreamModelIDs(channel Channel, upstreamKey string) ([]s
 		return nil, err
 	}
 	if strings.TrimSpace(upstreamKey) != "" {
-		request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(upstreamKey))
+		key := strings.TrimSpace(upstreamKey)
+		request.Header.Set("Authorization", "Bearer "+key)
+		// Some OpenAI-compatible gateways accept API keys only through
+		// x-api-key even though their inference endpoints also support Bearer.
+		request.Header.Set("X-API-Key", key)
 	}
+	request.Header.Set("Accept", "application/json")
 	response, err := s.httpClient.Do(request)
 	if err != nil {
 		return nil, err
