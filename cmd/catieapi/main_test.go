@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -1672,6 +1673,84 @@ func TestOpenAICompatibleProviderAcceptsCompleteChatEndpointBaseURL(t *testing.T
 	}
 	if !bytes.Contains(chat.Body.Bytes(), []byte(`complete endpoint ok`)) {
 		t.Fatalf("complete endpoint response was not returned: %s", chat.Body.String())
+	}
+}
+
+func TestAnthropicCompatibleChannelConvertsOpenAIChat(t *testing.T) {
+	if !isAnthropicCompatibleChannel(Channel{Provider: "compatible", BaseURL: "https://platformproxy.gamutagents.com/v1"}) {
+		t.Fatal("Gamut compatible channel was not detected as Anthropic")
+	}
+	if got := anthropicMessagesEndpoint("https://platformproxy.gamutagents.com/v1/chat/completions"); got != "https://platformproxy.gamutagents.com/v1/messages" {
+		t.Fatalf("Anthropic endpoint = %s", got)
+	}
+	var upstreamPayload map[string]interface{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("Anthropic upstream path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("Anthropic authorization = %q", got)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "upstream-secret" {
+			t.Fatalf("Anthropic x-api-key = %q", got)
+		}
+		if got := r.Header.Get("Anthropic-Version"); got != "2023-06-01" {
+			t.Fatalf("Anthropic version = %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamPayload); err != nil {
+			t.Fatalf("decode Anthropic request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_test","type":"message","model":"claude-sonnet-4-5","content":[{"type":"text","text":"from anthropic"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":4}}`))
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{"PERSISTENCE": "memory", "PROVIDER_MODE": "compatible", "UPSTREAM_API_KEY": "upstream-secret"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.findChannel("chn_1002").Provider = "anthropic"
+	server.findChannel("chn_1002").BaseURL = upstream.URL + "/v1"
+	server.mu.Unlock()
+
+	body := `{"model":"ds","temperature":0.4,"top_p":0.8,"messages":[{"role":"system","content":"Be brief"},{"role":"user","content":"hello"}]}`
+	response := perform(router, http.MethodPost, "/v1/chat/completions", body, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`from anthropic`)) {
+		t.Fatalf("Anthropic chat status = %d body = %s", response.Code, response.Body.String())
+	}
+	if upstreamPayload["system"] != "Be brief" || upstreamPayload["temperature"] != 0.4 {
+		t.Fatalf("Anthropic payload = %#v", upstreamPayload)
+	}
+	if _, exists := upstreamPayload["top_p"]; exists {
+		t.Fatalf("Anthropic payload sent temperature and top_p: %#v", upstreamPayload)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"prompt_tokens":3`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"completion_tokens":4`)) {
+		t.Fatalf("Anthropic usage was not converted: %s", response.Body.String())
+	}
+}
+
+func TestAnthropicCompatibleChannelConvertsStream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\"}}\n\n")
+		_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n")
+		_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+		_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer upstream.Close()
+
+	withEnv(t, map[string]string{"PERSISTENCE": "memory", "PROVIDER_MODE": "compatible", "UPSTREAM_API_KEY": "upstream-secret"})
+	server, router := testServerRouter(t)
+	seedGatewayFixtures(server)
+	server.mu.Lock()
+	server.findChannel("chn_1002").Provider = "anthropic"
+	server.findChannel("chn_1002").BaseURL = upstream.URL + "/v1"
+	server.findChannel("chn_1002").StreamMode = "real"
+	server.mu.Unlock()
+
+	response := perform(router, http.MethodPost, "/v1/chat/completions", `{"model":"ds","stream":true,"messages":[{"role":"user","content":"hello"}]}`, map[string]string{"Authorization": "Bearer cat_fixture_live_secret"})
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"content":"hello"`)) || !bytes.Contains(response.Body.Bytes(), []byte("data: [DONE]")) {
+		t.Fatalf("Anthropic stream status = %d body = %s", response.Code, response.Body.String())
 	}
 }
 

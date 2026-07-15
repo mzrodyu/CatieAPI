@@ -4719,7 +4719,7 @@ func (s *Server) callOpenAICompatible(call GatewayCall) (gin.H, *ProviderError) 
 		return s.callChatGPTCodex(call)
 	}
 
-	endpoint := openAICompatibleChatEndpoint(call.Channel.BaseURL)
+	endpoint := compatibleChatEndpoint(call.Channel)
 	request, providerErr := s.newOpenAICompatibleRequest(call, false, endpoint)
 	if providerErr != nil {
 		return nil, providerErr
@@ -4742,6 +4742,9 @@ func (s *Server) callOpenAICompatible(call GatewayCall) (gin.H, *ProviderError) 
 	var body gin.H
 	if err := json.Unmarshal(content, &body); err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_invalid_json", Message: "Upstream returned invalid JSON", Type: "api_error"}
+	}
+	if isAnthropicCompatibleChannel(call.Channel) {
+		body = anthropicResponseToOpenAI(body, call.Model.ID, call.RequestID)
 	}
 	if _, ok := body["model"]; !ok {
 		body["model"] = call.Model.ID
@@ -7167,7 +7170,7 @@ func (s *Server) streamOpenAICompatible(c *gin.Context, call GatewayCall) *Provi
 		return s.streamChatGPTCodex(c, call)
 	}
 
-	endpoint := openAICompatibleChatEndpoint(call.Channel.BaseURL)
+	endpoint := compatibleChatEndpoint(call.Channel)
 	request, providerErr := s.newOpenAICompatibleRequest(call, true, endpoint)
 	if providerErr != nil {
 		return providerErr
@@ -7187,7 +7190,11 @@ func (s *Server) streamOpenAICompatible(c *gin.Context, call GatewayCall) *Provi
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
-	_, _ = io.Copy(c.Writer, response.Body)
+	if isAnthropicCompatibleChannel(call.Channel) {
+		writeAnthropicStreamAsOpenAI(c.Writer, response.Body, call.Model.ID, call.RequestID)
+	} else {
+		_, _ = io.Copy(c.Writer, response.Body)
+	}
 	_ = response.Body.Close()
 	c.Writer.Flush()
 	return nil
@@ -7244,7 +7251,14 @@ func (s *Server) newOpenAICompatibleRequest(call GatewayCall, stream bool, endpo
 	}
 	payload["model"] = call.Model.ID
 	payload["stream"] = stream
-	payload["messages"] = call.Body.Messages
+	if isAnthropicCompatibleChannel(call.Channel) {
+		if _, ok := payload["messages"]; !ok {
+			payload["messages"] = call.Body.Messages
+		}
+		payload = openAIToAnthropicPayload(payload)
+	} else {
+		payload["messages"] = call.Body.Messages
+	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "Failed to encode upstream request", Type: "invalid_request_error"}
@@ -7254,7 +7268,12 @@ func (s *Server) newOpenAICompatibleRequest(call GatewayCall, stream bool, endpo
 	if err != nil {
 		return nil, &ProviderError{Status: http.StatusBadGateway, Code: "upstream_request_error", Message: err.Error(), Type: "api_error"}
 	}
-	request.Header.Set("Authorization", "Bearer "+upstreamKey)
+	if isAnthropicCompatibleChannel(call.Channel) {
+		request.Header.Set("X-API-Key", upstreamKey)
+		request.Header.Set("Anthropic-Version", "2023-06-01")
+	} else {
+		request.Header.Set("Authorization", "Bearer "+upstreamKey)
+	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Request-ID", call.RequestID)
 	return request, nil
@@ -10202,6 +10221,263 @@ func openAICompatibleChatEndpoint(base string) string {
 		}
 	}
 	return joinURL(apiBase, "chat/completions")
+}
+
+func compatibleChatEndpoint(channel Channel) string {
+	if isAnthropicCompatibleChannel(channel) {
+		return anthropicMessagesEndpoint(channel.BaseURL)
+	}
+	return openAICompatibleChatEndpoint(channel.BaseURL)
+}
+
+func isAnthropicCompatibleChannel(channel Channel) bool {
+	if strings.EqualFold(strings.TrimSpace(channel.Provider), "anthropic") {
+		return true
+	}
+	parsed, err := url.Parse(strings.TrimSpace(channel.BaseURL))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "platformproxy.gamutagents.com" || strings.HasSuffix(host, ".gamutagents.com")
+}
+
+func anthropicMessagesEndpoint(base string) string {
+	apiBase := strings.TrimRight(strings.TrimSpace(base), "/")
+	for _, suffix := range []string{"/chat/completions", "/messages", "/completions", "/models"} {
+		if strings.HasSuffix(strings.ToLower(apiBase), suffix) {
+			apiBase = strings.TrimRight(apiBase[:len(apiBase)-len(suffix)], "/")
+			break
+		}
+	}
+	parsed, err := url.Parse(apiBase)
+	if err == nil && !pathLooksVersioned(parsed.Path) {
+		apiBase = joinURL(apiBase, "v1")
+	}
+	return joinURL(apiBase, "messages")
+}
+
+func openAIToAnthropicPayload(payload gin.H) gin.H {
+	converted := gin.H{
+		"model":      payload["model"],
+		"messages":   []gin.H{},
+		"max_tokens": 4096,
+		"stream":     payload["stream"],
+	}
+	if value, ok := payload["max_tokens"]; ok {
+		converted["max_tokens"] = value
+	} else if value, ok := payload["max_completion_tokens"]; ok {
+		converted["max_tokens"] = value
+	}
+
+	systemParts := []string{}
+	messages := []gin.H{}
+	if rawMessages, ok := payload["messages"].([]ChatMessage); ok {
+		for _, message := range rawMessages {
+			if strings.EqualFold(message.Role, "system") {
+				if text, ok := message.Content.(string); ok && strings.TrimSpace(text) != "" {
+					systemParts = append(systemParts, text)
+				}
+				continue
+			}
+			role := "user"
+			if strings.EqualFold(message.Role, "assistant") {
+				role = "assistant"
+			}
+			messages = append(messages, gin.H{"role": role, "content": message.Content})
+		}
+	} else if rawMessages, ok := payload["messages"].([]interface{}); ok {
+		for _, raw := range rawMessages {
+			message, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			role := stringFromMap(message, "role")
+			content := message["content"]
+			if strings.EqualFold(role, "system") {
+				if text, ok := content.(string); ok && strings.TrimSpace(text) != "" {
+					systemParts = append(systemParts, text)
+				}
+				continue
+			}
+			if strings.EqualFold(role, "tool") {
+				content = []gin.H{{"type": "tool_result", "tool_use_id": stringFromMap(message, "tool_call_id"), "content": content}}
+				role = "user"
+			} else if strings.EqualFold(role, "assistant") {
+				if rawCalls, ok := message["tool_calls"].([]interface{}); ok && len(rawCalls) > 0 {
+					blocks := []gin.H{}
+					if text, ok := content.(string); ok && text != "" {
+						blocks = append(blocks, gin.H{"type": "text", "text": text})
+					}
+					for _, rawCall := range rawCalls {
+						toolCall, _ := rawCall.(map[string]interface{})
+						function, _ := toolCall["function"].(map[string]interface{})
+						input := interface{}(gin.H{})
+						if arguments := stringFromMap(function, "arguments"); arguments != "" {
+							if json.Unmarshal([]byte(arguments), &input) != nil {
+								input = gin.H{"value": arguments}
+							}
+						}
+						blocks = append(blocks, gin.H{"type": "tool_use", "id": stringFromMap(toolCall, "id"), "name": stringFromMap(function, "name"), "input": input})
+					}
+					content = blocks
+				}
+			}
+			if role != "assistant" {
+				role = "user"
+			}
+			messages = append(messages, gin.H{"role": role, "content": content})
+		}
+	}
+	converted["messages"] = messages
+	if len(systemParts) > 0 {
+		converted["system"] = strings.Join(systemParts, "\n\n")
+	}
+	// Several Claude models reject requests containing both sampling controls.
+	if value, ok := payload["temperature"]; ok && value != nil {
+		converted["temperature"] = value
+	} else if value, ok := payload["top_p"]; ok && value != nil {
+		converted["top_p"] = value
+	}
+	if value, ok := payload["stop"]; ok && value != nil {
+		if text, ok := value.(string); ok {
+			converted["stop_sequences"] = []string{text}
+		} else {
+			converted["stop_sequences"] = value
+		}
+	}
+	if rawTools, ok := payload["tools"].([]interface{}); ok {
+		tools := []gin.H{}
+		for _, raw := range rawTools {
+			tool, ok := raw.(map[string]interface{})
+			if !ok || stringFromMap(tool, "type") != "function" {
+				continue
+			}
+			function, _ := tool["function"].(map[string]interface{})
+			inputSchema := function["parameters"]
+			if inputSchema == nil {
+				inputSchema = gin.H{"type": "object", "properties": gin.H{}}
+			}
+			tools = append(tools, gin.H{
+				"name":         stringFromMap(function, "name"),
+				"description":  stringFromMap(function, "description"),
+				"input_schema": inputSchema,
+			})
+		}
+		if len(tools) > 0 {
+			converted["tools"] = tools
+		}
+	}
+	return converted
+}
+
+func anthropicResponseToOpenAI(body gin.H, model, requestID string) gin.H {
+	contentText := strings.Builder{}
+	toolCalls := []gin.H{}
+	if blocks, ok := body["content"].([]interface{}); ok {
+		for _, raw := range blocks {
+			block, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			switch stringFromMap(block, "type") {
+			case "text":
+				contentText.WriteString(stringFromMap(block, "text"))
+			case "tool_use":
+				arguments, _ := json.Marshal(block["input"])
+				toolCalls = append(toolCalls, gin.H{"id": stringFromMap(block, "id"), "type": "function", "function": gin.H{"name": stringFromMap(block, "name"), "arguments": string(arguments)}})
+			}
+		}
+	}
+	message := gin.H{"role": "assistant", "content": contentText.String()}
+	if len(toolCalls) > 0 {
+		message["tool_calls"] = toolCalls
+	}
+	usage := gin.H{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+	if rawUsage, ok := body["usage"].(map[string]interface{}); ok {
+		input, _ := asInt(rawUsage["input_tokens"])
+		output, _ := asInt(rawUsage["output_tokens"])
+		usage = gin.H{"prompt_tokens": input, "completion_tokens": output, "total_tokens": input + output}
+	}
+	return gin.H{
+		"id":      firstNonEmptyString(stringFromMap(body, "id"), requestID),
+		"object":  "chat.completion",
+		"created": unixNow(),
+		"model":   firstNonEmptyString(stringFromMap(body, "model"), model),
+		"choices": []gin.H{{"index": 0, "message": message, "finish_reason": anthropicFinishReason(stringFromMap(body, "stop_reason"))}},
+		"usage":   usage,
+	}
+}
+
+func anthropicFinishReason(reason string) string {
+	switch reason {
+	case "max_tokens":
+		return "length"
+	case "tool_use":
+		return "tool_calls"
+	default:
+		return "stop"
+	}
+}
+
+func writeAnthropicStreamAsOpenAI(writer io.Writer, reader io.Reader, model, requestID string) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
+	toolIndexes := map[int]int{}
+	nextToolIndex := 0
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var event map[string]interface{}
+		if json.Unmarshal([]byte(data), &event) != nil {
+			continue
+		}
+		delta := gin.H{}
+		finishReason := interface{}(nil)
+		eventType := stringFromMap(event, "type")
+		switch eventType {
+		case "message_start":
+			delta["role"] = "assistant"
+		case "content_block_start":
+			index, _ := asInt(event["index"])
+			block, _ := event["content_block"].(map[string]interface{})
+			if stringFromMap(block, "type") == "tool_use" {
+				toolIndexes[index] = nextToolIndex
+				delta["tool_calls"] = []gin.H{{"index": nextToolIndex, "id": stringFromMap(block, "id"), "type": "function", "function": gin.H{"name": stringFromMap(block, "name"), "arguments": ""}}}
+				nextToolIndex++
+			}
+		case "content_block_delta":
+			index, _ := asInt(event["index"])
+			part, _ := event["delta"].(map[string]interface{})
+			switch stringFromMap(part, "type") {
+			case "text_delta":
+				delta["content"] = stringFromMap(part, "text")
+			case "input_json_delta":
+				toolIndex := toolIndexes[index]
+				delta["tool_calls"] = []gin.H{{"index": toolIndex, "function": gin.H{"arguments": stringFromMap(part, "partial_json")}}}
+			}
+		case "message_delta":
+			part, _ := event["delta"].(map[string]interface{})
+			finishReason = anthropicFinishReason(stringFromMap(part, "stop_reason"))
+		case "message_stop":
+			_, _ = io.WriteString(writer, "data: [DONE]\n\n")
+			continue
+		default:
+			continue
+		}
+		if len(delta) == 0 && finishReason == nil {
+			continue
+		}
+		chunk := gin.H{"id": requestID, "object": "chat.completion.chunk", "created": unixNow(), "model": model, "choices": []gin.H{{"index": 0, "delta": delta, "finish_reason": finishReason}}}
+		encoded, _ := json.Marshal(chunk)
+		_, _ = fmt.Fprintf(writer, "data: %s\n\n", encoded)
+	}
 }
 
 func openAICompatibleEmbeddingsEndpoint(base string) string {
