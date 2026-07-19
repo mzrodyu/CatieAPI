@@ -922,6 +922,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	router.POST("/v1/chat/completions", s.chatCompletions)
 	router.POST("/v1/completions", s.completions)
 	router.POST("/v1/responses", s.responses)
+	router.POST("/v1/messages", s.anthropicMessages)
 	router.POST("/v1/embeddings", s.embeddings)
 	router.POST("/v1/audio/speech", s.audioSpeech)
 	router.POST("/v1/moderations", s.moderations)
@@ -932,6 +933,7 @@ func (s *Server) registerRoutes(router *gin.Engine) {
 	router.POST("/chat/completions", s.chatCompletions)
 	router.POST("/completions", s.completions)
 	router.POST("/responses", s.responses)
+	router.POST("/messages", s.anthropicMessages)
 	router.POST("/embeddings", s.embeddings)
 	router.POST("/audio/speech", s.audioSpeech)
 	router.POST("/moderations", s.moderations)
@@ -975,7 +977,7 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 			c.Header("Access-Control-Allow-Credentials", "true")
 			c.Header("Vary", "Origin")
 		}
-		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, X-API-Key, X-Request-ID")
+		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, X-API-Key, X-Request-ID, anthropic-version, anthropic-beta")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
@@ -10115,6 +10117,8 @@ var openAIRequestEndpointPrefixes = []string{
 	"/responses",
 	"/v1/embeddings",
 	"/embeddings",
+	"/v1/messages",
+	"/messages",
 	"/v1/models/",
 	"/v1/models",
 	"/models/",
@@ -10126,6 +10130,7 @@ var openAIRequestPathMap = map[string]string{
 	"/completions":        "/v1/completions",
 	"/responses":          "/v1/responses",
 	"/embeddings":         "/v1/embeddings",
+	"/messages":           "/v1/messages",
 	"/images/generations": "/v1/images/generations",
 	"/images/edits":       "/v1/images/edits",
 	"/models":             "/v1/models",
