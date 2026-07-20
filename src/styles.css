@@ -76,17 +76,18 @@ button {
   --bg: #f2f2f7;
   --surface: rgba(255, 255, 255, 0.78);
   --surface-solid: #ffffff;
-  --group: #f9f9fb;
+  --group: #f4f5f7;
   --text: #1d1d1f;
   --muted: #6e6e73;
-  --hairline: rgba(60, 60, 67, 0.16);
-  --hairline-strong: rgba(60, 60, 67, 0.24);
+  --hairline: rgba(60, 60, 67, 0.12);
+  --hairline-strong: rgba(60, 60, 67, 0.2);
   --blue: #007aff;
   --green: #34c759;
   --red: #ff3b30;
   --orange: #ff9500;
   --teal: #30b0c7;
-  --shadow: 0 18px 45px rgba(0, 0, 0, 0.08);
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.04), 0 12px 32px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.05), 0 20px 48px rgba(0, 0, 0, 0.1);
   --row-height: 58px;
   display: grid;
   grid-template-columns: 264px 1fr;
@@ -96,15 +97,16 @@ button {
 }
 
 .app-shell[data-theme="dark"] {
-  --bg: #000000;
-  --surface: rgba(28, 28, 30, 0.66);
-  --surface-solid: rgba(28, 28, 30, 0.86);
-  --group: rgba(118, 118, 128, 0.12);
+  --bg: #0a0a0c;
+  --surface: rgba(22, 22, 26, 0.8);
+  --surface-solid: #161618;
+  --group: rgba(255, 255, 255, 0.04);
   --text: #f5f5f7;
-  --muted: #98989f;
-  --hairline: rgba(255, 255, 255, 0.07);
-  --hairline-strong: rgba(255, 255, 255, 0.12);
-  --shadow: 0 22px 54px rgba(0, 0, 0, 0.38);
+  --muted: #8e8e93;
+  --hairline: rgba(255, 255, 255, 0.06);
+  --hairline-strong: rgba(255, 255, 255, 0.1);
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 12px 32px rgba(0, 0, 0, 0.25);
+  --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.3), 0 24px 56px rgba(0, 0, 0, 0.4);
   background: var(--bg);
   color-scheme: dark;
 }
@@ -118,15 +120,15 @@ button {
   top: 0;
   height: 100vh;
   padding: 16px 14px;
-  background: var(--surface);
+  background: var(--surface-solid);
   border-right: 1px solid var(--hairline);
-  backdrop-filter: blur(28px) saturate(180%);
+  box-shadow: 2px 0 12px rgba(0, 0, 0, 0.03);
 }
 
 .app-shell[data-theme="dark"] .sidebar {
-  background: rgba(12, 12, 14, 0.78);
-  border-right-color: rgba(255, 255, 255, 0.06);
-  box-shadow: none;
+  background: #111113;
+  border-right-color: rgba(255, 255, 255, 0.05);
+  box-shadow: 2px 0 16px rgba(0, 0, 0, 0.25);
 }
 
 .ios-window-dots {
@@ -222,24 +224,25 @@ nav {
   text-align: left;
 }
 
-.nav-item:hover,
-.nav-item.active {
+.nav-item:hover {
   color: var(--text);
   background: var(--group);
 }
 
 .nav-item.active {
-  box-shadow: inset 0 0 0 1px var(--hairline);
+  color: var(--text);
+  background: var(--surface-solid);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06), inset 0 0 0 1px var(--hairline);
 }
 
 .app-shell[data-theme="dark"] .nav-item:hover {
-  background: rgba(118, 118, 128, 0.1);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .app-shell[data-theme="dark"] .nav-item.active {
   color: #ffffff;
-  background: rgba(118, 118, 128, 0.18);
-  box-shadow: none;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.2), inset 0 0 0 1px rgba(255, 255, 255, 0.06);
 }
 
 .sidebar-footer {
@@ -284,10 +287,7 @@ nav {
 .content {
   width: calc(100vw - 264px);
   padding: 28px 30px 44px;
-}
-
-.app-shell[data-theme="dark"] .content {
-  background: #000000;
+  background: var(--bg);
 }
 
 .topbar {
@@ -365,17 +365,19 @@ h3 {
 .primary-button {
   padding: 0 18px;
   color: #fff;
-  background: linear-gradient(135deg, #1683ff, #0071e3);
+  background: var(--blue);
   font-weight: 700;
+  box-shadow: 0 2px 6px rgba(0, 122, 255, 0.25);
   box-shadow: 0 5px 14px color-mix(in srgb, var(--blue) 24%, transparent);
 }
 
 .secondary-button {
   padding: 0 16px;
   color: var(--text);
-  background: var(--group);
-  border: 1px solid var(--hairline);
+  background: var(--surface-solid);
+  border: 1px solid var(--hairline-strong);
   font-weight: 650;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
 .danger-button {
@@ -411,8 +413,9 @@ h3 {
 .app-shell[data-theme="dark"] .icon-button,
 .app-shell[data-theme="dark"] .theme-toggle,
 .app-shell[data-theme="dark"] .compact-button {
-  background: rgba(118, 118, 128, 0.14);
-  border-color: transparent;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
 }
 
 .primary-button:disabled,
@@ -602,16 +605,15 @@ h3 {
 
 .metric,
 .panel {
-  background: var(--surface);
+  background: var(--surface-solid);
   border: 1px solid var(--hairline);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(22px) saturate(180%);
+  box-shadow: var(--shadow);
 }
 
 .app-shell[data-theme="dark"] .quick-action {
-  background: rgba(28, 28, 30, 0.72);
-  border-color: transparent;
-  backdrop-filter: blur(24px) saturate(180%);
+  background: var(--surface-solid);
+  border-color: var(--hairline);
+  box-shadow: var(--shadow);
 }
 
 .app-shell[data-theme="dark"] .metric,
@@ -619,10 +621,9 @@ h3 {
 .app-shell[data-theme="dark"] .hero-strip,
 .app-shell[data-theme="dark"] .flow-panel,
 .app-shell[data-theme="dark"] .model-hero {
-  background: rgba(28, 28, 30, 0.72);
-  border-color: rgba(255, 255, 255, 0.06);
-  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.34);
-  backdrop-filter: blur(26px) saturate(180%);
+  background: var(--surface-solid);
+  border-color: var(--hairline);
+  box-shadow: var(--shadow);
 }
 
 .metric {
@@ -3455,14 +3456,50 @@ button.table-row:hover {
   --green: #34c759;
   --orange: #ff9500;
   --shadow: 0 28px 80px rgba(16, 24, 40, 0.16);
+  --glow: rgba(0, 122, 255, 0.15);
+  position: relative;
   min-height: 100vh;
   padding: 22px;
   color: var(--text);
   background: var(--bg);
+  overflow: hidden;
+}
+
+/* Ambient glow orbs for depth */
+.public-home::before,
+.public-home::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(120px);
+  opacity: 0.5;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.public-home::before {
+  top: -10%;
+  right: 5%;
+  width: 600px;
+  height: 600px;
+  background: var(--glow);
+}
+
+.public-home::after {
+  bottom: -15%;
+  left: -5%;
+  width: 500px;
+  height: 500px;
+  background: rgba(139, 92, 246, 0.12);
+}
+
+.public-home > * {
+  position: relative;
+  z-index: 1;
 }
 
 .public-home[data-theme="dark"] {
-  --bg: #000000;
+  --bg: #050508;
   --surface: rgba(12, 17, 24, 0.84);
   --surface-solid: #0d1117;
   --group: #0b1017;
@@ -3470,8 +3507,18 @@ button.table-row:hover {
   --muted: #8f969f;
   --hairline: rgba(255, 255, 255, 0.08);
   --hairline-strong: rgba(255, 255, 255, 0.16);
-  --shadow: 0 38px 90px rgba(0, 0, 0, 0.34);
+  --shadow: 0 38px 90px rgba(0, 0, 0, 0.5);
+  --glow: rgba(0, 122, 255, 0.25);
   background: var(--bg);
+}
+
+.public-home[data-theme="dark"]::before {
+  opacity: 0.35;
+}
+
+.public-home[data-theme="dark"]::after {
+  background: rgba(139, 92, 246, 0.18);
+  opacity: 0.4;
 }
 
 .home-topbar {
@@ -3550,26 +3597,46 @@ button.table-row:hover {
 
 .public-home .home-cta .primary-button {
   gap: 8px;
-  min-height: 52px;
-  padding: 0 24px;
-  color: #111318;
-  background: #ffffff;
-  border-radius: 18px;
-  box-shadow: none;
-}
-
-.public-home[data-theme="light"] .home-cta .primary-button {
+  min-height: 54px;
+  padding: 0 28px;
   color: #fff;
   background: var(--blue);
+  border-radius: 16px;
+  box-shadow: 0 4px 14px rgba(0, 122, 255, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.public-home .home-cta .primary-button:hover {
+  box-shadow: 0 6px 20px rgba(0, 122, 255, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.public-home[data-theme="dark"] .home-cta .primary-button {
+  color: #111318;
+  background: #ffffff;
+  box-shadow: 0 4px 16px rgba(255, 255, 255, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+.public-home[data-theme="dark"] .home-cta .primary-button:hover {
+  box-shadow: 0 6px 24px rgba(255, 255, 255, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
 .public-home .home-cta .secondary-button {
-  min-height: 52px;
-  padding: 0 22px;
+  min-height: 54px;
+  padding: 0 24px;
   color: var(--text);
-  background: color-mix(in srgb, var(--surface) 68%, transparent);
-  border-color: var(--hairline-strong);
-  border-radius: 18px;
+  background: var(--surface-solid);
+  border: 1px solid var(--hairline-strong);
+  border-radius: 16px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.public-home[data-theme="dark"] .home-cta .secondary-button {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
 }
 
 .integration-row {
@@ -3591,20 +3658,49 @@ button.table-row:hover {
   min-height: 40px;
   padding: 11px 18px;
   color: var(--text);
-  background: color-mix(in srgb, var(--surface) 74%, transparent);
+  background: var(--surface-solid);
   border: 1px solid var(--hairline);
-  border-radius: 999px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  border-radius: 12px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  transition: transform 180ms ease, box-shadow 180ms ease;
+}
+
+.integration-row > div span:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+.public-home[data-theme="dark"] .integration-row > div span {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.public-home[data-theme="dark"] .integration-row > div span:hover {
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 .gateway-terminal {
+  position: relative;
   overflow: hidden;
   min-height: 500px;
   color: #d7dde7;
-  background: #0c1118;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 26px;
-  box-shadow: var(--shadow);
+  background: #0a0e14;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 24px;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.05),
+    0 25px 60px -12px rgba(0, 0, 0, 0.4),
+    0 0 40px rgba(0, 122, 255, 0.08);
+}
+
+.gateway-terminal::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, transparent 30%);
+  pointer-events: none;
 }
 
 .terminal-titlebar {
