@@ -623,7 +623,7 @@ function ProviderIcon({ provider }: { provider: string }) {
       <span className="provider-icon provider-icon-openai" aria-hidden="true">
         <svg viewBox="0 0 32 32" role="img">
           <rect x="1" y="1" width="30" height="30" rx="8" />
-          <g transform="translate(6 6) scale(0.0392)" fill="currentColor" stroke="none">
+          <g transform="translate(7 7.5) scale(0.065)" fill="currentColor" stroke="none">
             <path d="M267.06 111.34a71.78 71.78 0 0 0-6.17-58.91c-14.5-25.15-43.55-38.09-71.9-32.03A71.78 71.78 0 0 0 135.1.5C106 .43 80.21 19.16 71.29 46.85a71.79 71.79 0 0 0-47.98 34.8c-14.6 25.1-11.28 56.75 8.22 78.3a71.78 71.78 0 0 0 6.16 58.9c14.5 25.16 43.56 38.1 71.91 32.04a71.76 71.76 0 0 0 53.89 24.02c29.12.02 54.92-18.72 63.84-46.44a71.79 71.79 0 0 0 47.98-34.8c14.58-25.1 11.25-56.72-8.24-78.27zm-107.9 150.77a53.15 53.15 0 0 1-34.15-12.35c.43-.24 1.2-.66 1.7-.96l56.68-32.73a9.22 9.22 0 0 0 4.66-8.06v-79.9l23.95 13.83a.85.85 0 0 1 .47.66v66.16a53.42 53.42 0 0 1-53.3 53.35zM44.6 213.16a53.13 53.13 0 0 1-6.36-35.75c.42.25 1.15.7 1.68 1l56.68 32.73a9.24 9.24 0 0 0 9.31 0l69.2-39.95v27.66a.87.87 0 0 1-.34.74l-57.29 33.07a53.42 53.42 0 0 1-72.88-19.5zM29.7 90.05a53.1 53.1 0 0 1 27.76-23.36c0 .49-.03 1.36-.03 1.96v65.46a9.22 9.22 0 0 0 4.65 8.05l69.2 39.95-23.95 13.83a.86.86 0 0 1-.81.07L49.2 162.9A53.42 53.42 0 0 1 29.7 90.05zm196.8 45.8L157.3 95.9l23.95-13.82a.86.86 0 0 1 .81-.07l57.3 33.08a53.37 53.37 0 0 1-8.24 96.29v-65.46a9.2 9.2 0 0 0-4.62-8.06zm23.84-35.89c-.42-.26-1.15-.7-1.68-1.01l-56.68-32.73a9.25 9.25 0 0 0-9.31 0l-69.2 39.95V78.5a.87.87 0 0 1 .35-.74l57.28-33.05a53.35 53.35 0 0 1 79.24 55.25zM100.11 149.24l-23.96-13.83a.85.85 0 0 1-.46-.66V68.6a53.37 53.37 0 0 1 87.52-40.95c-.42.24-1.19.66-1.7.96l-56.68 32.73a9.22 9.22 0 0 0-4.66 8.06l-.04 79.85zm13.01-28.05L144 103.3l30.88 17.83v35.68L144 174.63l-30.88-17.82v-35.62z" />
           </g>
         </svg>
@@ -3735,6 +3735,7 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
   const activeChannels = channels.filter((channel) => channel.status !== "disabled").length;
   const settingsTabs = [
     { value: "system", label: "系统", description: "运行概况" },
+    { value: "cli", label: "CLI 接入", description: "一键配置" },
     { value: "auth", label: "注册", description: "开放方式" },
     { value: "admin", label: "管理员", description: "账号绑定" },
     { value: "discord", label: "Discord", description: "登录限制" },
@@ -3918,10 +3919,93 @@ function SettingsView({ models, channels }: { models: ModelItem[]; channels: Cha
           <Setting label="当前默认模型" value={defaultModel} />
           <Setting label="已配置渠道" value={`${channels.length} 个，${activeChannels} 个启用`} />
           <Setting label="可选供应商" value={`${providerOptions.length} 种`} />
-	          <Setting label="运行版本" value={`${buildHealth?.version || "未知"} · ${buildHealth?.commit || "未知"}`} />
-	          <Setting label="构建时间" value={buildHealth?.buildTime ? formatDate(buildHealth.buildTime) : "本地构建"} />
-	          <Setting label="账号自动检测" value="每 15 分钟自动检测一次" />
+          <Setting label="运行版本" value={`${buildHealth?.version || "未知"} · ${buildHealth?.commit || "未知"}`} />
+          <Setting label="构建时间" value={buildHealth?.buildTime ? formatDate(buildHealth.buildTime) : "本地构建"} />
+          <Setting label="账号自动检测" value="每 15 分钟自动检测一次" />
         </div>
+      </Panel>
+      )}
+
+      {settingsTab === "cli" && (
+      <Panel title="CLI 工具接入">
+        <p className="cli-intro">CatieAPI 兼容 OpenAI 和 Anthropic 协议，常见 AI 命令行工具可直接接入。</p>
+        <div className="cli-credentials">
+          <div className="cli-credential">
+            <span>Base URL</span>
+            <code>{currentOrigin()}</code>
+            <button type="button" className="copy-button" aria-label="复制" onClick={() => { copyText(currentOrigin()); setMessage("已复制 Base URL"); }}>
+              <Icon name="copy" />
+            </button>
+          </div>
+          <div className="cli-credential">
+            <span>API Key</span>
+            <code>cat_你的_api_key</code>
+          </div>
+        </div>
+        <div className="cli-tools">
+          <details className="cli-tool" open>
+            <summary>
+              <strong>Claude Code</strong>
+              <span>Anthropic Messages 协议</span>
+            </summary>
+            <pre>{`export ANTHROPIC_BASE_URL="${currentOrigin()}"
+export ANTHROPIC_AUTH_TOKEN="cat_你的_api_key"
+export ANTHROPIC_MODEL="${defaultModel}"
+claude`}</pre>
+          </details>
+          <details className="cli-tool">
+            <summary>
+              <strong>Codex CLI</strong>
+              <span>OpenAI Chat 协议</span>
+            </summary>
+            <p>编辑 <code>~/.codex/config.toml</code>：</p>
+            <pre>{`model = "${defaultModel}"
+model_provider = "catieapi"
+
+[model_providers.catieapi]
+name = "CatieAPI"
+base_url = "${currentOrigin()}/v1"
+env_key = "CATIEAPI_KEY"
+wire_api = "chat"`}</pre>
+            <p>然后设置环境变量并运行：</p>
+            <pre>{`export CATIEAPI_KEY="cat_你的_api_key"
+codex`}</pre>
+          </details>
+          <details className="cli-tool">
+            <summary>
+              <strong>Aider</strong>
+              <span>OpenAI 兼容</span>
+            </summary>
+            <pre>{`export OPENAI_API_BASE="${currentOrigin()}"
+export OPENAI_API_KEY="cat_你的_api_key"
+aider --model openai/${defaultModel}`}</pre>
+          </details>
+          <details className="cli-tool">
+            <summary>
+              <strong>Cline / Roo Code / Kilo Code</strong>
+              <span>VS Code 插件</span>
+            </summary>
+            <p>在插件设置中选择 <strong>OpenAI Compatible</strong>：</p>
+            <pre>{`Base URL: ${currentOrigin()}/v1
+API Key: cat_你的_api_key
+Model ID: ${defaultModel}`}</pre>
+          </details>
+          <details className="cli-tool">
+            <summary>
+              <strong>通用 OpenAI SDK</strong>
+              <span>Python / Node.js</span>
+            </summary>
+            <pre>{`export OPENAI_BASE_URL="${currentOrigin()}"
+export OPENAI_API_KEY="cat_你的_api_key"`}</pre>
+            <pre>{`from openai import OpenAI
+client = OpenAI()
+response = client.chat.completions.create(
+    model="${defaultModel}",
+    messages=[{"role": "user", "content": "hello"}]
+)`}</pre>
+          </details>
+        </div>
+        {message && <p className="cli-message" role="status">{message}</p>}
       </Panel>
       )}
 

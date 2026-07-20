@@ -133,12 +133,25 @@ button {
   display: flex;
   gap: 7px;
   padding: 4px 10px 18px;
+  cursor: default;
 }
 
 .ios-window-dots span {
   width: 12px;
   height: 12px;
   border-radius: 50%;
+  opacity: 0.85;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+/* Behave like a real macOS title bar: the dots brighten together on hover and
+   each one nudges up slightly. */
+.ios-window-dots:hover span {
+  opacity: 1;
+}
+
+.ios-window-dots span:hover {
+  transform: scale(1.18);
 }
 
 .ios-window-dots span:nth-child(1) {
@@ -166,15 +179,15 @@ button {
   width: 42px;
   height: 42px;
   color: #fff;
-  background: linear-gradient(135deg, #2a9bff, #0071e3);
+  background: #1d1d1f;
   border-radius: 13px;
   font-weight: 800;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 4px 12px color-mix(in srgb, var(--blue) 28%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 
 .app-shell[data-theme="dark"] .brand-mark {
   color: #fff;
-  background: linear-gradient(135deg, #2a9bff, #0060c8);
+  background: rgba(118, 118, 128, 0.2);
   border: 0;
 }
 
@@ -708,26 +721,31 @@ h3 {
 }
 
 .panel {
-  padding: 16px;
-  border-radius: 24px;
+  padding: 20px;
+  border-radius: 20px;
   min-width: 0;
 }
 
 .app-shell[data-theme="dark"] .panel {
-  border-radius: 22px;
+  border-radius: 18px;
 }
 
 .panel-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
   padding: 0 2px;
 }
 
+.panel-title h2 {
+  font-size: 17px;
+  font-weight: 700;
+}
+
 .app-shell[data-theme="dark"] .panel-title {
-  padding-bottom: 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .list-row,
@@ -2357,8 +2375,13 @@ button.table-row:hover {
   overflow: hidden;
   background: var(--surface-solid);
   border: 1px solid var(--hairline);
-  border-radius: 18px;
-  padding: 0 14px;
+  border-radius: 16px;
+  padding: 4px 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.app-shell[data-theme="dark"] .settings-group {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 
 .registration-mode-control {
@@ -2390,39 +2413,46 @@ button.table-row:hover {
 
 .settings-layout {
   display: grid;
-  gap: 18px;
+  gap: 20px;
 }
 
 .settings-tabs {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
-  width: 100%;
+  width: fit-content;
   max-width: 100%;
-  padding: 4px;
+  padding: 5px;
   overflow-x: auto;
   background: var(--group);
   border: 1px solid var(--hairline);
-  border-radius: 18px;
+  border-radius: 16px;
 }
 
 .settings-tabs button {
-  display: grid;
-  gap: 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
-  min-height: 52px;
-  padding: 8px 12px;
+  min-height: 40px;
+  padding: 0 14px;
   color: var(--muted);
   text-align: left;
   background: transparent;
-  border-radius: 14px;
+  border-radius: 11px;
   cursor: pointer;
+  transition: color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+
+.settings-tabs button:hover:not(.selected) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface-solid) 50%, transparent);
 }
 
 .settings-tabs button.selected {
   color: var(--text);
   background: var(--surface-solid);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06);
 }
 
 .settings-tabs strong,
@@ -2434,12 +2464,12 @@ button.table-row:hover {
 }
 
 .settings-tabs strong {
-  font-weight: 850;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .settings-tabs small {
-  color: var(--muted);
-  font-size: 11px;
+  display: none;
 }
 
 .settings-tab-note {
@@ -2863,15 +2893,24 @@ button.table-row:hover {
 }
 
 .setting {
-  min-height: 50px;
+  min-height: 52px;
 }
 
 .setting span {
   color: var(--muted);
+  font-size: 14px;
+}
+
+.setting-value {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .setting-value strong {
   color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .setting > span small {
@@ -3189,11 +3228,16 @@ button.table-row:hover {
   height: 46px;
   padding: 0 12px;
   color: var(--text);
-  color-scheme: dark;
-  background: var(--group);
+  background: var(--surface-solid);
   border: 1px solid var(--hairline);
   border-radius: 14px;
   outline: none;
+}
+
+[data-theme="dark"] .auth-form input,
+[data-theme="dark"] .auth-form select {
+  color-scheme: dark;
+  background: var(--group);
 }
 
 .auth-form input:focus,
@@ -5065,4 +5109,183 @@ button.table-row:hover,
 /* Metric tiles react gently on hover to feel alive without motion noise. */
 .metric:hover {
   border-color: var(--hairline-strong);
+}
+
+/* CLI integration panel — compact terminal-style snippets for easy copy. */
+.cli-intro {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.cli-credentials {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.cli-credential {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 10px 14px;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+}
+
+.cli-credential span {
+  min-width: 72px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.cli-credential code {
+  flex: 1;
+  overflow: hidden;
+  padding: 0;
+  color: var(--text);
+  background: transparent;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cli-credential .copy-button {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  color: var(--muted);
+  background: var(--surface-solid);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease;
+}
+
+.cli-credential .copy-button:hover {
+  color: var(--text);
+  border-color: var(--hairline-strong);
+}
+
+.cli-credential .copy-button .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.cli-tools {
+  display: grid;
+  gap: 10px;
+}
+
+.cli-tool {
+  overflow: hidden;
+  background: var(--group);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  transition: border-color 160ms ease;
+}
+
+.cli-tool[open] {
+  border-color: var(--hairline-strong);
+}
+
+.cli-tool summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 12px 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.cli-tool summary::-webkit-details-marker {
+  display: none;
+}
+
+.cli-tool summary::before {
+  content: "";
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 160ms ease;
+}
+
+.cli-tool[open] summary::before {
+  transform: rotate(45deg);
+}
+
+.cli-tool summary strong {
+  flex: 1;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.cli-tool summary span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cli-tool > p,
+.cli-tool > pre {
+  margin: 0 16px 14px;
+}
+
+.cli-tool > p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.cli-tool > p code {
+  padding: 2px 6px;
+  color: var(--text);
+  background: var(--surface-solid);
+  border-radius: 5px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
+.cli-tool > pre {
+  overflow-x: auto;
+  padding: 14px 16px;
+  color: #8fd5ff;
+  background: #0d1117;
+  border-radius: 10px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.app-shell[data-theme="dark"] .cli-tool > pre {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.cli-tool > pre + pre {
+  margin-top: -4px;
+}
+
+.cli-message {
+  margin: 16px 0 0;
+  padding: 10px 14px;
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
 }
