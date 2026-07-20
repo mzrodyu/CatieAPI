@@ -5289,3 +5289,306 @@ button.table-row:hover,
   font-size: 13px;
   font-weight: 600;
 }
+
+/* ============================================================================
+   MOTION SYSTEM — Subtle micro-interactions for a lively, polished feel.
+   All animations respect prefers-reduced-motion.
+   ============================================================================ */
+
+/* Keyframes */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-down {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes pop {
+  0% { transform: scale(1); }
+  50% { transform: scale(0.95); }
+  100% { transform: scale(1); }
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(16px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Page content entrance */
+.content {
+  animation: fade-in 0.25s ease-out;
+}
+
+/* Panel entrance — each panel slides up */
+.panel,
+.settings-group,
+.flow-panel,
+.hero-strip {
+  animation: slide-up 0.3s ease-out backwards;
+}
+
+/* Staggered entrance for panels */
+.panel:nth-child(1), .settings-group:nth-child(1) { animation-delay: 0ms; }
+.panel:nth-child(2), .settings-group:nth-child(2) { animation-delay: 50ms; }
+.panel:nth-child(3), .settings-group:nth-child(3) { animation-delay: 100ms; }
+.panel:nth-child(4), .settings-group:nth-child(4) { animation-delay: 150ms; }
+
+/* Cards entrance — staggered */
+.metric,
+.channel-card,
+.model-card,
+.cli-tool,
+.cli-credential {
+  animation: slide-up 0.28s ease-out backwards;
+}
+
+.metric:nth-child(1), .channel-card:nth-child(1), .model-card:nth-child(1) { animation-delay: 0ms; }
+.metric:nth-child(2), .channel-card:nth-child(2), .model-card:nth-child(2) { animation-delay: 40ms; }
+.metric:nth-child(3), .channel-card:nth-child(3), .model-card:nth-child(3) { animation-delay: 80ms; }
+.metric:nth-child(4), .channel-card:nth-child(4), .model-card:nth-child(4) { animation-delay: 120ms; }
+.metric:nth-child(5), .channel-card:nth-child(5), .model-card:nth-child(5) { animation-delay: 160ms; }
+.metric:nth-child(6), .channel-card:nth-child(6), .model-card:nth-child(6) { animation-delay: 200ms; }
+
+/* Table rows entrance */
+.table-row,
+.list-row {
+  animation: fade-in 0.2s ease-out backwards;
+}
+
+/* Button interactions */
+.primary-button,
+.secondary-button,
+.danger-button {
+  transition: transform 120ms ease, box-shadow 120ms ease, background 140ms ease, border-color 140ms ease;
+}
+
+.primary-button:hover,
+.secondary-button:hover,
+.danger-button:hover {
+  transform: translateY(-1px);
+}
+
+.primary-button:active,
+.secondary-button:active,
+.danger-button:active {
+  transform: translateY(0) scale(0.98);
+}
+
+/* iOS switch bounce */
+.ios-switch {
+  transition: background 180ms ease;
+}
+
+.ios-switch span {
+  transition: transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Card hover lift */
+.metric:hover,
+.channel-card:hover,
+.model-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+}
+
+.app-shell[data-theme="dark"] .metric:hover,
+.app-shell[data-theme="dark"] .channel-card:hover,
+.app-shell[data-theme="dark"] .model-card:hover {
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+}
+
+.metric,
+.channel-card,
+.model-card {
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 160ms ease;
+}
+
+/* Nav item hover */
+.nav-item {
+  transition: background 140ms ease, color 140ms ease, transform 100ms ease;
+}
+
+.nav-item:hover {
+  transform: translateX(2px);
+}
+
+.nav-item:active {
+  transform: translateX(0) scale(0.98);
+}
+
+/* Settings tab bounce */
+.settings-tabs button {
+  transition: transform 120ms ease, color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+
+.settings-tabs button:active {
+  transform: scale(0.97);
+}
+
+/* Toast animation */
+.toast {
+  animation: toast-in 0.28s cubic-bezier(0.34, 1.25, 0.64, 1);
+}
+
+/* Dialog entrance */
+.secret-dialog-backdrop {
+  animation: fade-in 0.2s ease-out;
+}
+
+.secret-dialog {
+  animation: scale-in 0.25s cubic-bezier(0.34, 1.25, 0.64, 1);
+}
+
+/* Copy button feedback */
+.copy-button,
+.cli-credential .copy-button {
+  transition: transform 100ms ease, color 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.copy-button:active,
+.cli-credential .copy-button:active {
+  transform: scale(0.9);
+}
+
+/* Dropdown menus */
+.channel-choice-menu > div,
+.provider-picker-menu > div,
+.model-row-menu {
+  animation: slide-down 0.18s ease-out;
+}
+
+/* Badge pulse for status indicators */
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.pulse-dot {
+  animation: pulse-subtle 2s ease-in-out infinite;
+}
+
+/* CLI tool accordion */
+.cli-tool summary {
+  transition: background 140ms ease;
+}
+
+.cli-tool summary:hover {
+  background: color-mix(in srgb, var(--surface-solid) 50%, transparent);
+}
+
+.cli-tool summary::before {
+  transition: transform 200ms cubic-bezier(0.34, 1.25, 0.64, 1);
+}
+
+/* Icon hover in buttons */
+.icon {
+  transition: transform 140ms ease;
+}
+
+button:hover .icon {
+  transform: scale(1.08);
+}
+
+button:active .icon {
+  transform: scale(0.95);
+}
+
+/* Segmented control */
+.segmented-control button {
+  transition: color 140ms ease, background 140ms ease, box-shadow 140ms ease, transform 100ms ease;
+}
+
+.segmented-control button:active {
+  transform: scale(0.96);
+}
+
+/* Theme toggle */
+.theme-toggle {
+  transition: transform 120ms ease, background 140ms ease, border-color 140ms ease;
+}
+
+.theme-toggle:hover {
+  transform: scale(1.03);
+}
+
+.theme-toggle:active {
+  transform: scale(0.97);
+}
+
+/* Input focus */
+input, select, textarea {
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+/* Auth form entrance */
+.auth-form {
+  animation: scale-in 0.3s cubic-bezier(0.34, 1.15, 0.64, 1);
+}
+
+/* Account page sections */
+.account-section {
+  animation: slide-up 0.3s ease-out backwards;
+}
+
+.account-section:nth-child(1) { animation-delay: 0ms; }
+.account-section:nth-child(2) { animation-delay: 80ms; }
+.account-section:nth-child(3) { animation-delay: 160ms; }
+
+/* Home hero entrance */
+.home-hero {
+  animation: fade-in 0.4s ease-out;
+}
+
+.home-copy {
+  animation: slide-up 0.4s ease-out 0.1s backwards;
+}
+
+/* Sidebar brand subtle hover */
+.brand {
+  transition: transform 140ms ease;
+}
+
+.brand:hover {
+  transform: scale(1.02);
+}
+
+/* Quick action buttons */
+.quick-action {
+  transition: transform 140ms ease, background 140ms ease, border-color 140ms ease;
+}
+
+.quick-action:hover {
+  transform: translateY(-2px);
+}
+
+.quick-action:active {
+  transform: translateY(0) scale(0.98);
+}
+
+/* Respect reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .pulse-dot {
+    animation: none;
+  }
+}
