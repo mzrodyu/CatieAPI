@@ -5663,15 +5663,266 @@ input, select, textarea {
 
 /* Quick action buttons */
 .quick-action {
-  transition: transform 140ms ease, background 140ms ease, border-color 140ms ease;
+  transition: transform 140ms ease, background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
 }
 
 .quick-action:hover {
   transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
 }
 
 .quick-action:active {
   transform: translateY(0) scale(0.98);
+}
+
+/* Table rows */
+.table-row {
+  transition: background 120ms ease, box-shadow 120ms ease, transform 100ms ease;
+}
+
+button.table-row:active {
+  transform: scale(0.995);
+}
+
+/* Badge status dot animation */
+.badge::before {
+  transition: transform 200ms ease, opacity 200ms ease;
+}
+
+.badge:hover::before {
+  transform: scale(1.3);
+}
+
+/* Search input */
+.model-list-toolbar input,
+.user-filter-row input,
+.search-input {
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.model-list-toolbar input:focus,
+.user-filter-row input:focus,
+.search-input:focus {
+  background: var(--surface-solid);
+}
+
+/* Pager buttons */
+.pager button {
+  transition: transform 100ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.pager button:hover:not(:disabled) {
+  transform: scale(1.05);
+}
+
+.pager button:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+/* Details/summary accordion */
+details summary {
+  transition: background 140ms ease, color 140ms ease;
+}
+
+details[open] > summary {
+  color: var(--text);
+}
+
+/* List rows */
+.list-row {
+  transition: background 120ms ease, transform 100ms ease;
+}
+
+.list-row:hover {
+  background: color-mix(in srgb, var(--group) 50%, transparent);
+}
+
+/* Channel/model cards entrance */
+.channel-card,
+.model-card {
+  animation: slide-up 0.25s ease-out backwards;
+}
+
+.channel-card:nth-child(1), .model-card:nth-child(1) { animation-delay: 0ms; }
+.channel-card:nth-child(2), .model-card:nth-child(2) { animation-delay: 30ms; }
+.channel-card:nth-child(3), .model-card:nth-child(3) { animation-delay: 60ms; }
+.channel-card:nth-child(4), .model-card:nth-child(4) { animation-delay: 90ms; }
+.channel-card:nth-child(5), .model-card:nth-child(5) { animation-delay: 120ms; }
+.channel-card:nth-child(6), .model-card:nth-child(6) { animation-delay: 150ms; }
+.channel-card:nth-child(7), .model-card:nth-child(7) { animation-delay: 180ms; }
+.channel-card:nth-child(8), .model-card:nth-child(8) { animation-delay: 210ms; }
+
+/* User row selection */
+.users-layout .table-row.selected {
+  animation: pop 0.2s ease-out;
+}
+
+/* Filter buttons */
+.user-filter-row button,
+.model-filter-actions button,
+.log-status-filter button,
+.model-provider-filter button {
+  transition: transform 100ms ease, color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+
+.user-filter-row button:active,
+.model-filter-actions button:active,
+.log-status-filter button:active,
+.model-provider-filter button:active {
+  transform: scale(0.96);
+}
+
+/* Bulk action bar */
+.bulk-action-bar {
+  animation: slide-up 0.2s ease-out;
+}
+
+/* Secret dialog code */
+.secret-dialog code {
+  animation: fade-in 0.3s ease-out 0.15s backwards;
+}
+
+/* Gateway terminal entrance */
+.gateway-terminal {
+  animation: scale-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.2s backwards;
+}
+
+/* Home kicker badge */
+.home-kicker {
+  animation: slide-up 0.35s ease-out backwards;
+}
+
+/* Home CTA buttons */
+.home-cta {
+  animation: slide-up 0.4s ease-out 0.15s backwards;
+}
+
+/* Integration row pills staggered */
+.integration-row > div span {
+  animation: slide-up 0.3s ease-out backwards;
+}
+
+.integration-row > div span:nth-child(1) { animation-delay: 0.25s; }
+.integration-row > div span:nth-child(2) { animation-delay: 0.3s; }
+.integration-row > div span:nth-child(3) { animation-delay: 0.35s; }
+
+/* Topbar entrance */
+.topbar {
+  animation: slide-down 0.3s ease-out;
+}
+
+/* Sidebar nav items stagger */
+.nav-item {
+  animation: fade-in 0.25s ease-out backwards;
+}
+
+nav .nav-item:nth-child(1) { animation-delay: 0ms; }
+nav .nav-item:nth-child(2) { animation-delay: 30ms; }
+nav .nav-item:nth-child(3) { animation-delay: 60ms; }
+nav .nav-item:nth-child(4) { animation-delay: 90ms; }
+nav .nav-item:nth-child(5) { animation-delay: 120ms; }
+nav .nav-item:nth-child(6) { animation-delay: 150ms; }
+nav .nav-item:nth-child(7) { animation-delay: 180ms; }
+nav .nav-item:nth-child(8) { animation-delay: 210ms; }
+
+/* Sidebar footer */
+.sidebar-footer {
+  animation: fade-in 0.4s ease-out 0.2s backwards;
+}
+
+/* Form field focus glow */
+input:focus,
+select:focus,
+textarea:focus {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 15%, transparent);
+}
+
+/* Provider icons */
+.provider-icon {
+  transition: transform 150ms ease;
+}
+
+.channel-card:hover .provider-icon,
+.model-card:hover .provider-icon {
+  transform: scale(1.1);
+}
+
+/* Checkbox/radio custom styles */
+input[type="checkbox"],
+input[type="radio"] {
+  transition: transform 100ms ease, box-shadow 100ms ease;
+}
+
+input[type="checkbox"]:active,
+input[type="radio"]:active {
+  transform: scale(0.9);
+}
+
+/* Log entry expand */
+.log-inspector {
+  animation: slide-up 0.25s ease-out;
+}
+
+/* Model hero section */
+.model-hero {
+  animation: slide-up 0.35s ease-out backwards;
+}
+
+/* Flow panel steps */
+.flow-step {
+  animation: slide-up 0.3s ease-out backwards;
+}
+
+.flow-step:nth-child(1) { animation-delay: 0ms; }
+.flow-step:nth-child(2) { animation-delay: 60ms; }
+.flow-step:nth-child(3) { animation-delay: 120ms; }
+.flow-step:nth-child(4) { animation-delay: 180ms; }
+
+/* Hero strip */
+.hero-strip {
+  animation: fade-in 0.35s ease-out backwards;
+}
+
+/* Empty state */
+.empty {
+  animation: fade-in 0.3s ease-out;
+}
+
+/* Account model cards */
+.account-model-grid article {
+  animation: slide-up 0.25s ease-out backwards;
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+
+.account-model-grid article:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+.account-model-grid article:nth-child(1) { animation-delay: 0ms; }
+.account-model-grid article:nth-child(2) { animation-delay: 25ms; }
+.account-model-grid article:nth-child(3) { animation-delay: 50ms; }
+.account-model-grid article:nth-child(4) { animation-delay: 75ms; }
+.account-model-grid article:nth-child(5) { animation-delay: 100ms; }
+.account-model-grid article:nth-child(6) { animation-delay: 125ms; }
+
+/* Account key list */
+.account-key-list > div {
+  animation: slide-up 0.25s ease-out backwards;
+}
+
+.account-key-list > div:nth-child(1) { animation-delay: 0ms; }
+.account-key-list > div:nth-child(2) { animation-delay: 40ms; }
+.account-key-list > div:nth-child(3) { animation-delay: 80ms; }
+
+/* One-time secret reveal */
+.one-time-secret {
+  animation: scale-in 0.3s cubic-bezier(0.34, 1.25, 0.64, 1);
+}
+
+/* Account balance */
+.account-balance {
+  animation: fade-in 0.4s ease-out 0.1s backwards;
 }
 
 /* Respect reduced motion preference */
